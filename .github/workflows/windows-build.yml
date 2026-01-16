@@ -1,31 +1,23 @@
 name: Build Flutter Windows EXE
-
 on:
   push:
     branches: [ "main" ]
-
 jobs:
   build-windows:
     runs-on: windows-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Flutter
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.13.6' # version stable compatible Windows sur Actions
-
+          flutter-version: "3.13.10"
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
-
       - name: Get dependencies
         run: flutter pub get
-
       - name: Build Windows Release
         run: flutter build windows --release
-
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
