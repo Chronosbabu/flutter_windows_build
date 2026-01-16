@@ -9,13 +9,13 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Flutter
-        uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: actions/setup-flutter@v2
         with:
-          flutter-version: '3.13.10'
+          flutter-version: "3.13.10"
 
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
