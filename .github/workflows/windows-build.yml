@@ -12,10 +12,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Flutter
-        uses: actions/setup-flutter@v2
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.13.10"
+          flutter-version: '3.13.6' # version stable compatible Windows sur Actions
 
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
