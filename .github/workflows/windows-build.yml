@@ -1,36 +1,36 @@
-name: Build Flutter Windows EXE
+name: Flutter Windows Build
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Set up Flutter (Dart >= 3.10)
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.3'
+          flutter-version: '3.38.4'
 
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
 
-      - name: Flutter doctor
-        run: flutter doctor -v
-
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Build Windows Release
+      - name: Build Windows release
         run: flutter build windows --release
 
-      - name: Upload Windows build
-        uses: actions/upload-artifact@v4
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: windowsExe
-          path: build/windows/runner/Release
+          name: windows-exe
+          path: build/windows/runner/Release/
+
