@@ -29,7 +29,7 @@ jobs:
         run: flutter build windows --release
 
       - name: Show build directory (DEBUG)
-        run: dir build\windows /s
+        run: Get-ChildItem build/windows -Recurse
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
