@@ -28,9 +28,12 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
+      - name: Show build directory (DEBUG)
+        run: dir build\windows /s
+
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: build/windows/runner/Release/**
+          path: build/windows/**
 
