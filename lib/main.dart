@@ -1,347 +1,525 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:encrypt/encrypt.dart' as encrypt;
-import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 
-void main() {
+// Modèle de transaction
+class TransactionModel {
+  final int? id;
+  final double amount;
+  final String type; // 'income' or 'expense'
+  final String description;
+  final DateTime date;
+  final String currency; // 'USD' or 'CDF'
+
+  TransactionModel({
+    this.id,
+    required this.amount,
+    required this.type,
+    required this.description,
+    required this.date,
+    required this.currency,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'amount': amount,
+      'type': type,
+      'description': description,
+      'date': date.toIso8601String(),
+      'currency': currency,
+    };
+  }
+
+  static TransactionModel fromMap(Map<String, dynamic> map) {
+    return TransactionModel(
+      id: map['id'],
+      amount: map['amount'],
+      type: map['type'],
+      description: map['description'],
+      date: DateTime.parse(map['date']),
+      currency: map['currency'] ?? 'CDF', // Default to CDF if null (for old data)
+    );
+  }
+}
+
+// Provider pour la gestion d'état des thèmes et paramètres
+class ThemeProvider extends ChangeNotifier {
+  ThemeMode _themeMode = ThemeMode.light;
+  bool _abbreviateBalance = true;
+
+  ThemeMode get themeMode => _themeMode;
+  bool get abbreviateBalance => _abbreviateBalance;
+
+  Future<void> init() async {
+    final prefs = await SharedPreferences.getInstance();
+    _abbreviateBalance = prefs.getBool('abbreviate_balance') ?? true;
+    String? theme = prefs.getString('theme_mode');
+    _themeMode = (theme == 'dark') ? ThemeMode.dark : ThemeMode.light;
+    notifyListeners();
+  }
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    _themeMode = mode;
+    final prefs = await SharedPreferences.getInstance();
+    prefs.setString('theme_mode', mode == ThemeMode.dark ? 'dark' : 'light');
+    notifyListeners();
+  }
+
+  Future<void> setAbbreviateBalance(bool value) async {
+    _abbreviateBalance = value;
+    final prefs = await SharedPreferences.getInstance();
+    prefs.setBool('abbreviate_balance', value);
+    notifyListeners();
+  }
+}
+
+// Provider pour la gestion de caisse
+class CashProvider extends ChangeNotifier {
+  double _balanceUSD = 0.0;
+  double _balanceCDF = 0.0;
+  List<TransactionModel> _transactions = [];
+  Database? _database;
+
+  double get balanceUSD => _balanceUSD;
+  double get balanceCDF => _balanceCDF;
+  List<TransactionModel> get transactions => _transactions;
+
+  Future<void> initDatabase() async {
+    String path = join(await getDatabasesPath(), 'cash_app.db');
+    _database = await openDatabase(
+      path,
+      version: 2,
+      onCreate: (db, version) {
+        return db.execute(
+          'CREATE TABLE transactions(id INTEGER PRIMARY KEY, amount REAL, type TEXT, description TEXT, date TEXT, currency TEXT)',
+        );
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('ALTER TABLE transactions ADD COLUMN currency TEXT');
+        }
+      },
+    );
+    await _loadData();
+  }
+
+  Future<void> _loadData() async {
+    final List<Map<String, dynamic>> maps = await _database!.query('transactions', orderBy: 'date DESC');
+    _transactions = List.generate(maps.length, (i) => TransactionModel.fromMap(maps[i]));
+    _balanceUSD = _transactions
+        .where((tx) => tx.currency == 'USD')
+        .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
+        .clamp(0.0, double.infinity);
+    _balanceCDF = _transactions
+        .where((tx) => tx.currency == 'CDF')
+        .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
+        .clamp(0.0, double.infinity);
+    notifyListeners();
+  }
+
+  Future<void> addTransaction(double amount, String type, String description, String currency) async {
+    final tx = TransactionModel(
+      amount: amount,
+      type: type,
+      description: description,
+      date: DateTime.now(),
+      currency: currency,
+    );
+    await _database!.insert('transactions', tx.toMap());
+    await _loadData();
+  }
+
+  Future<void> deleteTransaction(int id) async {
+    await _database!.delete('transactions', where: 'id = ?', whereArgs: [id]);
+    await _loadData();
+  }
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(
-    ChangeNotifierProvider(
-      create: (context) => AppState(),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(
+          create: (context) {
+            final provider = CashProvider();
+            provider.initDatabase();
+            return provider;
+          },
+        ),
+        ChangeNotifierProvider(
+          create: (context) {
+            final themeProvider = ThemeProvider();
+            themeProvider.init();
+            return themeProvider;
+          },
+        ),
+      ],
       child: const MyApp(),
     ),
   );
 }
 
-class AppState extends ChangeNotifier {
-  bool isDarkMode = false;
-  AppState() {
-    _loadTheme();
-  }
-  Future _loadTheme() async {
-    final prefs = await SharedPreferences.getInstance();
-    isDarkMode = prefs.getBool('isDarkMode') ?? false;
-    notifyListeners();
-  }
-  Future toggleTheme() async {
-    isDarkMode = !isDarkMode;
-    notifyListeners();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('isDarkMode', isDarkMode);
-  }
-}
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
-    final appState = Provider.of<AppState>(context);
-    return MaterialApp(
-      title: 'Gestion des Frais Scolaires',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.indigo,
-          primary: Colors.indigo[700],
-          secondary: Colors.teal,
-          surface: Colors.grey[50],
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        visualDensity: VisualDensity.adaptivePlatformDensity,
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.indigo,
-          foregroundColor: Colors.white,
-          elevation: 0,
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.indigo,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            elevation: 4,
+    return Consumer<ThemeProvider>(
+      builder: (context, themeProvider, child) {
+        return MaterialApp(
+          title: 'Gestion de Caisse',
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.blue,
+              secondary: Colors.green,
+              brightness: Brightness.light,
+            ),
+            scaffoldBackgroundColor: Colors.grey[100],
+            appBarTheme: const AppBarTheme(
+              elevation: 0,
+            ),
+            elevatedButtonTheme: ElevatedButtonThemeData(
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            inputDecorationTheme: InputDecorationTheme(
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              filled: true,
+              fillColor: Colors.white,
+            ),
           ),
-        ),
-        cardTheme: CardThemeData(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          elevation: 2,
-          color: Colors.white,
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-          filled: true,
-          fillColor: Colors.grey[100],
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        ),
-        textTheme: const TextTheme(
-          bodyLarge: TextStyle(fontSize: 16),
-          bodyMedium: TextStyle(fontSize: 14),
-          titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-        ),
-        scaffoldBackgroundColor: Colors.grey[50],
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.indigo,
-          primary: Colors.indigo[700],
-          secondary: Colors.teal,
-          surface: Colors.grey[900],
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-        visualDensity: VisualDensity.adaptivePlatformDensity,
-        appBarTheme: AppBarTheme(
-          backgroundColor: Colors.indigo[900],
-          foregroundColor: Colors.white,
-          elevation: 0,
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.indigo[700],
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            elevation: 4,
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.blue,
+              secondary: Colors.green,
+              brightness: Brightness.dark,
+            ),
+            scaffoldBackgroundColor: Colors.grey[900],
+            appBarTheme: const AppBarTheme(
+              elevation: 0,
+            ),
+            elevatedButtonTheme: ElevatedButtonThemeData(
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            inputDecorationTheme: InputDecorationTheme(
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              filled: true,
+              fillColor: Colors.grey[800],
+            ),
           ),
-        ),
-        cardTheme: CardThemeData(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          elevation: 2,
-          color: Colors.grey[800],
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-          filled: true,
-          fillColor: Colors.grey[800],
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        ),
-        textTheme: const TextTheme(
-          bodyLarge: TextStyle(fontSize: 16),
-          bodyMedium: TextStyle(fontSize: 14),
-          titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-        ),
-        scaffoldBackgroundColor: Colors.grey[900],
-      ),
-      themeMode: appState.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-      home: const HomeScreen(),
+          themeMode: themeProvider.themeMode,
+          home: const HomePage(),
+        );
+      },
     );
   }
 }
 
-class Eleve {
-  String nom;
-  String postNom;
-  String prenom;
-  String classe;
-  Map<String, double> paid = {};
-  Eleve({
-    required this.nom,
-    required this.postNom,
-    required this.prenom,
-    required this.classe,
+// Utility function for formatting balance
+String formatBalance(double value, bool abbreviate) {
+  value = value.clamp(0.0, double.infinity);
+  if (!abbreviate) {
+    return NumberFormat("#,##0.00").format(value);
+  }
+  String suffix = '';
+  double formattedValue = value;
+  if (value >= 1e9) {
+    formattedValue /= 1e9;
+    suffix = 'B';
+  } else if (value >= 1e6) {
+    formattedValue /= 1e6;
+    suffix = 'M';
+  } else if (value >= 1e3) {
+    formattedValue /= 1e3;
+    suffix = 'K';
+  }
+  return '${NumberFormat("#,##0.#").format(formattedValue)}$suffix';
+}
+
+// Widget for displaying a single balance card
+class BalanceCard extends StatelessWidget {
+  final String title;
+  final double balance;
+  final String symbol;
+  final Color color;
+  final Color textColor;
+  final bool abbreviate;
+
+  const BalanceCard({
+    super.key,
+    required this.title,
+    required this.balance,
+    required this.symbol,
+    required this.color,
+    required this.textColor,
+    required this.abbreviate,
   });
-  Map<String, dynamic> toJson() => {
-    'nom': nom,
-    'postNom': postNom,
-    'prenom': prenom,
-    'classe': classe,
-    'paid': paid,
-  };
-  factory Eleve.fromJson(Map<String, dynamic> json) {
-    return Eleve(
-      nom: json['nom'],
-      postNom: json['postNom'],
-      prenom: json['prenom'],
-      classe: json['classe'],
-    )..paid = Map<String, double>.from(json['paid'] ?? {});
-  }
-}
 
-class SchoolYearData {
-  Map<String, double> manualFrais;
-  List<Eleve> eleves;
-  double defaultMonthly;
-  Map<String, double> monthExceptions;
-  SchoolYearData({
-    required this.manualFrais,
-    required this.eleves,
-    required this.defaultMonthly,
-    required this.monthExceptions,
-  });
-  Map<String, dynamic> toJson() => {
-    'manualFrais': manualFrais,
-    'eleves': eleves.map((e) => e.toJson()).toList(),
-    'defaultMonthly': defaultMonthly,
-    'monthExceptions': monthExceptions,
-  };
-  factory SchoolYearData.fromJson(Map<String, dynamic> json) {
-    return SchoolYearData(
-      manualFrais: Map<String, double>.from(json['manualFrais'] ?? {}),
-      eleves: (json['eleves'] as List? ?? []).map((e) => Eleve.fromJson(e)).toList(),
-      defaultMonthly: json['defaultMonthly'] ?? 0.0,
-      monthExceptions: Map<String, double>.from(json['monthExceptions'] ?? {}),
-    );
-  }
-}
-
-class FraisScolaires {
-  SchoolYearData currentData = SchoolYearData(
-    manualFrais: {},
-    eleves: [],
-    defaultMonthly: 0.0,
-    monthExceptions: {},
-  );
-  String currentYear = '2023-2024'; // Default year
-  Map<String, SchoolYearData> history = {};
-  final List<String> months = [
-    'Septembre',
-    'Octobre',
-    'Novembre',
-    'Décembre',
-    'Janvier',
-    'Février',
-    'Mars',
-    'Avril',
-    'Mai',
-    'Juin'
-  ];
-  Future loadData() async {
-    final prefs = await SharedPreferences.getInstance();
-    final encryptedData = prefs.getString('encrypted_data');
-    if (encryptedData != null) {
-      final decrypted = _decrypt(encryptedData);
-      final data = json.decode(decrypted);
-      currentData = SchoolYearData.fromJson(data['currentData'] ?? {});
-      currentYear = data['currentYear'] ?? '2023-2024';
-      history = Map.fromEntries(
-        (data['history'] as Map? ?? {}).entries.map(
-              (entry) => MapEntry(entry.key, SchoolYearData.fromJson(entry.value)),
-        ),
-      );
-    }
-  }
-  Future saveData() async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = {
-      'currentData': currentData.toJson(),
-      'currentYear': currentYear,
-      'history': history.map((key, value) => MapEntry(key, value.toJson())),
-    };
-    final jsonData = json.encode(data);
-    final encrypted = _encrypt(jsonData);
-    await prefs.setString('encrypted_data', encrypted);
-  }
-  void enregistrerFrais(String mois, double montant) {
-    currentData.manualFrais[mois] = (currentData.manualFrais[mois] ?? 0) + montant;
-  }
-  double getRequiredForMonth(String mois) {
-    return currentData.monthExceptions[mois] ?? currentData.defaultMonthly;
-  }
-  double getTotalForMonth(String mois) {
-    double studentTotal = currentData.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
-    return (currentData.manualFrais[mois] ?? 0) + studentTotal;
-  }
-  Map<String, double> calculerRepartitions(String mois) {
-    final total = getTotalForMonth(mois);
-    return {
-      '30%': total * 0.3,
-      '70%': total * 0.7,
-      '7%': total * 0.07,
-    };
-  }
-  void handlePayment(Eleve eleve, String mois, double payment) {
-    int monthIndex = months.indexOf(mois);
-    if (monthIndex == -1) return;
-    String currentMonth = mois;
-    double remaining = payment;
-    while (remaining > 0 && monthIndex < months.length) {
-      double required = getRequiredForMonth(currentMonth);
-      double alreadyPaid = eleve.paid[currentMonth] ?? 0;
-      double needed = required - alreadyPaid;
-      if (needed > 0) {
-        double toAdd = remaining > needed ? needed : remaining;
-        eleve.paid[currentMonth] = alreadyPaid + toAdd;
-        remaining -= toAdd;
-      }
-      monthIndex++;
-      if (monthIndex < months.length) {
-        currentMonth = months[monthIndex];
-      }
-    }
-  }
-  Future resetForNewYear(String newYear) async {
-    history[currentYear] = SchoolYearData(
-      manualFrais: Map.from(currentData.manualFrais),
-      eleves: List.from(currentData.eleves),
-      defaultMonthly: currentData.defaultMonthly,
-      monthExceptions: Map.from(currentData.monthExceptions),
-    );
-    currentData = SchoolYearData(
-      manualFrais: {},
-      eleves: [],
-      defaultMonthly: 0.0,
-      monthExceptions: {},
-    );
-    currentYear = newYear;
-    await saveData();
-  }
-  String _encrypt(String text) {
-    final key = encrypt.Key.fromUtf8('my32lengthsupersecretnooneknows1');
-    final iv = encrypt.IV.fromLength(16);
-    final encrypter = encrypt.Encrypter(encrypt.AES(key));
-    final encrypted = encrypter.encrypt(text, iv: iv);
-    return '${iv.base64}:${encrypted.base64}';
-  }
-  String _decrypt(String encryptedText) {
-    final parts = encryptedText.split(':');
-    final iv = encrypt.IV.fromBase64(parts[0]);
-    final encryptedPart = parts[1];
-    final key = encrypt.Key.fromUtf8('my32lengthsupersecretnooneknows1');
-    final encrypter = encrypt.Encrypter(encrypt.AES(key));
-    return encrypter.decrypt64(encryptedPart, iv: iv);
-  }
-  double getTotalRequired() {
-    return months.fold(0.0, (sum, mois) => sum + getRequiredForMonth(mois));
-  }
-  double getStudentTotalPaid(Eleve eleve) {
-    return eleve.paid.values.fold(0.0, (sum, paid) => sum + paid);
-  }
-  double getStudentPending(Eleve eleve) {
-    return getTotalRequired() - getStudentTotalPaid(eleve);
-  }
-  double getYearTotalCollected() {
-    return months.fold(0.0, (sum, mois) => sum + getTotalForMonth(mois));
-  }
-  double getYearTotalPending() {
-    return currentData.eleves.fold(0.0, (sum, e) => sum + getStudentPending(e));
-  }
-}
-
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-  final FraisScolaires fraisScolaires = FraisScolaires();
-  @override
-  void initState() {
-    super.initState();
-    _loadData();
-  }
-  Future _loadData() async {
-    await fraisScolaires.loadData();
-    setState(() {});
-  }
   @override
   Widget build(BuildContext context) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)],
+        ),
+        child: Column(
+          children: [
+            Text(title, style: TextStyle(color: textColor, fontSize: 16)),
+            const SizedBox(height: 4),
+            Text(
+              '${formatBalance(balance, abbreviate)} $symbol',
+              style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Widget for action buttons (Entrée and Sortie)
+class ActionButtons extends StatelessWidget {
+  final VoidCallback onIncomePressed;
+  final VoidCallback onExpensePressed;
+  final Color incomeColor;
+  final Color expenseColor;
+
+  const ActionButtons({
+    super.key,
+    required this.onIncomePressed,
+    required this.onExpensePressed,
+    required this.incomeColor,
+    required this.expenseColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          ElevatedButton.icon(
+            onPressed: onIncomePressed,
+            icon: const Icon(Icons.add),
+            label: const Text('Entrée'),
+            style: ElevatedButton.styleFrom(backgroundColor: incomeColor),
+          ),
+          ElevatedButton.icon(
+            onPressed: onExpensePressed,
+            icon: const Icon(Icons.remove),
+            label: const Text('Sortie'),
+            style: ElevatedButton.styleFrom(backgroundColor: expenseColor),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// Widget for the transaction list
+class TransactionList extends StatelessWidget {
+  final List<TransactionModel> transactions;
+  final Function(TransactionModel) onDelete;
+  final Color incomeColor;
+  final Color expenseColor;
+  final Color deleteColor;
+
+  const TransactionList({
+    super.key,
+    required this.transactions,
+    required this.onDelete,
+    required this.incomeColor,
+    required this.expenseColor,
+    required this.deleteColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: ListView.builder(
+        itemCount: transactions.length,
+        itemBuilder: (context, index) {
+          final tx = transactions[index];
+          String currencySymbol = tx.currency == 'USD' ? '\$' : 'FC';
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: ListTile(
+              leading: Icon(
+                tx.type == 'income' ? Icons.arrow_downward : Icons.arrow_upward,
+                color: tx.type == 'income' ? incomeColor : expenseColor,
+              ),
+              title: Text('${tx.amount.toStringAsFixed(2)} $currencySymbol - ${tx.description}'),
+              subtitle: Text('${DateFormat('dd/MM/yyyy HH:mm').format(tx.date)} - ${tx.currency}'),
+              trailing: IconButton(
+                icon: Icon(Icons.delete, color: deleteColor),
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Confirmation'),
+                      content: const Text('Voulez-vous vraiment supprimer cette transaction ?'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('Annuler'),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            onDelete(tx);
+                            Navigator.pop(ctx);
+                          },
+                          child: const Text('OK'),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// Dialog for adding transactions
+class AddTransactionDialog extends StatefulWidget {
+  final String type;
+  final Function(double, String, String, String) onAdd;
+
+  const AddTransactionDialog({
+    super.key,
+    required this.type,
+    required this.onAdd,
+  });
+
+  @override
+  State<AddTransactionDialog> createState() => _AddTransactionDialogState();
+}
+
+class _AddTransactionDialogState extends State<AddTransactionDialog> {
+  final amountController = TextEditingController();
+  final descController = TextEditingController();
+  String selectedCurrency = 'CDF';
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.type == 'income' ? 'Ajouter Entrée' : 'Ajouter Sortie'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: amountController,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'Montant'),
+          ),
+          TextField(
+            controller: descController,
+            decoration: const InputDecoration(labelText: 'Description'),
+          ),
+          DropdownButton<String>(
+            value: selectedCurrency,
+            items: const [
+              DropdownMenuItem<String>(value: 'USD', child: Text('USD')),
+              DropdownMenuItem<String>(value: 'CDF', child: Text('CDF')),
+            ],
+            onChanged: (String? newValue) {
+              if (newValue != null) {
+                setState(() {
+                  selectedCurrency = newValue;
+                });
+              }
+            },
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Annuler'),
+        ),
+        ElevatedButton(
+          onPressed: () {
+            final amount = double.tryParse(amountController.text) ?? 0.0;
+            if (amount > 0) {
+              final provider = Provider.of<CashProvider>(context, listen: false);
+              bool sufficient = true;
+              if (widget.type == 'expense') {
+                double balance = selectedCurrency == 'USD' ? provider.balanceUSD : provider.balanceCDF;
+                if (amount > balance) {
+                  sufficient = false;
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Erreur'),
+                      content: const Text('Impossible, le solde de votre compte est insuffisant.'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('OK'),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+              }
+              if (sufficient) {
+                widget.onAdd(amount, widget.type, descController.text, selectedCurrency);
+                Navigator.pop(context);
+              }
+            }
+          },
+          child: const Text('Ajouter'),
+        ),
+      ],
+    );
+  }
+}
+
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
+
+  void _showAddDialog(BuildContext context, String type) {
+    final provider = Provider.of<CashProvider>(context, listen: false);
+    showDialog(
+      context: context,
+      builder: (context) => AddTransactionDialog(
+        type: type,
+        onAdd: provider.addTransaction,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cashProvider = Provider.of<CashProvider>(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
+    final theme = Theme.of(context);
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('Gestion des Frais Scolaires - ${fraisScolaires.currentYear}'),
+        title: const Text('Gestion de Caisse', style: TextStyle(fontWeight: FontWeight.bold)),
         centerTitle: true,
         actions: [
           IconButton(
@@ -349,953 +527,99 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                  builder: (context) => SettingsScreen(fraisScolaires: fraisScolaires),
-                ),
-              ).then((_) => setState(() {}));
+                MaterialPageRoute(builder: (context) => const SettingsPage()),
+              );
             },
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Tableau de Bord', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 10),
-                      Text('Total Élèves: ${fraisScolaires.currentData.eleves.length}'),
-                      Text('Total Collecté: ${fraisScolaires.getYearTotalCollected().toStringAsFixed(2)}'),
-                      Text('Total En Attente: ${fraisScolaires.getYearTotalPending().toStringAsFixed(2)}'),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            SizedBox(
-              height: 200,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                children: [
-                  _buildActionCard(
-                    icon: Icons.person_add,
-                    label: 'Enregistrer un élève',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => EnregistrerEleveScreen(fraisScolaires: fraisScolaires),
-                        ),
-                      ).then((_) => setState(() {}));
-                    },
-                  ),
-                  _buildActionCard(
-                    icon: Icons.payment,
-                    label: 'Paiement élève',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => PaiementEleveScreen(fraisScolaires: fraisScolaires),
-                        ),
-                      ).then((_) => setState(() {}));
-                    },
-                  ),
-                  _buildActionCard(
-                    icon: Icons.add_circle_outline,
-                    label: 'Frais manuel',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => EnregistrerScreen(fraisScolaires: fraisScolaires),
-                        ),
-                      ).then((_) => setState(() {}));
-                    },
-                  ),
-                  _buildActionCard(
-                    icon: Icons.bar_chart,
-                    label: 'Répartitions',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => AfficherScreen(fraisScolaires: fraisScolaires),
-                        ),
-                      );
-                    },
-                  ),
-                  _buildActionCard(
-                    icon: Icons.history,
-                    label: 'Historique',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => HistoryScreen(fraisScolaires: fraisScolaires),
-                        ),
-                      );
-                    },
-                  ),
-                  _buildActionCard(
-                    icon: Icons.exit_to_app,
-                    label: 'Quitter',
-                    onTap: () => SystemNavigator.pop(),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-  Widget _buildActionCard({required IconData icon, required String label, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 150,
-        margin: const EdgeInsets.symmetric(horizontal: 8.0),
-        child: Card(
-          elevation: 4,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 50, color: Theme.of(context).colorScheme.primary),
-              const SizedBox(height: 10),
-              Text(label, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class EnregistrerEleveScreen extends StatefulWidget {
-  final FraisScolaires fraisScolaires;
-  final Eleve? eleveToEdit;
-  final int? editIndex;
-  const EnregistrerEleveScreen({
-    super.key,
-    required this.fraisScolaires,
-    this.eleveToEdit,
-    this.editIndex,
-  });
-  @override
-  State<EnregistrerEleveScreen> createState() => _EnregistrerEleveScreenState();
-}
-
-class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
-  late TextEditingController nomController;
-  late TextEditingController postNomController;
-  late TextEditingController prenomController;
-  late TextEditingController classeController;
-  @override
-  void initState() {
-    super.initState();
-    nomController = TextEditingController(text: widget.eleveToEdit?.nom ?? '');
-    postNomController = TextEditingController(text: widget.eleveToEdit?.postNom ?? '');
-    prenomController = TextEditingController(text: widget.eleveToEdit?.prenom ?? '');
-    classeController = TextEditingController(text: widget.eleveToEdit?.classe ?? '');
-  }
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.eleveToEdit == null ? 'Enregistrer un Élève' : 'Modifier Élève'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            TextField(
-              controller: nomController,
-              decoration: const InputDecoration(labelText: 'Nom'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: postNomController,
-              decoration: const InputDecoration(labelText: 'Post-nom'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: prenomController,
-              decoration: const InputDecoration(labelText: 'Prénom'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: classeController,
-              decoration: const InputDecoration(labelText: 'Classe'),
-            ),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: () async {
-                final nom = nomController.text.trim();
-                final postNom = postNomController.text.trim();
-                final prenom = prenomController.text.trim();
-                final classe = classeController.text.trim();
-                if (nom.isNotEmpty && postNom.isNotEmpty && prenom.isNotEmpty && classe.isNotEmpty) {
-                  if (widget.eleveToEdit == null) {
-                    widget.fraisScolaires.currentData.eleves.add(Eleve(
-                      nom: nom,
-                      postNom: postNom,
-                      prenom: prenom,
-                      classe: classe,
-                    ));
-                  } else if (widget.editIndex != null) {
-                    widget.fraisScolaires.currentData.eleves[widget.editIndex!] = Eleve(
-                      nom: nom,
-                      postNom: postNom,
-                      prenom: prenom,
-                      classe: classe,
-                    )..paid = widget.eleveToEdit!.paid;
-                  }
-                  await widget.fraisScolaires.saveData();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(widget.eleveToEdit == null ? 'Élève enregistré!' : 'Élève modifié!')),
-                  );
-                  Navigator.pop(context);
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Remplir tous les champs')),
-                  );
-                }
-              },
-              child: Text(widget.eleveToEdit == null ? 'Enregistrer' : 'Modifier'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class PaiementEleveScreen extends StatefulWidget {
-  final FraisScolaires fraisScolaires;
-  const PaiementEleveScreen({super.key, required this.fraisScolaires});
-  @override
-  State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
-}
-
-class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
-  final TextEditingController searchController = TextEditingController();
-  List<Eleve> filteredEleves = [];
-  String? selectedClass;
-  List<String> classes = [];
-  @override
-  void initState() {
-    super.initState();
-    filteredEleves = widget.fraisScolaires.currentData.eleves;
-    classes = widget.fraisScolaires.currentData.eleves.map((e) => e.classe).toSet().toList();
-    searchController.addListener(_filterEleves);
-  }
-  void _filterEleves() {
-    final query = searchController.text.toLowerCase();
-    setState(() {
-      filteredEleves = widget.fraisScolaires.currentData.eleves.where((eleve) {
-        final fullName = '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'.toLowerCase();
-        final classMatch = selectedClass == null || eleve.classe == selectedClass;
-        return fullName.contains(query) && classMatch;
-      }).toList()
-        ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
-    });
-  }
-  @override
-  void dispose() {
-    searchController.dispose();
-    super.dispose();
-  }
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gestion des Paiements'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => _showSetMonthlyDialog(context),
-          ),
-          IconButton(
-            icon: const Icon(Icons.warning),
-            tooltip: 'Exceptions',
-            onPressed: () => _showSetExceptionsDialog(context),
           ),
         ],
       ),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                TextField(
-                  controller: searchController,
-                  decoration: const InputDecoration(
-                    labelText: 'Rechercher par nom',
-                    prefixIcon: Icon(Icons.search),
-                  ),
+                BalanceCard(
+                  title: 'Solde USD',
+                  balance: cashProvider.balanceUSD,
+                  symbol: '\$',
+                  color: theme.colorScheme.primary,
+                  textColor: theme.colorScheme.onPrimary,
+                  abbreviate: themeProvider.abbreviateBalance,
                 ),
-                const SizedBox(height: 10),
-                DropdownButton<String>(
-                  hint: const Text('Filtrer par classe'),
-                  value: selectedClass,
-                  onChanged: (value) {
-                    setState(() {
-                      selectedClass = value;
-                      _filterEleves();
-                    });
-                  },
-                  items: classes.map((classe) {
-                    return DropdownMenuItem(value: classe, child: Text(classe));
-                  }).toList(),
+                BalanceCard(
+                  title: 'Solde CDF',
+                  balance: cashProvider.balanceCDF,
+                  symbol: 'FC',
+                  color: theme.colorScheme.secondary,
+                  textColor: theme.colorScheme.onSecondary,
+                  abbreviate: themeProvider.abbreviateBalance,
                 ),
               ],
             ),
           ),
-          Expanded(
-            child: ListView.builder(
-              itemCount: filteredEleves.length,
-              itemBuilder: (context, index) {
-                final eleve = filteredEleves[index];
-                double totalPaid = widget.fraisScolaires.getStudentTotalPaid(eleve);
-                double pending = widget.fraisScolaires.getStudentPending(eleve);
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Expanded(
-                              child: Text(
-                                '${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
-                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.edit),
-                              onPressed: () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (context) => EnregistrerEleveScreen(
-                                      fraisScolaires: widget.fraisScolaires,
-                                      eleveToEdit: eleve,
-                                      editIndex: widget.fraisScolaires.currentData.eleves.indexOf(eleve),
-                                    ),
-                                  ),
-                                ).then((_) => setState(() {}));
-                              },
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete),
-                              onPressed: () => _showDeleteConfirm(context, eleve),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 5),
-                        Text('Payé: $totalPaid | En attente: $pending'),
-                        const SizedBox(height: 10),
-                        SizedBox(
-                          height: 80,
-                          child: ListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: widget.fraisScolaires.months.length,
-                            itemBuilder: (context, monthIndex) {
-                              final mois = widget.fraisScolaires.months[monthIndex];
-                              double required = widget.fraisScolaires.getRequiredForMonth(mois);
-                              double paid = eleve.paid[mois] ?? 0;
-                              bool isFullyPaid = paid >= required;
-                              Color backgroundColor = isFullyPaid
-                                  ? (isDark ? Colors.green[700]! : Colors.green[100]!)
-                                  : (isDark ? Colors.red[700]! : Colors.red[100]!);
-                              Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
-                              return Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                                child: GestureDetector(
-                                  onTap: isFullyPaid ? null : () => _showPaymentDialog(context, eleve, mois),
-                                  child: Container(
-                                    width: 120,
-                                    decoration: BoxDecoration(
-                                      color: backgroundColor,
-                                      border: Border.all(color: borderColor),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        Text(mois, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                                        Text('Requis: ${required.toStringAsFixed(0)}'),
-                                        if (paid > 0) Text('Payé: ${paid.toStringAsFixed(0)}'),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
+          ActionButtons(
+            onIncomePressed: () => _showAddDialog(context, 'income'),
+            onExpensePressed: () => _showAddDialog(context, 'expense'),
+            incomeColor: theme.colorScheme.secondary,
+            expenseColor: theme.colorScheme.error,
           ),
-        ],
-      ),
-    );
-  }
-  void _showDeleteConfirm(BuildContext context, Eleve eleve) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Confirmer Suppression'),
-        content: const Text('Voulez-vous supprimer cet élève?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Annuler'),
+          const SizedBox(height: 16),
+          const Text('Historique des Transactions', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          TransactionList(
+            transactions: cashProvider.transactions,
+            onDelete: (tx) => cashProvider.deleteTransaction(tx.id!),
+            incomeColor: theme.colorScheme.secondary,
+            expenseColor: theme.colorScheme.error,
+            deleteColor: theme.colorScheme.error,
           ),
-          TextButton(
-            onPressed: () async {
-              widget.fraisScolaires.currentData.eleves.remove(eleve);
-              await widget.fraisScolaires.saveData();
-              setState(() {});
-              Navigator.pop(context);
-            },
-            child: const Text('Supprimer'),
-          ),
-        ],
-      ),
-    );
-  }
-  void _showSetMonthlyDialog(BuildContext context) {
-    final controller = TextEditingController(text: widget.fraisScolaires.currentData.defaultMonthly.toString());
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Montant Mensuel Défaut'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(labelText: 'Montant'),
-          keyboardType: TextInputType.number,
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
-          TextButton(
-            onPressed: () async {
-              final montant = double.tryParse(controller.text);
-              if (montant != null) {
-                widget.fraisScolaires.currentData.defaultMonthly = montant;
-                await widget.fraisScolaires.saveData();
-                setState(() {});
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Enregistrer'),
-          ),
-        ],
-      ),
-    );
-  }
-  void _showSetExceptionsDialog(BuildContext context) {
-    String? selectedMonth;
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Exception pour Mois'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            DropdownButton<String>(
-              hint: const Text('Mois'),
-              value: selectedMonth,
-              onChanged: (value) => selectedMonth = value,
-              items: widget.fraisScolaires.months.map((mois) => DropdownMenuItem(value: mois, child: Text(mois))).toList(),
-            ),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(labelText: 'Montant'),
-              keyboardType: TextInputType.number,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
-          TextButton(
-            onPressed: () async {
-              if (selectedMonth != null) {
-                final montant = double.tryParse(controller.text);
-                if (montant != null) {
-                  widget.fraisScolaires.currentData.monthExceptions[selectedMonth!] = montant;
-                  await widget.fraisScolaires.saveData();
-                  setState(() {});
-                  Navigator.pop(context);
-                }
-              }
-            },
-            child: const Text('Enregistrer'),
-          ),
-        ],
-      ),
-    );
-  }
-  void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Payer pour $mois'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(labelText: 'Montant'),
-          keyboardType: TextInputType.number,
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
-          TextButton(
-            onPressed: () async {
-              final montant = double.tryParse(controller.text);
-              if (montant != null && montant > 0) {
-                widget.fraisScolaires.handlePayment(eleve, mois, montant);
-                await widget.fraisScolaires.saveData();
-                setState(() {});
-                Navigator.pop(context);
-                _showReceiptDialog(context, eleve, mois, montant);
-              }
-            },
-            child: const Text('Payer'),
-          ),
-        ],
-      ),
-    );
-  }
-  void _showReceiptDialog(BuildContext context, Eleve eleve, String mois, double montant) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Reçu de Paiement'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Élève: ${eleve.nom} ${eleve.prenom}'),
-            Text('Mois: $mois'),
-            Text('Montant: $montant'),
-            Text('Date: ${DateTime.now().toString()}'),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
         ],
       ),
     );
   }
 }
 
-class EnregistrerScreen extends StatefulWidget {
-  final FraisScolaires fraisScolaires;
-  const EnregistrerScreen({super.key, required this.fraisScolaires});
-  @override
-  State<EnregistrerScreen> createState() => _EnregistrerScreenState();
-}
+class SettingsPage extends StatelessWidget {
+  const SettingsPage({super.key});
 
-class _EnregistrerScreenState extends State<EnregistrerScreen> {
-  String? selectedMois;
-  final TextEditingController montantController = TextEditingController();
   @override
   Widget build(BuildContext context) {
+    final themeProvider = Provider.of<ThemeProvider>(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Frais Manuel')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            DropdownButton<String>(
-              hint: const Text('Sélectionner Mois'),
-              value: selectedMois,
-              onChanged: (value) {
-                setState(() {
-                  selectedMois = value;
-                });
-              },
-              items: widget.fraisScolaires.months.map((mois) {
-                return DropdownMenuItem(value: mois, child: Text(mois));
-              }).toList(),
-            ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: montantController,
-              decoration: const InputDecoration(labelText: 'Montant'),
-              keyboardType: TextInputType.number,
-            ),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: () async {
-                final mois = selectedMois;
-                final montantStr = montantController.text.trim();
-                if (mois != null && montantStr.isNotEmpty) {
-                  final montant = double.tryParse(montantStr);
-                  if (montant != null) {
-                    widget.fraisScolaires.enregistrerFrais(mois, montant);
-                    await widget.fraisScolaires.saveData();
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Frais enregistré!')));
-                    Navigator.pop(context);
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Montant invalide')));
-                  }
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Remplir tous les champs')));
-                }
-              },
-              child: const Text('Enregistrer'),
-            ),
-          ],
-        ),
+      appBar: AppBar(
+        title: const Text('Paramètres'),
       ),
-    );
-  }
-}
-
-class AfficherScreen extends StatefulWidget {
-  final FraisScolaires fraisScolaires;
-  const AfficherScreen({super.key, required this.fraisScolaires});
-  @override
-  State<AfficherScreen> createState() => _AfficherScreenState();
-}
-
-class _AfficherScreenState extends State<AfficherScreen> {
-  Map<String, Map<String, double>> allRepartitions = {};
-  @override
-  void initState() {
-    super.initState();
-    _computeAllRepartitions();
-  }
-  void _computeAllRepartitions() {
-    setState(() {
-      for (var mois in widget.fraisScolaires.months) {
-        allRepartitions[mois] = widget.fraisScolaires.calculerRepartitions(mois);
-      }
-    });
-  }
-  @override
-  Widget build(BuildContext context) {
-    double totalCollected = widget.fraisScolaires.getYearTotalCollected();
-    return Scaffold(
-      appBar: AppBar(title: const Text('Répartitions')),
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text('Total Collecté Année: $totalCollected', style: const TextStyle(fontSize: 18)),
-                ),
-              ),
-            ),
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: widget.fraisScolaires.months.length,
-              itemBuilder: (context, index) {
-                final mois = widget.fraisScolaires.months[index];
-                final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0, '7%': 0.0};
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('$mois:', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 10),
-                        ...repartitions.entries.map((entry) => Text('${entry.key}: ${entry.value.toStringAsFixed(2)}')),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class SettingsScreen extends StatefulWidget {
-  final FraisScolaires fraisScolaires;
-  const SettingsScreen({super.key, required this.fraisScolaires});
-  @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends State<SettingsScreen> {
-  final TextEditingController yearController = TextEditingController();
-  final TextEditingController monthlyController = TextEditingController();
-  @override
-  Widget build(BuildContext context) {
-    final appState = Provider.of<AppState>(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Paramètres')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            TextField(
-              controller: monthlyController,
-              decoration: const InputDecoration(labelText: 'Montant Mensuel Défaut'),
-              keyboardType: TextInputType.number,
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                final montant = double.tryParse(monthlyController.text);
-                if (montant != null) {
-                  widget.fraisScolaires.currentData.defaultMonthly = montant;
-                  await widget.fraisScolaires.saveData();
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mis à jour')));
-                }
-              },
-              child: const Text('Enregistrer Montant'),
-            ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: yearController,
-              decoration: const InputDecoration(labelText: 'Nouvelle Année (ex: 2024-2025)'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                final newYear = yearController.text.trim();
-                if (newYear.isNotEmpty) {
-                  await widget.fraisScolaires.resetForNewYear(newYear);
-                  Navigator.pop(context);
-                }
-              },
-              child: const Text('Nouvelle Année'),
-            ),
-            const SizedBox(height: 20),
-            ListTile(
-              title: const Text('Mode Sombre'),
-              trailing: Switch(
-                value: appState.isDarkMode,
-                onChanged: (value) {
-                  appState.toggleTheme();
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class HistoryScreen extends StatefulWidget {
-  final FraisScolaires fraisScolaires;
-  const HistoryScreen({super.key, required this.fraisScolaires});
-  @override
-  State<HistoryScreen> createState() => _HistoryScreenState();
-}
-
-class _HistoryScreenState extends State<HistoryScreen> {
-  String? selectedYear;
-  String? selectedView;
-  Map<String, Map<String, double>> allRepartitions = {};
-  List<Eleve> filteredHistoryEleves = [];
-  final TextEditingController searchHistoryController = TextEditingController();
-  @override
-  void initState() {
-    super.initState();
-    searchHistoryController.addListener(_filterHistoryEleves);
-  }
-  void _computeRepartitions(String year) {
-    final data = widget.fraisScolaires.history[year];
-    if (data != null) {
-      setState(() {
-        allRepartitions = {};
-        for (var mois in widget.fraisScolaires.months) {
-          double studentTotal = data.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
-          double total = (data.manualFrais[mois] ?? 0) + studentTotal;
-          allRepartitions[mois] = {
-            '30%': total * 0.3,
-            '70%': total * 0.7,
-            '7%': total * 0.07,
-          };
-        }
-      });
-    }
-  }
-  void _filterHistoryEleves() {
-    if (selectedYear == null) return;
-    final data = widget.fraisScolaires.history[selectedYear!];
-    if (data == null) return;
-    final query = searchHistoryController.text.toLowerCase();
-    setState(() {
-      filteredHistoryEleves = data.eleves.where((eleve) {
-        final fullName = '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'.toLowerCase();
-        return fullName.contains(query);
-      }).toList()
-        ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
-    });
-  }
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Historique')),
-      body: Column(
+      body: ListView(
         children: [
-          DropdownButton<String>(
-            hint: const Text('Année'),
-            value: selectedYear,
-            onChanged: (value) {
-              setState(() {
-                selectedYear = value;
-                selectedView = null;
-                searchHistoryController.clear();
-                filteredHistoryEleves = [];
-                if (value != null) {
-                  _computeRepartitions(value);
-                  _filterHistoryEleves();
-                }
-              });
+          SwitchListTile(
+            title: const Text('Abréger les soldes (ex: 1000 → 1K)'),
+            value: themeProvider.abbreviateBalance,
+            onChanged: (bool value) {
+              themeProvider.setAbbreviateBalance(value);
             },
-            items: widget.fraisScolaires.history.keys.map((year) => DropdownMenuItem(value: year, child: Text(year))).toList(),
           ),
-          if (selectedYear != null)
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Wrap(
-                alignment: WrapAlignment.center,
-                spacing: 20,
-                children: [
-                  ElevatedButton(
-                    onPressed: () => setState(() => selectedView = 'repartitions'),
-                    child: const Text('Répartitions'),
-                  ),
-                  ElevatedButton(
-                    onPressed: () => setState(() => selectedView = 'paiements'),
-                    child: const Text('Paiements Élèves'),
-                  ),
-                ],
-              ),
-            ),
-          if (selectedYear != null && selectedView == 'paiements')
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: TextField(
-                controller: searchHistoryController,
-                decoration: const InputDecoration(
-                  labelText: 'Rechercher Élève',
-                  prefixIcon: Icon(Icons.search),
-                ),
-              ),
-            ),
-          if (selectedYear != null && selectedView != null)
-            Expanded(
-              child: selectedView == 'repartitions'
-                  ? ListView.builder(
-                padding: const EdgeInsets.all(16.0),
-                itemCount: widget.fraisScolaires.months.length,
-                itemBuilder: (context, index) {
-                  final mois = widget.fraisScolaires.months[index];
-                  final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0, '7%': 0.0};
-                  return Card(
-                    margin: const EdgeInsets.only(bottom: 16.0),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('$mois ($selectedYear):', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 10),
-                          ...repartitions.entries.map((entry) => Text('${entry.key}: ${entry.value.toStringAsFixed(2)}')),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              )
-                  : ListView.builder(
-                padding: const EdgeInsets.all(16.0),
-                itemCount: filteredHistoryEleves.length,
-                itemBuilder: (context, index) {
-                  final data = widget.fraisScolaires.history[selectedYear!]!;
-                  final eleve = filteredHistoryEleves[index];
-                  double totalPaid = eleve.paid.values.fold(0.0, (sum, p) => sum + p);
-                  double pending = widget.fraisScolaires.months.fold(0.0, (sum, m) => sum + ((data.monthExceptions[m] ?? data.defaultMonthly) - (eleve.paid[m] ?? 0)));
-                  return Card(
-                    margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                          Text('Payé: $totalPaid | En attente: $pending'),
-                          const SizedBox(height: 10),
-                          SizedBox(
-                            height: 80,
-                            child: ListView.builder(
-                              scrollDirection: Axis.horizontal,
-                              itemCount: widget.fraisScolaires.months.length,
-                              itemBuilder: (context, monthIndex) {
-                                final mois = widget.fraisScolaires.months[monthIndex];
-                                double required = data.monthExceptions[mois] ?? data.defaultMonthly;
-                                double paid = eleve.paid[mois] ?? 0;
-                                bool isFullyPaid = paid >= required;
-                                Color backgroundColor = isFullyPaid
-                                    ? (isDark ? Colors.green[700]! : Colors.green[100]!)
-                                    : (isDark ? Colors.red[700]! : Colors.red[100]!);
-                                Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
-                                return Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                                  child: Container(
-                                    width: 120,
-                                    decoration: BoxDecoration(
-                                      color: backgroundColor,
-                                      border: Border.all(color: borderColor),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        Text(mois, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                                        Text('Requis: ${required.toStringAsFixed(0)}'),
-                                        if (paid > 0) Text('Payé: ${paid.toStringAsFixed(0)}'),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
+          RadioListTile<ThemeMode>(
+            title: const Text('Mode Clair'),
+            value: ThemeMode.light,
+            groupValue: themeProvider.themeMode,
+            onChanged: (ThemeMode? value) {
+              if (value != null) {
+                themeProvider.setThemeMode(value);
+              }
+            },
+          ),
+          RadioListTile<ThemeMode>(
+            title: const Text('Mode Sombre'),
+            value: ThemeMode.dark,
+            groupValue: themeProvider.themeMode,
+            onChanged: (ThemeMode? value) {
+              if (value != null) {
+                themeProvider.setThemeMode(value);
+              }
+            },
+          ),
         ],
       ),
     );
