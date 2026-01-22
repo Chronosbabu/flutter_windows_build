@@ -1,18 +1,34 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:async';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 
 // Modèle de transaction
-class TransactionModel {
-  final int? id;
+part 'main.g.dart';
+
+@HiveType(typeId: 0)
+class TransactionModel extends HiveObject {
+  @HiveField(0)
+  int? id;
+
+  @HiveField(1)
   final double amount;
+
+  @HiveField(2)
   final String type; // 'income' or 'expense'
+
+  @HiveField(3)
   final String description;
+
+  @HiveField(4)
   final DateTime date;
+
+  @HiveField(5)
   final String currency; // 'USD' or 'CDF'
 
   TransactionModel({
@@ -23,28 +39,6 @@ class TransactionModel {
     required this.date,
     required this.currency,
   });
-
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'amount': amount,
-      'type': type,
-      'description': description,
-      'date': date.toIso8601String(),
-      'currency': currency,
-    };
-  }
-
-  static TransactionModel fromMap(Map<String, dynamic> map) {
-    return TransactionModel(
-      id: map['id'],
-      amount: map['amount'],
-      type: map['type'],
-      description: map['description'],
-      date: DateTime.parse(map['date']),
-      currency: map['currency'] ?? 'CDF', // Default to CDF if null (for old data)
-    );
-  }
 }
 
 // Provider pour la gestion d'état des thèmes et paramètres
@@ -80,49 +74,59 @@ class ThemeProvider extends ChangeNotifier {
 
 // Provider pour la gestion de caisse
 class CashProvider extends ChangeNotifier {
+  final String category;
   double _balanceUSD = 0.0;
   double _balanceCDF = 0.0;
   List<TransactionModel> _transactions = [];
-  Database? _database;
+  late Box<TransactionModel> _box;
 
   double get balanceUSD => _balanceUSD;
   double get balanceCDF => _balanceCDF;
   List<TransactionModel> get transactions => _transactions;
 
-  Future<void> initDatabase() async {
-    String path = join(await getDatabasesPath(), 'cash_app.db');
-    _database = await openDatabase(
-      path,
-      version: 2,
-      onCreate: (db, version) {
-        return db.execute(
-          'CREATE TABLE transactions(id INTEGER PRIMARY KEY, amount REAL, type TEXT, description TEXT, date TEXT, currency TEXT)',
-        );
-      },
-      onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await db.execute('ALTER TABLE transactions ADD COLUMN currency TEXT');
-        }
-      },
-    );
-    await _loadData();
-  }
+  CashProvider(this.category);
 
-  Future<void> _loadData() async {
-    final List<Map<String, dynamic>> maps = await _database!.query('transactions', orderBy: 'date DESC');
-    _transactions = List.generate(maps.length, (i) => TransactionModel.fromMap(maps[i]));
-    _balanceUSD = _transactions
+  Future<void> initDatabase() async {
+    _box = await Hive.openBox<TransactionModel>('transactions_$category');
+    // Chargement/migration des soldes persistants
+    final prefs = await SharedPreferences.getInstance();
+    final List<TransactionModel> allTx = _box.values.toList();
+    final double calculatedUSD = allTx
         .where((tx) => tx.currency == 'USD')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
-    _balanceCDF = _transactions
+    final double calculatedCDF = allTx
         .where((tx) => tx.currency == 'CDF')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
+    _balanceUSD = prefs.getDouble('balance_USD_$category') ?? calculatedUSD;
+    _balanceCDF = prefs.getDouble('balance_CDF_$category') ?? calculatedCDF;
+    // Si c'était la première fois (pas encore de clé), on sauvegarde les soldes calculés
+    if (!prefs.containsKey('balance_USD_$category')) {
+      await prefs.setDouble('balance_USD_$category', _balanceUSD);
+      await prefs.setDouble('balance_CDF_$category', _balanceCDF);
+    }
+    await _loadTransactions();
+  }
+
+  Future<void> _loadTransactions() async {
+    _transactions = _box.values.toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
     notifyListeners();
   }
 
   Future<void> addTransaction(double amount, String type, String description, String currency) async {
+    final prefs = await SharedPreferences.getInstance();
+    // Mise à jour du solde (seulement à l'ajout)
+    if (currency == 'USD') {
+      _balanceUSD += type == 'income' ? amount : -amount;
+      _balanceUSD = _balanceUSD.clamp(0.0, double.infinity);
+      await prefs.setDouble('balance_USD_$category', _balanceUSD);
+    } else {
+      _balanceCDF += type == 'income' ? amount : -amount;
+      _balanceCDF = _balanceCDF.clamp(0.0, double.infinity);
+      await prefs.setDouble('balance_CDF_$category', _balanceCDF);
+    }
     final tx = TransactionModel(
       amount: amount,
       type: type,
@@ -130,28 +134,35 @@ class CashProvider extends ChangeNotifier {
       date: DateTime.now(),
       currency: currency,
     );
-    await _database!.insert('transactions', tx.toMap());
-    await _loadData();
+    await _box.add(tx);
+    await _loadTransactions();
   }
 
-  Future<void> deleteTransaction(int id) async {
-    await _database!.delete('transactions', where: 'id = ?', whereArgs: [id]);
-    await _loadData();
+  // Suppression sans impact sur le solde
+  Future<void> deleteTransaction(int key) async {
+    await _box.delete(key);
+    await _loadTransactions();
+  }
+
+  // Réinitialisation complète
+  Future<void> resetAll() async {
+    await _box.clear();
+    final prefs = await SharedPreferences.getInstance();
+    _balanceUSD = 0.0;
+    _balanceCDF = 0.0;
+    await prefs.setDouble('balance_USD_$category', 0.0);
+    await prefs.setDouble('balance_CDF_$category', 0.0);
+    await _loadTransactions();
   }
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
+  Hive.registerAdapter(TransactionModelAdapter());
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(
-          create: (context) {
-            final provider = CashProvider();
-            provider.initDatabase();
-            return provider;
-          },
-        ),
         ChangeNotifierProvider(
           create: (context) {
             final themeProvider = ThemeProvider();
@@ -182,9 +193,7 @@ class MyApp extends StatelessWidget {
               brightness: Brightness.light,
             ),
             scaffoldBackgroundColor: Colors.grey[100],
-            appBarTheme: const AppBarTheme(
-              elevation: 0,
-            ),
+            appBarTheme: const AppBarTheme(elevation: 0),
             elevatedButtonTheme: ElevatedButtonThemeData(
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
@@ -205,9 +214,7 @@ class MyApp extends StatelessWidget {
               brightness: Brightness.dark,
             ),
             scaffoldBackgroundColor: Colors.grey[900],
-            appBarTheme: const AppBarTheme(
-              elevation: 0,
-            ),
+            appBarTheme: const AppBarTheme(elevation: 0),
             elevatedButtonTheme: ElevatedButtonThemeData(
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
@@ -221,14 +228,19 @@ class MyApp extends StatelessWidget {
             ),
           ),
           themeMode: themeProvider.themeMode,
-          home: const HomePage(),
+          home: const MainMenu(),
         );
       },
     );
   }
 }
 
-// Utility function for formatting balance
+extension StringExtension on String {
+  String capitalize() {
+    return "${this[0].toUpperCase()}${substring(1)}";
+  }
+}
+
 String formatBalance(double value, bool abbreviate) {
   value = value.clamp(0.0, double.infinity);
   if (!abbreviate) {
@@ -249,7 +261,6 @@ String formatBalance(double value, bool abbreviate) {
   return '${NumberFormat("#,##0.#").format(formattedValue)}$suffix';
 }
 
-// Widget for displaying a single balance card
 class BalanceCard extends StatelessWidget {
   final String title;
   final double balance;
@@ -272,6 +283,7 @@ class BalanceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
+        height: 100,
         padding: const EdgeInsets.all(16),
         margin: const EdgeInsets.symmetric(horizontal: 8),
         decoration: BoxDecoration(
@@ -280,12 +292,16 @@ class BalanceCard extends StatelessWidget {
           boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)],
         ),
         child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text(title, style: TextStyle(color: textColor, fontSize: 16)),
             const SizedBox(height: 4),
-            Text(
-              '${formatBalance(balance, abbreviate)} $symbol',
-              style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+            FittedBox(
+              fit: BoxFit.fitWidth,
+              child: Text(
+                '${formatBalance(balance, abbreviate)} $symbol',
+                style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+              ),
             ),
           ],
         ),
@@ -294,7 +310,6 @@ class BalanceCard extends StatelessWidget {
   }
 }
 
-// Widget for action buttons (Entrée and Sortie)
 class ActionButtons extends StatelessWidget {
   final VoidCallback onIncomePressed;
   final VoidCallback onExpensePressed;
@@ -334,7 +349,6 @@ class ActionButtons extends StatelessWidget {
   }
 }
 
-// Widget for the transaction list
 class TransactionList extends StatelessWidget {
   final List<TransactionModel> transactions;
   final Function(TransactionModel) onDelete;
@@ -402,15 +416,16 @@ class TransactionList extends StatelessWidget {
   }
 }
 
-// Dialog for adding transactions
 class AddTransactionDialog extends StatefulWidget {
   final String type;
   final Function(double, String, String, String) onAdd;
+  final CashProvider cashProvider;
 
   const AddTransactionDialog({
     super.key,
     required this.type,
     required this.onAdd,
+    required this.cashProvider,
   });
 
   @override
@@ -460,34 +475,34 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
           child: const Text('Annuler'),
         ),
         ElevatedButton(
-          onPressed: () {
+          onPressed: () async {
             final amount = double.tryParse(amountController.text) ?? 0.0;
-            if (amount > 0) {
-              final provider = Provider.of<CashProvider>(context, listen: false);
-              bool sufficient = true;
-              if (widget.type == 'expense') {
-                double balance = selectedCurrency == 'USD' ? provider.balanceUSD : provider.balanceCDF;
-                if (amount > balance) {
-                  sufficient = false;
-                  showDialog(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: const Text('Erreur'),
-                      content: const Text('Impossible, le solde de votre compte est insuffisant.'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text('OK'),
-                        ),
-                      ],
-                    ),
-                  );
-                }
+            if (amount <= 0) return;
+            bool sufficient = true;
+            if (widget.type == 'expense') {
+              double balance = selectedCurrency == 'USD'
+                  ? widget.cashProvider.balanceUSD
+                  : widget.cashProvider.balanceCDF;
+              if (amount > balance) {
+                sufficient = false;
+                showDialog(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Erreur'),
+                    content: const Text('Impossible, le solde de votre compte est insuffisant.'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('OK'),
+                      ),
+                    ],
+                  ),
+                );
               }
-              if (sufficient) {
-                widget.onAdd(amount, widget.type, descController.text, selectedCurrency);
-                Navigator.pop(context);
-              }
+            }
+            if (sufficient) {
+              await widget.onAdd(amount, widget.type, descController.text, selectedCurrency);
+              if (mounted) Navigator.pop(context);
             }
           },
           child: const Text('Ajouter'),
@@ -497,96 +512,204 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
   }
 }
 
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+class CategoryHomePage extends StatelessWidget {
+  final String category;
+
+  const CategoryHomePage({super.key, required this.category});
 
   void _showAddDialog(BuildContext context, String type) {
     final provider = Provider.of<CashProvider>(context, listen: false);
     showDialog(
       context: context,
-      builder: (context) => AddTransactionDialog(
+      builder: (dialogContext) => AddTransactionDialog(
         type: type,
         onAdd: provider.addTransaction,
+        cashProvider: provider,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final cashProvider = Provider.of<CashProvider>(context);
-    final themeProvider = Provider.of<ThemeProvider>(context);
-    final theme = Theme.of(context);
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gestion de Caisse', style: TextStyle(fontWeight: FontWeight.bold)),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const SettingsPage()),
-              );
-            },
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                BalanceCard(
-                  title: 'Solde USD',
-                  balance: cashProvider.balanceUSD,
-                  symbol: '\$',
-                  color: theme.colorScheme.primary,
-                  textColor: theme.colorScheme.onPrimary,
-                  abbreviate: themeProvider.abbreviateBalance,
-                ),
-                BalanceCard(
-                  title: 'Solde CDF',
-                  balance: cashProvider.balanceCDF,
-                  symbol: 'FC',
-                  color: theme.colorScheme.secondary,
-                  textColor: theme.colorScheme.onSecondary,
-                  abbreviate: themeProvider.abbreviateBalance,
+    return ChangeNotifierProvider<CashProvider>(
+      create: (context) {
+        final provider = CashProvider(category);
+        provider.initDatabase();
+        return provider;
+      },
+      child: Builder(
+        builder: (context) {
+          final cashProvider = Provider.of<CashProvider>(context);
+          final themeProvider = Provider.of<ThemeProvider>(context);
+          final theme = Theme.of(context);
+          return Scaffold(
+            appBar: AppBar(
+              title: Text('Gestion de Caisse - ${category.capitalize()}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              centerTitle: true,
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.settings),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => SettingsPage(cashProvider: cashProvider)),
+                    );
+                  },
                 ),
               ],
             ),
-          ),
-          ActionButtons(
-            onIncomePressed: () => _showAddDialog(context, 'income'),
-            onExpensePressed: () => _showAddDialog(context, 'expense'),
-            incomeColor: theme.colorScheme.secondary,
-            expenseColor: theme.colorScheme.error,
-          ),
-          const SizedBox(height: 16),
-          const Text('Historique des Transactions', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          TransactionList(
-            transactions: cashProvider.transactions,
-            onDelete: (tx) => cashProvider.deleteTransaction(tx.id!),
-            incomeColor: theme.colorScheme.secondary,
-            expenseColor: theme.colorScheme.error,
-            deleteColor: theme.colorScheme.error,
-          ),
-        ],
+            body: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      BalanceCard(
+                        title: 'Solde USD',
+                        balance: cashProvider.balanceUSD,
+                        symbol: '\$',
+                        color: theme.colorScheme.primary,
+                        textColor: theme.colorScheme.onPrimary,
+                        abbreviate: themeProvider.abbreviateBalance,
+                      ),
+                      BalanceCard(
+                        title: 'Solde CDF',
+                        balance: cashProvider.balanceCDF,
+                        symbol: 'FC',
+                        color: theme.colorScheme.secondary,
+                        textColor: theme.colorScheme.onSecondary,
+                        abbreviate: themeProvider.abbreviateBalance,
+                      ),
+                    ],
+                  ),
+                ),
+                ActionButtons(
+                  onIncomePressed: () => _showAddDialog(context, 'income'),
+                  onExpensePressed: () => _showAddDialog(context, 'expense'),
+                  incomeColor: theme.colorScheme.secondary,
+                  expenseColor: theme.colorScheme.error,
+                ),
+                const SizedBox(height: 16),
+                const Text('Historique des Transactions',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                TransactionList(
+                  transactions: cashProvider.transactions,
+                  onDelete: (tx) => cashProvider.deleteTransaction(tx.key ?? 0),
+                  incomeColor: theme.colorScheme.secondary,
+                  expenseColor: theme.colorScheme.error,
+                  deleteColor: theme.colorScheme.error,
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
 }
 
 class SettingsPage extends StatelessWidget {
-  const SettingsPage({super.key});
+  final CashProvider cashProvider;
+
+  const SettingsPage({super.key, required this.cashProvider});
+
+  Future<void> _downloadHistory(BuildContext context) async {
+    final filenameController = TextEditingController();
+    String? filename;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Nom du fichier'),
+        content: TextField(
+          controller: filenameController,
+          decoration: const InputDecoration(labelText: 'Entrez le nom du fichier (sans extension)'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (filenameController.text.isNotEmpty) {
+                filename = filenameController.text;
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (filename == null) return;
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context pwContext) => [
+          pw.Text('Solde USD: ${formatBalance(cashProvider.balanceUSD, false)} \$'),
+          pw.Text('Solde CDF: ${formatBalance(cashProvider.balanceCDF, false)} FC'),
+          pw.SizedBox(height: 20),
+          pw.Text('Historique des Transactions'),
+          pw.SizedBox(height: 10),
+          pw.Table.fromTextArray(
+            headers: ['Date', 'Type', 'Montant', 'Devise', 'Description'],
+            data: cashProvider.transactions.map((tx) => [
+              DateFormat('dd/MM/yyyy HH:mm').format(tx.date),
+              tx.type == 'income' ? 'Entrée' : 'Sortie',
+              tx.amount.toStringAsFixed(2),
+              tx.currency,
+              tx.description,
+            ]).toList(),
+          ),
+        ],
+      ),
+    );
+    final bytes = await pdf.save();
+    final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/$filename.pdf');
+    await file.writeAsBytes(bytes);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Fichier sauvegardé : ${file.path}')),
+    );
+  }
+
+  Future<void> _showResetConfirmation(BuildContext context) async {
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Réinitialiser tout ?'),
+        content: const Text(
+          'ATTENTION ! Cette action est irréversible.\n\n'
+              'Tous les soldes seront remis à zéro.\n'
+              'L\'historique complet des transactions sera effacé.\n'
+              'Tout sera perdu définitivement.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Réinitialiser', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await cashProvider.resetAll();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tout a été réinitialisé à zéro.')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Paramètres'),
@@ -605,9 +728,7 @@ class SettingsPage extends StatelessWidget {
             value: ThemeMode.light,
             groupValue: themeProvider.themeMode,
             onChanged: (ThemeMode? value) {
-              if (value != null) {
-                themeProvider.setThemeMode(value);
-              }
+              if (value != null) themeProvider.setThemeMode(value);
             },
           ),
           RadioListTile<ThemeMode>(
@@ -615,12 +736,145 @@ class SettingsPage extends StatelessWidget {
             value: ThemeMode.dark,
             groupValue: themeProvider.themeMode,
             onChanged: (ThemeMode? value) {
-              if (value != null) {
-                themeProvider.setThemeMode(value);
-              }
+              if (value != null) themeProvider.setThemeMode(value);
             },
           ),
+          ListTile(
+            leading: const Icon(Icons.download),
+            title: const Text('Télécharger l\'historique'),
+            onTap: () => _downloadHistory(context),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.restore_page, color: Colors.red),
+            title: const Text('Réinitialiser tout', style: TextStyle(color: Colors.red)),
+            onTap: () => _showResetConfirmation(context),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+class MainMenu extends StatelessWidget {
+  const MainMenu({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('C-Finance', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        backgroundColor: theme.colorScheme.primary,
+        foregroundColor: theme.colorScheme.onPrimary,
+      ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [theme.scaffoldBackgroundColor, theme.colorScheme.primary.withOpacity(0.1)],
+          ),
+        ),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'Bienvenue dans Gestion de Caisse',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.primary,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 32),
+                Card(
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const CategoryHomePage(category: 'paroisse'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.church),
+                          label: const Text('Paroisse'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 56),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const CategoryHomePage(category: 'secondaire'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.school),
+                          label: const Text('Secondaire'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 56),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const CategoryHomePage(category: 'primaire'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.school),
+                          label: const Text('Primaire'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 56),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const CategoryHomePage(category: 'maternelle'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.child_care),
+                          label: const Text('Maternelle'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 56),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
