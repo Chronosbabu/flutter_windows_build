@@ -390,7 +390,7 @@ class TransactionList extends StatelessWidget {
                     context: context,
                     builder: (ctx) => AlertDialog(
                       title: const Text('Confirmation'),
-                      content: const Text('Voulez-vous vraiment supprimer cette transaction ?'),
+                      content: const Text('Voulez-vous vraiment supprimer cette Transaction ?'),
                       actions: [
                         TextButton(
                           onPressed: () => Navigator.pop(ctx),
@@ -489,7 +489,7 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
                   context: context,
                   builder: (ctx) => AlertDialog(
                     title: const Text('Erreur'),
-                    content: const Text('Impossible, le solde de votre compte est insuffisant.'),
+                    content: const Text('Impossible, le solde   est insuffisant.'),
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.pop(ctx),
