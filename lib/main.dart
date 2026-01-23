@@ -110,8 +110,7 @@ class CashProvider extends ChangeNotifier {
   }
 
   Future<void> _loadTransactions() async {
-    _transactions = _box.values.toList()
-      ..sort((a, b) => b.date.compareTo(a.date));
+    _transactions = _box.values.toList()..sort((a, b) => b.date.compareTo(a.date));
     notifyListeners();
   }
 
@@ -239,6 +238,14 @@ extension StringExtension on String {
   String capitalize() {
     return "${this[0].toUpperCase()}${substring(1)}";
   }
+}
+
+String formatCategory(String category) {
+  return category
+      .replaceAll('_', ' ')
+      .split(' ')
+      .map((word) => word.capitalize())
+      .join(' ');
 }
 
 String formatBalance(double value, bool abbreviate) {
@@ -480,16 +487,14 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
             if (amount <= 0) return;
             bool sufficient = true;
             if (widget.type == 'expense') {
-              double balance = selectedCurrency == 'USD'
-                  ? widget.cashProvider.balanceUSD
-                  : widget.cashProvider.balanceCDF;
+              double balance = selectedCurrency == 'USD' ? widget.cashProvider.balanceUSD : widget.cashProvider.balanceCDF;
               if (amount > balance) {
                 sufficient = false;
                 showDialog(
                   context: context,
                   builder: (ctx) => AlertDialog(
                     title: const Text('Erreur'),
-                    content: const Text('Impossible, le solde   est insuffisant.'),
+                    content: const Text('Impossible, le solde est insuffisant.'),
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.pop(ctx),
@@ -544,8 +549,7 @@ class CategoryHomePage extends StatelessWidget {
           final theme = Theme.of(context);
           return Scaffold(
             appBar: AppBar(
-              title: Text('Gestion de Caisse - ${category.capitalize()}',
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              title: Text('Gestion de Caisse - ${formatCategory(category)}', style: const TextStyle(fontWeight: FontWeight.bold)),
               centerTitle: true,
               actions: [
                 IconButton(
@@ -592,8 +596,7 @@ class CategoryHomePage extends StatelessWidget {
                   expenseColor: theme.colorScheme.error,
                 ),
                 const SizedBox(height: 16),
-                const Text('Historique des Transactions',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const Text('Historique des Transactions', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 TransactionList(
                   transactions: cashProvider.transactions,
                   onDelete: (tx) => cashProvider.deleteTransaction(tx.key ?? 0),
@@ -608,6 +611,18 @@ class CategoryHomePage extends StatelessWidget {
       ),
     );
   }
+}
+
+Future<Map<String, double>> getSchoolTotals() async {
+  final prefs = await SharedPreferences.getInstance();
+  double totalUSD = 0.0;
+  double totalCDF = 0.0;
+  final schoolCategories = ['secondaire', 'primaire', 'maternelle'];
+  for (var cat in schoolCategories) {
+    totalUSD += prefs.getDouble('balance_USD_$cat') ?? 0.0;
+    totalCDF += prefs.getDouble('balance_CDF_$cat') ?? 0.0;
+  }
+  return {'usd': totalUSD, 'cdf': totalCDF};
 }
 
 class SettingsPage extends StatelessWidget {
@@ -710,6 +725,17 @@ class SettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
+    final theme = Theme.of(context);
+    final String category = cashProvider.category;
+    final bool isSchoolCategory = ['secondaire', 'primaire', 'maternelle'].contains(category);
+    final abbreviate = themeProvider.abbreviateBalance;
+    final double usd = cashProvider.balanceUSD;
+    final double cdf = cashProvider.balanceCDF;
+    final double usd70 = usd * 0.7;
+    final double usd30 = usd * 0.3;
+    final double cdf70 = cdf * 0.7;
+    final double cdf30 = cdf * 0.3;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Paramètres'),
@@ -745,12 +771,212 @@ class SettingsPage extends StatelessWidget {
             onTap: () => _downloadHistory(context),
           ),
           const Divider(),
+          if (isSchoolCategory)
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Card(
+                elevation: 2,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Totaux ${formatCategory(category)}',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Solde USD: ${formatBalance(usd, abbreviate)} \$',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                      Text(
+                        '70% Enseignants: ${formatBalance(usd70, abbreviate)} \$',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      Text(
+                        '30% Établissement: ${formatBalance(usd30, abbreviate)} \$',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Solde CDF: ${formatBalance(cdf, abbreviate)} FC',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                      Text(
+                        '70% Enseignants: ${formatBalance(cdf70, abbreviate)} FC',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      Text(
+                        '30% Établissement: ${formatBalance(cdf30, abbreviate)} FC',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: FutureBuilder<Map<String, double>>(
+              future: getSchoolTotals(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snapshot.hasError) {
+                  return const Text('Erreur de chargement des totaux');
+                }
+                final totals = snapshot.data ?? {'usd': 0.0, 'cdf': 0.0};
+                final totalUSD = totals['usd']!;
+                final totalCDF = totals['cdf']!;
+                final totalUsd70 = totalUSD * 0.7;
+                final totalUsd30 = totalUSD * 0.3;
+                final totalCdf70 = totalCDF * 0.7;
+                final totalCdf30 = totalCDF * 0.3;
+                return Card(
+                  elevation: 2,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Totaux Écoles (Secondaire + Primaire + Maternelle)',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Solde Total USD: ${formatBalance(totalUSD, abbreviate)} \$',
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                        Text(
+                          '70% Enseignants: ${formatBalance(totalUsd70, abbreviate)} \$',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        Text(
+                          '30% Établissement: ${formatBalance(totalUsd30, abbreviate)} \$',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Solde Total CDF: ${formatBalance(totalCDF, abbreviate)} FC',
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                        Text(
+                          '70% Enseignants: ${formatBalance(totalCdf70, abbreviate)} FC',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        Text(
+                          '30% Établissement: ${formatBalance(totalCdf30, abbreviate)} FC',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          const Divider(),
           ListTile(
             leading: const Icon(Icons.restore_page, color: Colors.red),
             title: const Text('Réinitialiser tout', style: TextStyle(color: Colors.red)),
             onTap: () => _showResetConfirmation(context),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class ParoisseMenu extends StatelessWidget {
+  const ParoisseMenu({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Paroisse', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        backgroundColor: theme.colorScheme.primary,
+        foregroundColor: theme.colorScheme.onPrimary,
+      ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [theme.scaffoldBackgroundColor, theme.colorScheme.primary.withOpacity(0.1)],
+          ),
+        ),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'Gestion des Quêtes',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.primary,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 32),
+                Card(
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const CategoryHomePage(category: 'paroisse_matinale'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.wb_sunny),
+                          label: const Text('Quête Matinale'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 56),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const CategoryHomePage(category: 'paroisse_dimanche'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.event),
+                          label: const Text('Quête de Dimanche'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 56),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -805,7 +1031,7 @@ class MainMenu extends StatelessWidget {
                             Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'paroisse'),
+                                builder: (context) => const ParoisseMenu(),
                               ),
                             );
                           },
