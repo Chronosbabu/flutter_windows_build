@@ -155,6 +155,43 @@ class CashProvider extends ChangeNotifier {
   }
 }
 
+// Provider pour la gestion des kiosques
+class KioskProvider extends ChangeNotifier {
+  List<String> _kiosks = [];
+  late Box<String> _kioskBox;
+
+  List<String> get kiosks => _kiosks;
+
+  Future<void> init() async {
+    _kioskBox = await Hive.openBox<String>('kiosks');
+    _kiosks = _kioskBox.values.toList();
+    notifyListeners();
+  }
+
+  Future<void> addKiosk(String name) async {
+    await _kioskBox.add(name);
+    _kiosks.insert(0, name); // Ajouter au début pour que les nouveaux soient en haut
+    notifyListeners();
+  }
+
+  Future<void> deleteKiosk(String name, int index) async {
+    // Supprimer la box des transactions
+    final box = await Hive.openBox<TransactionModel>('transactions_$name');
+    await box.clear();
+    await box.close();
+
+    // Supprimer les soldes de SharedPreferences
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('balance_USD_$name');
+    await prefs.remove('balance_CDF_$name');
+
+    // Supprimer le kiosque de la liste
+    await _kioskBox.deleteAt(index);
+    _kiosks.removeAt(index);
+    notifyListeners();
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
@@ -167,6 +204,13 @@ void main() async {
             final themeProvider = ThemeProvider();
             themeProvider.init();
             return themeProvider;
+          },
+        ),
+        ChangeNotifierProvider(
+          create: (context) {
+            final kioskProvider = KioskProvider();
+            kioskProvider.init();
+            return kioskProvider;
           },
         ),
       ],
@@ -227,10 +271,198 @@ class MyApp extends StatelessWidget {
             ),
           ),
           themeMode: themeProvider.themeMode,
-          home: const MainMenu(),
+          home: const PasswordGate(),
         );
       },
     );
+  }
+}
+
+class PasswordGate extends StatefulWidget {
+  const PasswordGate({super.key});
+
+  @override
+  State<PasswordGate> createState() => _PasswordGateState();
+}
+
+class _PasswordGateState extends State<PasswordGate> {
+  bool _isAuthenticated = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkPassword();
+    });
+  }
+
+  Future<void> _checkPassword() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? storedPassword = prefs.getString('app_password');
+    if (storedPassword == null || storedPassword.isEmpty) {
+      await _setPasswordDialog();
+    }
+    await _authenticateDialog();
+  }
+
+  Future<void> _setPasswordDialog() async {
+    final TextEditingController passwordController = TextEditingController();
+    final TextEditingController confirmController = TextEditingController();
+    bool passwordsMatch = true;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Définir un mot de passe'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: passwordController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Mot de passe'),
+              ),
+              TextField(
+                controller: confirmController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Confirmer mot de passe'),
+              ),
+              if (!passwordsMatch)
+                const Text('Les mots de passe ne correspondent pas.', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () async {
+                if (passwordController.text == confirmController.text && passwordController.text.isNotEmpty) {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setString('app_password', passwordController.text);
+                  Navigator.pop(ctx);
+                } else {
+                  setState(() {
+                    passwordsMatch = false;
+                  });
+                }
+              },
+              child: const Text('Confirmer'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _authenticateDialog() async {
+    final TextEditingController passwordController = TextEditingController();
+    bool incorrect = false;
+    final prefs = await SharedPreferences.getInstance();
+    final String? storedPassword = prefs.getString('app_password');
+    final String? storedResetKey = prefs.getString('app_reset_key');
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Entrer mot de passe'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: passwordController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Mot de passe'),
+              ),
+              if (incorrect)
+                const Text('Mot de passe incorrect.', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => _forgotPasswordDialog(ctx),
+              child: const Text('Mot de passe oublié ?'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (passwordController.text == storedPassword || passwordController.text == storedResetKey) {
+                  Navigator.pop(ctx);
+                  this.setState(() {
+                    _isAuthenticated = true;
+                  });
+                } else {
+                  setState(() {
+                    incorrect = true;
+                  });
+                }
+              },
+              child: const Text('Entrer'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _forgotPasswordDialog(BuildContext dialogContext) async {
+    final TextEditingController resetKeyController = TextEditingController();
+    bool incorrect = false;
+    final prefs = await SharedPreferences.getInstance();
+    final String? storedResetKey = prefs.getString('app_reset_key');
+
+    await showDialog(
+      context: dialogContext,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Entrer clé de réinitialisation'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: resetKeyController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Clé de réinitialisation'),
+              ),
+              if (incorrect)
+                const Text('Clé incorrecte.', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (resetKeyController.text == storedResetKey) {
+                  Navigator.pop(ctx);
+                  Navigator.pop(dialogContext);
+                  this.setState(() {
+                    _isAuthenticated = true;
+                  });
+                } else {
+                  setState(() {
+                    incorrect = true;
+                  });
+                }
+              },
+              child: const Text('Entrer'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isAuthenticated) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+    return const MainMenu();
   }
 }
 
@@ -238,14 +470,6 @@ extension StringExtension on String {
   String capitalize() {
     return "${this[0].toUpperCase()}${substring(1)}";
   }
-}
-
-String formatCategory(String category) {
-  return category
-      .replaceAll('_', ' ')
-      .split(' ')
-      .map((word) => word.capitalize())
-      .join(' ');
 }
 
 String formatBalance(double value, bool abbreviate) {
@@ -517,10 +741,10 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
   }
 }
 
-class CategoryHomePage extends StatelessWidget {
-  final String category;
+class KioskHomePage extends StatelessWidget {
+  final String kioskName;
 
-  const CategoryHomePage({super.key, required this.category});
+  const KioskHomePage({super.key, required this.kioskName});
 
   void _showAddDialog(BuildContext context, String type) {
     final provider = Provider.of<CashProvider>(context, listen: false);
@@ -538,7 +762,7 @@ class CategoryHomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider<CashProvider>(
       create: (context) {
-        final provider = CashProvider(category);
+        final provider = CashProvider(kioskName);
         provider.initDatabase();
         return provider;
       },
@@ -549,7 +773,7 @@ class CategoryHomePage extends StatelessWidget {
           final theme = Theme.of(context);
           return Scaffold(
             appBar: AppBar(
-              title: Text('Gestion de Caisse - ${formatCategory(category)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+              title: Text('Gestion - $kioskName', style: const TextStyle(fontWeight: FontWeight.bold)),
               centerTitle: true,
               actions: [
                 IconButton(
@@ -613,14 +837,14 @@ class CategoryHomePage extends StatelessWidget {
   }
 }
 
-Future<Map<String, double>> getSchoolTotals() async {
+Future<Map<String, double>> getAllTotals() async {
   final prefs = await SharedPreferences.getInstance();
+  final kioskBox = await Hive.openBox<String>('kiosks');
   double totalUSD = 0.0;
   double totalCDF = 0.0;
-  final schoolCategories = ['secondaire', 'primaire', 'maternelle'];
-  for (var cat in schoolCategories) {
-    totalUSD += prefs.getDouble('balance_USD_$cat') ?? 0.0;
-    totalCDF += prefs.getDouble('balance_CDF_$cat') ?? 0.0;
+  for (var kiosk in kioskBox.values) {
+    totalUSD += prefs.getDouble('balance_USD_$kiosk') ?? 0.0;
+    totalCDF += prefs.getDouble('balance_CDF_$kiosk') ?? 0.0;
   }
   return {'usd': totalUSD, 'cdf': totalCDF};
 }
@@ -629,6 +853,169 @@ class SettingsPage extends StatelessWidget {
   final CashProvider cashProvider;
 
   const SettingsPage({super.key, required this.cashProvider});
+
+  Future<void> _showSetResetKeyDialog(BuildContext context) async {
+    final TextEditingController keyController = TextEditingController();
+    final TextEditingController confirmController = TextEditingController();
+    bool keysMatch = true;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Définir Clé de Réinitialisation'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: keyController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Clé de Réinitialisation'),
+              ),
+              TextField(
+                controller: confirmController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Confirmer Clé'),
+              ),
+              if (!keysMatch)
+                const Text('Les clés ne correspondent pas.', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                if (keyController.text == confirmController.text && keyController.text.isNotEmpty) {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setString('app_reset_key', keyController.text);
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Clé de réinitialisation définie.')),
+                  );
+                } else {
+                  setState(() {
+                    keysMatch = false;
+                  });
+                }
+              },
+              child: const Text('Confirmer'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showChangePasswordDialog(BuildContext context) async {
+    final TextEditingController resetKeyController = TextEditingController();
+    bool keyCorrect = true;
+    final prefs = await SharedPreferences.getInstance();
+    final String? storedResetKey = prefs.getString('app_reset_key');
+
+    if (storedResetKey == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Définissez d\'abord une clé de réinitialisation.')),
+      );
+      return;
+    }
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Vérifier Clé de Réinitialisation'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: resetKeyController,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Clé de Réinitialisation'),
+              ),
+              if (!keyCorrect)
+                const Text('Clé incorrecte.', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (resetKeyController.text == storedResetKey) {
+                  Navigator.pop(ctx, true);
+                } else {
+                  setState(() {
+                    keyCorrect = false;
+                  });
+                }
+              },
+              child: const Text('Vérifier'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed == true) {
+      final TextEditingController newPasswordController = TextEditingController();
+      final TextEditingController confirmController = TextEditingController();
+      bool passwordsMatch = true;
+
+      await showDialog(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (context, setState) => AlertDialog(
+            title: const Text('Changer Mot de Passe'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: newPasswordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Nouveau Mot de Passe'),
+                ),
+                TextField(
+                  controller: confirmController,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Confirmer Nouveau Mot de Passe'),
+                ),
+                if (!passwordsMatch)
+                  const Text('Les mots de passe ne correspondent pas.', style: TextStyle(color: Colors.red)),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Annuler'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  if (newPasswordController.text == confirmController.text && newPasswordController.text.isNotEmpty) {
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('app_password', newPasswordController.text);
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Mot de passe changé.')),
+                    );
+                  } else {
+                    setState(() {
+                      passwordsMatch = false;
+                    });
+                  }
+                },
+                child: const Text('Confirmer'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+  }
 
   Future<void> _downloadHistory(BuildContext context) async {
     final filenameController = TextEditingController();
@@ -727,15 +1114,11 @@ class SettingsPage extends StatelessWidget {
     final themeProvider = Provider.of<ThemeProvider>(context);
     final theme = Theme.of(context);
     final String category = cashProvider.category;
-    final bool isSchoolCategory = ['secondaire', 'primaire', 'maternelle'].contains(category);
     final abbreviate = themeProvider.abbreviateBalance;
     final double usd = cashProvider.balanceUSD;
     final double cdf = cashProvider.balanceCDF;
-    final double usd70 = usd * 0.7;
-    final double usd30 = usd * 0.3;
-    final double cdf70 = cdf * 0.7;
-    final double cdf30 = cdf * 0.3;
-
+    final double usdThird = usd / 3;
+    final double cdfThird = cdf / 3;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Paramètres'),
@@ -766,61 +1149,62 @@ class SettingsPage extends StatelessWidget {
             },
           ),
           ListTile(
+            leading: const Icon(Icons.lock),
+            title: const Text('Changer Mot de Passe'),
+            onTap: () => _showChangePasswordDialog(context),
+          ),
+          ListTile(
+            leading: const Icon(Icons.key),
+            title: const Text('Définir Clé de Réinitialisation'),
+            onTap: () => _showSetResetKeyDialog(context),
+          ),
+          ListTile(
             leading: const Icon(Icons.download),
             title: const Text('Télécharger l\'historique'),
             onTap: () => _downloadHistory(context),
           ),
           const Divider(),
-          if (isSchoolCategory)
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Totaux ${formatCategory(category)}',
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Solde USD: ${formatBalance(usd, abbreviate)} \$',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                      Text(
-                        '70% Enseignants: ${formatBalance(usd70, abbreviate)} \$',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      Text(
-                        '30% Établissement: ${formatBalance(usd30, abbreviate)} \$',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Solde CDF: ${formatBalance(cdf, abbreviate)} FC',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                      Text(
-                        '70% Enseignants: ${formatBalance(cdf70, abbreviate)} FC',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      Text(
-                        '30% Établissement: ${formatBalance(cdf30, abbreviate)} FC',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ],
-                  ),
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Card(
+              elevation: 2,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Totaux $category',
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Solde USD: ${formatBalance(usd, abbreviate)} \$',
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    Text(
+                      '1/3 USD: ${formatBalance(usdThird, abbreviate)} \$',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Solde CDF: ${formatBalance(cdf, abbreviate)} FC',
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    Text(
+                      '1/3 CDF: ${formatBalance(cdfThird, abbreviate)} FC',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  ],
                 ),
               ),
             ),
+          ),
           Padding(
             padding: const EdgeInsets.all(16.0),
             child: FutureBuilder<Map<String, double>>(
-              future: getSchoolTotals(),
+              future: getAllTotals(),
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
@@ -831,10 +1215,8 @@ class SettingsPage extends StatelessWidget {
                 final totals = snapshot.data ?? {'usd': 0.0, 'cdf': 0.0};
                 final totalUSD = totals['usd']!;
                 final totalCDF = totals['cdf']!;
-                final totalUsd70 = totalUSD * 0.7;
-                final totalUsd30 = totalUSD * 0.3;
-                final totalCdf70 = totalCDF * 0.7;
-                final totalCdf30 = totalCDF * 0.3;
+                final totalUsdThird = totalUSD / 3;
+                final totalCdfThird = totalCDF / 3;
                 return Card(
                   elevation: 2,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -844,7 +1226,7 @@ class SettingsPage extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'Totaux Écoles (Secondaire + Primaire + Maternelle)',
+                          'Totaux Tous les Mois',
                           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(height: 8),
@@ -853,11 +1235,7 @@ class SettingsPage extends StatelessWidget {
                           style: const TextStyle(fontSize: 16),
                         ),
                         Text(
-                          '70% Enseignants: ${formatBalance(totalUsd70, abbreviate)} \$',
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                        Text(
-                          '30% Établissement: ${formatBalance(totalUsd30, abbreviate)} \$',
+                          '1/3 Total USD: ${formatBalance(totalUsdThird, abbreviate)} \$',
                           style: const TextStyle(fontSize: 14),
                         ),
                         const SizedBox(height: 16),
@@ -866,11 +1244,7 @@ class SettingsPage extends StatelessWidget {
                           style: const TextStyle(fontSize: 16),
                         ),
                         Text(
-                          '70% Enseignants: ${formatBalance(totalCdf70, abbreviate)} FC',
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                        Text(
-                          '30% Établissement: ${formatBalance(totalCdf30, abbreviate)} FC',
+                          '1/3 Total CDF: ${formatBalance(totalCdfThird, abbreviate)} FC',
                           style: const TextStyle(fontSize: 14),
                         ),
                       ],
@@ -891,106 +1265,115 @@ class SettingsPage extends StatelessWidget {
     );
   }
 }
-
-class ParoisseMenu extends StatelessWidget {
-  const ParoisseMenu({super.key});
-
+class KiosksListPage extends StatelessWidget {
+  const KiosksListPage({super.key});
+  Future<void> _showDeleteConfirmation(BuildContext context, String kioskName, int index) async {
+    final kioskProvider = Provider.of<KioskProvider>(context, listen: false);
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Supprimer le mois ?'),
+        content: const Text(
+          'ATTENTION ! Cette action est irréversible.\n\n'
+              'Toutes les transactions de ce mois seront perdues.\n'
+              'Tout sera effacé de la base de données.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Supprimer', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await kioskProvider.deleteKiosk(kioskName, index);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Mois supprimé.')),
+      );
+    }
+  }
   @override
   Widget build(BuildContext context) {
+    final kioskProvider = Provider.of<KioskProvider>(context);
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Paroisse', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('Liste des Kiosques'),
         centerTitle: true,
-        backgroundColor: theme.colorScheme.primary,
-        foregroundColor: theme.colorScheme.onPrimary,
       ),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [theme.scaffoldBackgroundColor, theme.colorScheme.primary.withOpacity(0.1)],
-          ),
-        ),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  'Gestion des Quêtes',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.primary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 32),
-                Card(
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'paroisse_matinale'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.wb_sunny),
-                          label: const Text('Quête Matinale'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'paroisse_dimanche'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.event),
-                          label: const Text('Quête de Dimanche'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                      ],
+      body: ListView.builder(
+        itemCount: kioskProvider.kiosks.length,
+        itemBuilder: (context, index) {
+          final kioskName = kioskProvider.kiosks[index];
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: GestureDetector(
+              onLongPress: () => _showDeleteConfirmation(context, kioskName, index),
+              child: ElevatedButton(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => KioskHomePage(kioskName: kioskName),
                     ),
-                  ),
+                  );
+                },
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 56),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-              ],
+                child: Text(kioskName.capitalize()),
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
 }
-
 class MainMenu extends StatelessWidget {
   const MainMenu({super.key});
-
+  void _showAddKioskDialog(BuildContext context) {
+    final TextEditingController nameController = TextEditingController();
+    final kioskProvider = Provider.of<KioskProvider>(context, listen: false);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ajouter une Kiosque'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(labelText: 'Nom de la Kiosque'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final name = nameController.text.trim();
+              if (name.isNotEmpty) {
+                await kioskProvider.addKiosk(name);
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Ajouter'),
+          ),
+        ],
+      ),
+    );
+  }
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('C-Finance', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('Gestion Financière'),
         centerTitle: true,
         backgroundColor: theme.colorScheme.primary,
         foregroundColor: theme.colorScheme.onPrimary,
@@ -1010,7 +1393,7 @@ class MainMenu extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  'Bienvenue dans Gestion de Caisse',
+                  'Bienvenue dans Gestion Financière',
                   style: TextStyle(
                     fontSize: 24,
                     fontWeight: FontWeight.bold,
@@ -1031,12 +1414,12 @@ class MainMenu extends StatelessWidget {
                             Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (context) => const ParoisseMenu(),
+                                builder: (context) => const KiosksListPage(),
                               ),
                             );
                           },
-                          icon: const Icon(Icons.church),
-                          label: const Text('Paroisse'),
+                          icon: const Icon(Icons.view_list),
+                          label: const Text('Voir les Kiosques'),
                           style: ElevatedButton.styleFrom(
                             minimumSize: const Size(double.infinity, 56),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1044,50 +1427,9 @@ class MainMenu extends StatelessWidget {
                         ),
                         const SizedBox(height: 16),
                         ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'secondaire'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.school),
-                          label: const Text('Secondaire'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'primaire'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.school),
-                          label: const Text('Primaire'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'maternelle'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.child_care),
-                          label: const Text('Maternelle'),
+                          onPressed: () => _showAddKioskDialog(context),
+                          icon: const Icon(Icons.add),
+                          label: const Text('Ajouter une Kiosque'),
                           style: ElevatedButton.styleFrom(
                             minimumSize: const Size(double.infinity, 56),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
