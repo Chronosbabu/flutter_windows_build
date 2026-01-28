@@ -7,6 +7,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:animate_do/animate_do.dart';
 
 // Modèle de transaction
 part 'main.g.dart';
@@ -88,24 +89,30 @@ class CashProvider extends ChangeNotifier {
 
   Future<void> initDatabase() async {
     _box = await Hive.openBox<TransactionModel>('transactions_$category');
+
     // Chargement/migration des soldes persistants
     final prefs = await SharedPreferences.getInstance();
     final List<TransactionModel> allTx = _box.values.toList();
+
     final double calculatedUSD = allTx
         .where((tx) => tx.currency == 'USD')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
+
     final double calculatedCDF = allTx
         .where((tx) => tx.currency == 'CDF')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
+
     _balanceUSD = prefs.getDouble('balance_USD_$category') ?? calculatedUSD;
     _balanceCDF = prefs.getDouble('balance_CDF_$category') ?? calculatedCDF;
+
     // Si c'était la première fois (pas encore de clé), on sauvegarde les soldes calculés
     if (!prefs.containsKey('balance_USD_$category')) {
       await prefs.setDouble('balance_USD_$category', _balanceUSD);
       await prefs.setDouble('balance_CDF_$category', _balanceCDF);
     }
+
     await _loadTransactions();
   }
 
@@ -116,6 +123,7 @@ class CashProvider extends ChangeNotifier {
 
   Future<void> addTransaction(double amount, String type, String description, String currency) async {
     final prefs = await SharedPreferences.getInstance();
+
     // Mise à jour du solde (seulement à l'ajout)
     if (currency == 'USD') {
       _balanceUSD += type == 'income' ? amount : -amount;
@@ -126,6 +134,7 @@ class CashProvider extends ChangeNotifier {
       _balanceCDF = _balanceCDF.clamp(0.0, double.infinity);
       await prefs.setDouble('balance_CDF_$category', _balanceCDF);
     }
+
     final tx = TransactionModel(
       amount: amount,
       type: type,
@@ -133,6 +142,7 @@ class CashProvider extends ChangeNotifier {
       date: DateTime.now(),
       currency: currency,
     );
+
     await _box.add(tx);
     await _loadTransactions();
   }
@@ -196,6 +206,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
   Hive.registerAdapter(TransactionModelAdapter());
+
   runApp(
     MultiProvider(
       providers: [
@@ -248,6 +259,14 @@ class MyApp extends StatelessWidget {
               filled: true,
               fillColor: Colors.white,
             ),
+            cardTheme: CardThemeData(
+              elevation: 4,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            ),
+            listTileTheme: ListTileThemeData(
+              tileColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
           ),
           darkTheme: ThemeData(
             useMaterial3: true,
@@ -268,6 +287,14 @@ class MyApp extends StatelessWidget {
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               filled: true,
               fillColor: Colors.grey[800],
+            ),
+            cardTheme: CardThemeData(
+              elevation: 4,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            ),
+            listTileTheme: ListTileThemeData(
+              tileColor: Colors.grey[800],
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),
           ),
           themeMode: themeProvider.themeMode,
@@ -375,8 +402,7 @@ class _PasswordGateState extends State<PasswordGate> {
                 obscureText: true,
                 decoration: const InputDecoration(labelText: 'Mot de passe'),
               ),
-              if (incorrect)
-                const Text('Mot de passe incorrect.', style: TextStyle(color: Colors.red)),
+              if (incorrect) const Text('Mot de passe incorrect.', style: TextStyle(color: Colors.red)),
             ],
           ),
           actions: [
@@ -424,8 +450,7 @@ class _PasswordGateState extends State<PasswordGate> {
                 obscureText: true,
                 decoration: const InputDecoration(labelText: 'Clé de réinitialisation'),
               ),
-              if (incorrect)
-                const Text('Clé incorrecte.', style: TextStyle(color: Colors.red)),
+              if (incorrect) const Text('Clé incorrecte.', style: TextStyle(color: Colors.red)),
             ],
           ),
           actions: [
@@ -514,24 +539,30 @@ class BalanceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
-        height: 100,
+        height: 120,
         padding: const EdgeInsets.all(16),
         margin: const EdgeInsets.symmetric(horizontal: 8),
         decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)],
+          gradient: LinearGradient(
+            colors: [color, color.withOpacity(0.8)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 12, offset: const Offset(0, 6)),
+          ],
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(title, style: TextStyle(color: textColor, fontSize: 16)),
-            const SizedBox(height: 4),
+            Text(title, style: TextStyle(color: textColor, fontSize: 18, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
             FittedBox(
               fit: BoxFit.fitWidth,
               child: Text(
                 '${formatBalance(balance, abbreviate)} $symbol',
-                style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+                style: TextStyle(color: textColor, fontSize: 28, fontWeight: FontWeight.bold),
               ),
             ),
           ],
@@ -558,21 +589,36 @@ class ActionButtons extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          ElevatedButton.icon(
-            onPressed: onIncomePressed,
-            icon: const Icon(Icons.add),
-            label: const Text('Entrée'),
-            style: ElevatedButton.styleFrom(backgroundColor: incomeColor),
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: onIncomePressed,
+              icon: const Icon(Icons.add_circle_outline, size: 28),
+              label: const Text('Entrée', style: TextStyle(fontSize: 18)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: incomeColor,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 5,
+              ),
+            ),
           ),
-          ElevatedButton.icon(
-            onPressed: onExpensePressed,
-            icon: const Icon(Icons.remove),
-            label: const Text('Sortie'),
-            style: ElevatedButton.styleFrom(backgroundColor: expenseColor),
+          const SizedBox(width: 16),
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: onExpensePressed,
+              icon: const Icon(Icons.remove_circle_outline, size: 28),
+              label: const Text('Sortie', style: TextStyle(fontSize: 18)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: expenseColor,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 5,
+              ),
+            ),
           ),
         ],
       ),
@@ -604,40 +650,53 @@ class TransactionList extends StatelessWidget {
         itemBuilder: (context, index) {
           final tx = transactions[index];
           String currencySymbol = tx.currency == 'USD' ? '\$' : 'FC';
-          return Card(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: ListTile(
-              leading: Icon(
-                tx.type == 'income' ? Icons.arrow_downward : Icons.arrow_upward,
-                color: tx.type == 'income' ? incomeColor : expenseColor,
-              ),
-              title: Text('${tx.amount.toStringAsFixed(2)} $currencySymbol - ${tx.description}'),
-              subtitle: Text('${DateFormat('dd/MM/yyyy HH:mm').format(tx.date)} - ${tx.currency}'),
-              trailing: IconButton(
-                icon: Icon(Icons.delete, color: deleteColor),
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: const Text('Confirmation'),
-                      content: const Text('Voulez-vous vraiment supprimer cette Transaction ?'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text('Annuler'),
-                        ),
-                        TextButton(
-                          onPressed: () {
-                            onDelete(tx);
-                            Navigator.pop(ctx);
-                          },
-                          child: const Text('OK'),
-                        ),
-                      ],
-                    ),
-                  );
-                },
+          Color txColor = tx.type == 'income' ? incomeColor : expenseColor;
+          IconData txIcon = tx.type == 'income' ? Icons.arrow_downward : Icons.arrow_upward;
+
+          return FadeInUp(
+            delay: Duration(milliseconds: index * 50),
+            child: Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              elevation: 3,
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: txColor.withOpacity(0.1),
+                  child: Icon(txIcon, color: txColor),
+                ),
+                title: Text(
+                  '${tx.amount.toStringAsFixed(2)} $currencySymbol - ${tx.description}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: Text(
+                  '${DateFormat('dd/MM/yyyy HH:mm').format(tx.date)} - ${tx.currency}',
+                  style: TextStyle(color: Colors.grey[600]),
+                ),
+                trailing: IconButton(
+                  icon: Icon(Icons.delete, color: deleteColor),
+                  onPressed: () {
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Confirmation'),
+                        content: const Text('Voulez-vous vraiment supprimer cette Transaction ?'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('Annuler'),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              onDelete(tx);
+                              Navigator.pop(ctx);
+                            },
+                            child: const Text('OK'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
           );
@@ -671,20 +730,31 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(widget.type == 'income' ? 'Ajouter Entrée' : 'Ajouter Sortie'),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: Text(widget.type == 'income' ? 'Ajouter Entrée' : 'Ajouter Sortie', textAlign: TextAlign.center),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           TextField(
             controller: amountController,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Montant'),
+            decoration: InputDecoration(
+              labelText: 'Montant',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              prefixIcon: const Icon(Icons.attach_money),
+            ),
           ),
+          const SizedBox(height: 16),
           TextField(
             controller: descController,
-            decoration: const InputDecoration(labelText: 'Description'),
+            decoration: InputDecoration(
+              labelText: 'Description',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              prefixIcon: const Icon(Icons.note),
+            ),
           ),
-          DropdownButton<String>(
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
             value: selectedCurrency,
             items: const [
               DropdownMenuItem<String>(value: 'USD', child: Text('USD')),
@@ -697,6 +767,11 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
                 });
               }
             },
+            decoration: InputDecoration(
+              labelText: 'Devise',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              prefixIcon: const Icon(Icons.currency_exchange),
+            ),
           ),
         ],
       ),
@@ -709,6 +784,7 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
           onPressed: () async {
             final amount = double.tryParse(amountController.text) ?? 0.0;
             if (amount <= 0) return;
+
             bool sufficient = true;
             if (widget.type == 'expense') {
               double balance = selectedCurrency == 'USD' ? widget.cashProvider.balanceUSD : widget.cashProvider.balanceCDF;
@@ -729,6 +805,7 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
                 );
               }
             }
+
             if (sufficient) {
               await widget.onAdd(amount, widget.type, descController.text, selectedCurrency);
               if (mounted) Navigator.pop(context);
@@ -771,13 +848,18 @@ class KioskHomePage extends StatelessWidget {
           final cashProvider = Provider.of<CashProvider>(context);
           final themeProvider = Provider.of<ThemeProvider>(context);
           final theme = Theme.of(context);
+
           return Scaffold(
+            extendBodyBehindAppBar: true,
             appBar: AppBar(
-              title: Text('Gestion - $kioskName', style: const TextStyle(fontWeight: FontWeight.bold)),
+              title: Text('Gestion - $kioskName',
+                  style: const TextStyle(fontWeight: FontWeight.bold, shadows: [Shadow(color: Colors.black26, blurRadius: 4, offset: Offset(1, 1))])),
               centerTitle: true,
+              backgroundColor: Colors.transparent,
+              elevation: 0,
               actions: [
                 IconButton(
-                  icon: const Icon(Icons.settings),
+                  icon: const Icon(Icons.settings, shadows: [Shadow(color: Colors.black26, blurRadius: 4, offset: Offset(1, 1))]),
                   onPressed: () {
                     Navigator.push(
                       context,
@@ -787,48 +869,64 @@ class KioskHomePage extends StatelessWidget {
                 ),
               ],
             ),
-            body: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      BalanceCard(
-                        title: 'Solde USD',
-                        balance: cashProvider.balanceUSD,
-                        symbol: '\$',
-                        color: theme.colorScheme.primary,
-                        textColor: theme.colorScheme.onPrimary,
-                        abbreviate: themeProvider.abbreviateBalance,
+            body: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [theme.colorScheme.primary.withOpacity(0.2), theme.scaffoldBackgroundColor],
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                ),
+              ),
+              child: SafeArea(
+                child: Column(
+                  children: [
+                    FadeInDown(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            BalanceCard(
+                              title: 'Solde USD',
+                              balance: cashProvider.balanceUSD,
+                              symbol: '\$',
+                              color: theme.colorScheme.primary,
+                              textColor: theme.colorScheme.onPrimary,
+                              abbreviate: themeProvider.abbreviateBalance,
+                            ),
+                            BalanceCard(
+                              title: 'Solde CDF',
+                              balance: cashProvider.balanceCDF,
+                              symbol: 'FC',
+                              color: theme.colorScheme.secondary,
+                              textColor: theme.colorScheme.onSecondary,
+                              abbreviate: themeProvider.abbreviateBalance,
+                            ),
+                          ],
+                        ),
                       ),
-                      BalanceCard(
-                        title: 'Solde CDF',
-                        balance: cashProvider.balanceCDF,
-                        symbol: 'FC',
-                        color: theme.colorScheme.secondary,
-                        textColor: theme.colorScheme.onSecondary,
-                        abbreviate: themeProvider.abbreviateBalance,
-                      ),
-                    ],
-                  ),
+                    ),
+                    ActionButtons(
+                      onIncomePressed: () => _showAddDialog(context, 'income'),
+                      onExpensePressed: () => _showAddDialog(context, 'expense'),
+                      incomeColor: theme.colorScheme.secondary,
+                      expenseColor: theme.colorScheme.error,
+                    ),
+                    const SizedBox(height: 16),
+                    FadeIn(
+                      child: const Text('Historique des Transactions',
+                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, shadows: [Shadow(color: Colors.black26, blurRadius: 2)])),
+                    ),
+                    TransactionList(
+                      transactions: cashProvider.transactions,
+                      onDelete: (tx) => cashProvider.deleteTransaction(tx.key ?? 0),
+                      incomeColor: theme.colorScheme.secondary,
+                      expenseColor: theme.colorScheme.error,
+                      deleteColor: theme.colorScheme.error,
+                    ),
+                  ],
                 ),
-                ActionButtons(
-                  onIncomePressed: () => _showAddDialog(context, 'income'),
-                  onExpensePressed: () => _showAddDialog(context, 'expense'),
-                  incomeColor: theme.colorScheme.secondary,
-                  expenseColor: theme.colorScheme.error,
-                ),
-                const SizedBox(height: 16),
-                const Text('Historique des Transactions', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                TransactionList(
-                  transactions: cashProvider.transactions,
-                  onDelete: (tx) => cashProvider.deleteTransaction(tx.key ?? 0),
-                  incomeColor: theme.colorScheme.secondary,
-                  expenseColor: theme.colorScheme.error,
-                  deleteColor: theme.colorScheme.error,
-                ),
-              ],
+              ),
             ),
           );
         },
@@ -842,10 +940,12 @@ Future<Map<String, double>> getAllTotals() async {
   final kioskBox = await Hive.openBox<String>('kiosks');
   double totalUSD = 0.0;
   double totalCDF = 0.0;
+
   for (var kiosk in kioskBox.values) {
     totalUSD += prefs.getDouble('balance_USD_$kiosk') ?? 0.0;
     totalCDF += prefs.getDouble('balance_CDF_$kiosk') ?? 0.0;
   }
+
   return {'usd': totalUSD, 'cdf': totalCDF};
 }
 
@@ -877,8 +977,7 @@ class SettingsPage extends StatelessWidget {
                 obscureText: true,
                 decoration: const InputDecoration(labelText: 'Confirmer Clé'),
               ),
-              if (!keysMatch)
-                const Text('Les clés ne correspondent pas.', style: TextStyle(color: Colors.red)),
+              if (!keysMatch) const Text('Les clés ne correspondent pas.', style: TextStyle(color: Colors.red)),
             ],
           ),
           actions: [
@@ -935,8 +1034,7 @@ class SettingsPage extends StatelessWidget {
                 obscureText: true,
                 decoration: const InputDecoration(labelText: 'Clé de Réinitialisation'),
               ),
-              if (!keyCorrect)
-                const Text('Clé incorrecte.', style: TextStyle(color: Colors.red)),
+              if (!keyCorrect) const Text('Clé incorrecte.', style: TextStyle(color: Colors.red)),
             ],
           ),
           actions: [
@@ -1020,6 +1118,7 @@ class SettingsPage extends StatelessWidget {
   Future<void> _downloadHistory(BuildContext context) async {
     final filenameController = TextEditingController();
     String? filename;
+
     await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1045,8 +1144,11 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
+
     if (filename == null) return;
+
     final pdf = pw.Document();
+
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
@@ -1069,10 +1171,12 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
+
     final bytes = await pdf.save();
     final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$filename.pdf');
     await file.writeAsBytes(bytes);
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Fichier sauvegardé : ${file.path}')),
     );
@@ -1101,6 +1205,7 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
+
     if (confirm == true) {
       await cashProvider.resetAll();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1119,6 +1224,7 @@ class SettingsPage extends StatelessWidget {
     final double cdf = cashProvider.balanceCDF;
     final double usdThird = usd / 3;
     final double cdfThird = cdf / 3;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Paramètres'),
@@ -1217,6 +1323,7 @@ class SettingsPage extends StatelessWidget {
                 final totalCDF = totals['cdf']!;
                 final totalUsdThird = totalUSD / 3;
                 final totalCdfThird = totalCDF / 3;
+
                 return Card(
                   elevation: 2,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1265,8 +1372,10 @@ class SettingsPage extends StatelessWidget {
     );
   }
 }
+
 class KiosksListPage extends StatelessWidget {
   const KiosksListPage({super.key});
+
   Future<void> _showDeleteConfirmation(BuildContext context, String kioskName, int index) async {
     final kioskProvider = Provider.of<KioskProvider>(context, listen: false);
     final bool? confirm = await showDialog<bool>(
@@ -1290,6 +1399,7 @@ class KiosksListPage extends StatelessWidget {
         ],
       ),
     );
+
     if (confirm == true) {
       await kioskProvider.deleteKiosk(kioskName, index);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1297,10 +1407,12 @@ class KiosksListPage extends StatelessWidget {
       );
     }
   }
+
   @override
   Widget build(BuildContext context) {
     final kioskProvider = Provider.of<KioskProvider>(context);
     final theme = Theme.of(context);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Liste des Kiosques'),
@@ -1310,24 +1422,29 @@ class KiosksListPage extends StatelessWidget {
         itemCount: kioskProvider.kiosks.length,
         itemBuilder: (context, index) {
           final kioskName = kioskProvider.kiosks[index];
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: GestureDetector(
-              onLongPress: () => _showDeleteConfirmation(context, kioskName, index),
-              child: ElevatedButton(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => KioskHomePage(kioskName: kioskName),
-                    ),
-                  );
-                },
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 56),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+
+          return FadeInUp(
+            delay: Duration(milliseconds: index * 100),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: GestureDetector(
+                onLongPress: () => _showDeleteConfirmation(context, kioskName, index),
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => KioskHomePage(kioskName: kioskName),
+                      ),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 56),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    elevation: 4,
+                  ),
+                  child: Text(kioskName.capitalize(), style: const TextStyle(fontSize: 18)),
                 ),
-                child: Text(kioskName.capitalize()),
               ),
             ),
           );
@@ -1336,11 +1453,14 @@ class KiosksListPage extends StatelessWidget {
     );
   }
 }
+
 class MainMenu extends StatelessWidget {
   const MainMenu({super.key});
+
   void _showAddKioskDialog(BuildContext context) {
     final TextEditingController nameController = TextEditingController();
     final kioskProvider = Provider.of<KioskProvider>(context, listen: false);
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1368,9 +1488,11 @@ class MainMenu extends StatelessWidget {
       ),
     );
   }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Gestion Financière'),
@@ -1383,7 +1505,7 @@ class MainMenu extends StatelessWidget {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [theme.scaffoldBackgroundColor, theme.colorScheme.primary.withOpacity(0.1)],
+            colors: [theme.colorScheme.primary.withOpacity(0.1), theme.scaffoldBackgroundColor],
           ),
         ),
         child: Center(
@@ -1392,50 +1514,57 @@ class MainMenu extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  'Bienvenue dans Gestion Financière',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.primary,
+                FadeInDown(
+                  child: Text(
+                    'Bienvenue dans Gestion Financière',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.primary,
+                      shadows: [Shadow(color: Colors.black26, blurRadius: 4, offset: Offset(1, 1))],
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 32),
-                Card(
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const KiosksListPage(),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.view_list),
-                          label: const Text('Voir les Kiosques'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                FadeInUp(
+                  child: Card(
+                    elevation: 6,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const KiosksListPage(),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.view_list),
+                            label: const Text('Voir les Kiosques', style: TextStyle(fontSize: 18)),
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size(double.infinity, 60),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              elevation: 4,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () => _showAddKioskDialog(context),
-                          icon: const Icon(Icons.add),
-                          label: const Text('Ajouter une Kiosque'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: () => _showAddKioskDialog(context),
+                            icon: const Icon(Icons.add),
+                            label: const Text('Ajouter une Kiosque', style: TextStyle(fontSize: 18)),
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size(double.infinity, 60),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              elevation: 4,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
