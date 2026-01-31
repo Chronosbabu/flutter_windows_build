@@ -8,30 +8,22 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:animate_do/animate_do.dart';
-
 // Modèle de transaction
 part 'main.g.dart';
-
 @HiveType(typeId: 0)
 class TransactionModel extends HiveObject {
   @HiveField(0)
   int? id;
-
   @HiveField(1)
   final double amount;
-
   @HiveField(2)
   final String type; // 'income' or 'expense'
-
   @HiveField(3)
   final String description;
-
   @HiveField(4)
   final DateTime date;
-
   @HiveField(5)
   final String currency; // 'USD' or 'CDF'
-
   TransactionModel({
     this.id,
     required this.amount,
@@ -41,15 +33,16 @@ class TransactionModel extends HiveObject {
     required this.currency,
   });
 }
-
 // Provider pour la gestion d'état des thèmes et paramètres
 class ThemeProvider extends ChangeNotifier {
   ThemeMode _themeMode = ThemeMode.light;
   bool _abbreviateBalance = true;
-
   ThemeMode get themeMode => _themeMode;
   bool get abbreviateBalance => _abbreviateBalance;
-
+  late Future<void> _initFuture;
+  ThemeProvider() {
+    _initFuture = init();
+  }
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     _abbreviateBalance = prefs.getBool('abbreviate_balance') ?? true;
@@ -57,14 +50,12 @@ class ThemeProvider extends ChangeNotifier {
     _themeMode = (theme == 'dark') ? ThemeMode.dark : ThemeMode.light;
     notifyListeners();
   }
-
   Future<void> setThemeMode(ThemeMode mode) async {
     _themeMode = mode;
     final prefs = await SharedPreferences.getInstance();
     prefs.setString('theme_mode', mode == ThemeMode.dark ? 'dark' : 'light');
     notifyListeners();
   }
-
   Future<void> setAbbreviateBalance(bool value) async {
     _abbreviateBalance = value;
     final prefs = await SharedPreferences.getInstance();
@@ -72,7 +63,6 @@ class ThemeProvider extends ChangeNotifier {
     notifyListeners();
   }
 }
-
 // Provider pour la gestion de caisse
 class CashProvider extends ChangeNotifier {
   final String category;
@@ -80,50 +70,42 @@ class CashProvider extends ChangeNotifier {
   double _balanceCDF = 0.0;
   List<TransactionModel> _transactions = [];
   late Box<TransactionModel> _box;
-
+  late Future<void> _initFuture;
   double get balanceUSD => _balanceUSD;
   double get balanceCDF => _balanceCDF;
   List<TransactionModel> get transactions => _transactions;
-
-  CashProvider(this.category);
-
+  CashProvider(this.category) {
+    _initFuture = initDatabase();
+  }
   Future<void> initDatabase() async {
     _box = await Hive.openBox<TransactionModel>('transactions_$category');
-
     // Chargement/migration des soldes persistants
     final prefs = await SharedPreferences.getInstance();
     final List<TransactionModel> allTx = _box.values.toList();
-
     final double calculatedUSD = allTx
         .where((tx) => tx.currency == 'USD')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
-
     final double calculatedCDF = allTx
         .where((tx) => tx.currency == 'CDF')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
-
     _balanceUSD = prefs.getDouble('balance_USD_$category') ?? calculatedUSD;
     _balanceCDF = prefs.getDouble('balance_CDF_$category') ?? calculatedCDF;
-
     // Si c'était la première fois (pas encore de clé), on sauvegarde les soldes calculés
     if (!prefs.containsKey('balance_USD_$category')) {
       await prefs.setDouble('balance_USD_$category', _balanceUSD);
       await prefs.setDouble('balance_CDF_$category', _balanceCDF);
     }
-
     await _loadTransactions();
   }
-
   Future<void> _loadTransactions() async {
     _transactions = _box.values.toList()..sort((a, b) => b.date.compareTo(a.date));
     notifyListeners();
   }
-
   Future<void> addTransaction(double amount, String type, String description, String currency) async {
+    await _initFuture;
     final prefs = await SharedPreferences.getInstance();
-
     // Mise à jour du solde (seulement à l'ajout)
     if (currency == 'USD') {
       _balanceUSD += type == 'income' ? amount : -amount;
@@ -134,7 +116,6 @@ class CashProvider extends ChangeNotifier {
       _balanceCDF = _balanceCDF.clamp(0.0, double.infinity);
       await prefs.setDouble('balance_CDF_$category', _balanceCDF);
     }
-
     final tx = TransactionModel(
       amount: amount,
       type: type,
@@ -142,19 +123,18 @@ class CashProvider extends ChangeNotifier {
       date: DateTime.now(),
       currency: currency,
     );
-
     await _box.add(tx);
     await _loadTransactions();
   }
-
   // Suppression sans impact sur le solde
   Future<void> deleteTransaction(int key) async {
+    await _initFuture;
     await _box.delete(key);
     await _loadTransactions();
   }
-
   // Réinitialisation complète
   Future<void> resetAll() async {
+    await _initFuture;
     await _box.clear();
     final prefs = await SharedPreferences.getInstance();
     _balanceUSD = 0.0;
@@ -164,75 +144,62 @@ class CashProvider extends ChangeNotifier {
     await _loadTransactions();
   }
 }
-
 // Provider pour la gestion des kiosques
 class KioskProvider extends ChangeNotifier {
   List<String> _kiosks = [];
   late Box<String> _kioskBox;
-
+  late Future<void> _initFuture;
   List<String> get kiosks => _kiosks;
-
-  Future<void> init() async {
+  KioskProvider() {
+    _initFuture = _init();
+  }
+  Future<void> _init() async {
     _kioskBox = await Hive.openBox<String>('kiosks');
     _kiosks = _kioskBox.values.toList();
     notifyListeners();
   }
-
   Future<void> addKiosk(String name) async {
+    await _initFuture;
     await _kioskBox.add(name);
     _kiosks.insert(0, name); // Ajouter au début pour que les nouveaux soient en haut
     notifyListeners();
   }
-
   Future<void> deleteKiosk(String name, int index) async {
+    await _initFuture;
     // Supprimer la box des transactions
     final box = await Hive.openBox<TransactionModel>('transactions_$name');
     await box.clear();
     await box.close();
-
     // Supprimer les soldes de SharedPreferences
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('balance_USD_$name');
     await prefs.remove('balance_CDF_$name');
-
     // Supprimer le kiosque de la liste
     await _kioskBox.deleteAt(index);
     _kiosks.removeAt(index);
     notifyListeners();
   }
 }
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
   Hive.registerAdapter(TransactionModelAdapter());
-
   runApp(
     MultiProvider(
       providers: [
         ChangeNotifierProvider(
-          create: (context) {
-            final themeProvider = ThemeProvider();
-            themeProvider.init();
-            return themeProvider;
-          },
+          create: (context) => ThemeProvider(),
         ),
         ChangeNotifierProvider(
-          create: (context) {
-            final kioskProvider = KioskProvider();
-            kioskProvider.init();
-            return kioskProvider;
-          },
+          create: (context) => KioskProvider(),
         ),
       ],
       child: const MyApp(),
     ),
   );
 }
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return Consumer<ThemeProvider>(
@@ -304,17 +271,13 @@ class MyApp extends StatelessWidget {
     );
   }
 }
-
 class PasswordGate extends StatefulWidget {
   const PasswordGate({super.key});
-
   @override
   State<PasswordGate> createState() => _PasswordGateState();
 }
-
 class _PasswordGateState extends State<PasswordGate> {
   bool _isAuthenticated = false;
-
   @override
   void initState() {
     super.initState();
@@ -322,7 +285,6 @@ class _PasswordGateState extends State<PasswordGate> {
       _checkPassword();
     });
   }
-
   Future<void> _checkPassword() async {
     final prefs = await SharedPreferences.getInstance();
     final String? storedPassword = prefs.getString('app_password');
@@ -331,12 +293,10 @@ class _PasswordGateState extends State<PasswordGate> {
     }
     await _authenticateDialog();
   }
-
   Future<void> _setPasswordDialog() async {
     final TextEditingController passwordController = TextEditingController();
     final TextEditingController confirmController = TextEditingController();
     bool passwordsMatch = true;
-
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -380,14 +340,12 @@ class _PasswordGateState extends State<PasswordGate> {
       ),
     );
   }
-
   Future<void> _authenticateDialog() async {
     final TextEditingController passwordController = TextEditingController();
     bool incorrect = false;
     final prefs = await SharedPreferences.getInstance();
     final String? storedPassword = prefs.getString('app_password');
     final String? storedResetKey = prefs.getString('app_reset_key');
-
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -430,13 +388,11 @@ class _PasswordGateState extends State<PasswordGate> {
       ),
     );
   }
-
   Future<void> _forgotPasswordDialog(BuildContext dialogContext) async {
     final TextEditingController resetKeyController = TextEditingController();
     bool incorrect = false;
     final prefs = await SharedPreferences.getInstance();
     final String? storedResetKey = prefs.getString('app_reset_key');
-
     await showDialog(
       context: dialogContext,
       builder: (ctx) => StatefulBuilder(
@@ -479,7 +435,6 @@ class _PasswordGateState extends State<PasswordGate> {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     if (!_isAuthenticated) {
@@ -490,13 +445,11 @@ class _PasswordGateState extends State<PasswordGate> {
     return const MainMenu();
   }
 }
-
 extension StringExtension on String {
   String capitalize() {
     return "${this[0].toUpperCase()}${substring(1)}";
   }
 }
-
 String formatBalance(double value, bool abbreviate) {
   value = value.clamp(0.0, double.infinity);
   if (!abbreviate) {
@@ -516,7 +469,6 @@ String formatBalance(double value, bool abbreviate) {
   }
   return '${NumberFormat("#,##0.#").format(formattedValue)}$suffix';
 }
-
 class BalanceCard extends StatelessWidget {
   final String title;
   final double balance;
@@ -524,7 +476,6 @@ class BalanceCard extends StatelessWidget {
   final Color color;
   final Color textColor;
   final bool abbreviate;
-
   const BalanceCard({
     super.key,
     required this.title,
@@ -534,7 +485,6 @@ class BalanceCard extends StatelessWidget {
     required this.textColor,
     required this.abbreviate,
   });
-
   @override
   Widget build(BuildContext context) {
     return Expanded(
@@ -571,13 +521,11 @@ class BalanceCard extends StatelessWidget {
     );
   }
 }
-
 class ActionButtons extends StatelessWidget {
   final VoidCallback onIncomePressed;
   final VoidCallback onExpensePressed;
   final Color incomeColor;
   final Color expenseColor;
-
   const ActionButtons({
     super.key,
     required this.onIncomePressed,
@@ -585,7 +533,6 @@ class ActionButtons extends StatelessWidget {
     required this.incomeColor,
     required this.expenseColor,
   });
-
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -625,14 +572,12 @@ class ActionButtons extends StatelessWidget {
     );
   }
 }
-
 class TransactionList extends StatelessWidget {
   final List<TransactionModel> transactions;
   final Function(TransactionModel) onDelete;
   final Color incomeColor;
   final Color expenseColor;
   final Color deleteColor;
-
   const TransactionList({
     super.key,
     required this.transactions,
@@ -641,7 +586,6 @@ class TransactionList extends StatelessWidget {
     required this.expenseColor,
     required this.deleteColor,
   });
-
   @override
   Widget build(BuildContext context) {
     return Expanded(
@@ -652,7 +596,6 @@ class TransactionList extends StatelessWidget {
           String currencySymbol = tx.currency == 'USD' ? '\$' : 'FC';
           Color txColor = tx.type == 'income' ? incomeColor : expenseColor;
           IconData txIcon = tx.type == 'income' ? Icons.arrow_downward : Icons.arrow_upward;
-
           return FadeInUp(
             delay: Duration(milliseconds: index * 50),
             child: Card(
@@ -705,28 +648,23 @@ class TransactionList extends StatelessWidget {
     );
   }
 }
-
 class AddTransactionDialog extends StatefulWidget {
   final String type;
   final Function(double, String, String, String) onAdd;
   final CashProvider cashProvider;
-
   const AddTransactionDialog({
     super.key,
     required this.type,
     required this.onAdd,
     required this.cashProvider,
   });
-
   @override
   State<AddTransactionDialog> createState() => _AddTransactionDialogState();
 }
-
 class _AddTransactionDialogState extends State<AddTransactionDialog> {
   final amountController = TextEditingController();
   final descController = TextEditingController();
   String selectedCurrency = 'CDF';
-
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
@@ -784,7 +722,6 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
           onPressed: () async {
             final amount = double.tryParse(amountController.text) ?? 0.0;
             if (amount <= 0) return;
-
             bool sufficient = true;
             if (widget.type == 'expense') {
               double balance = selectedCurrency == 'USD' ? widget.cashProvider.balanceUSD : widget.cashProvider.balanceCDF;
@@ -805,7 +742,6 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
                 );
               }
             }
-
             if (sufficient) {
               await widget.onAdd(amount, widget.type, descController.text, selectedCurrency);
               if (mounted) Navigator.pop(context);
@@ -817,12 +753,9 @@ class _AddTransactionDialogState extends State<AddTransactionDialog> {
     );
   }
 }
-
 class KioskHomePage extends StatelessWidget {
   final String kioskName;
-
   const KioskHomePage({super.key, required this.kioskName});
-
   void _showAddDialog(BuildContext context, String type) {
     final provider = Provider.of<CashProvider>(context, listen: false);
     showDialog(
@@ -834,21 +767,15 @@ class KioskHomePage extends StatelessWidget {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider<CashProvider>(
-      create: (context) {
-        final provider = CashProvider(kioskName);
-        provider.initDatabase();
-        return provider;
-      },
+      create: (context) => CashProvider(kioskName),
       child: Builder(
         builder: (context) {
           final cashProvider = Provider.of<CashProvider>(context);
           final themeProvider = Provider.of<ThemeProvider>(context);
           final theme = Theme.of(context);
-
           return Scaffold(
             extendBodyBehindAppBar: true,
             appBar: AppBar(
@@ -934,31 +861,24 @@ class KioskHomePage extends StatelessWidget {
     );
   }
 }
-
 Future<Map<String, double>> getAllTotals() async {
   final prefs = await SharedPreferences.getInstance();
   final kioskBox = await Hive.openBox<String>('kiosks');
   double totalUSD = 0.0;
   double totalCDF = 0.0;
-
   for (var kiosk in kioskBox.values) {
     totalUSD += prefs.getDouble('balance_USD_$kiosk') ?? 0.0;
     totalCDF += prefs.getDouble('balance_CDF_$kiosk') ?? 0.0;
   }
-
   return {'usd': totalUSD, 'cdf': totalCDF};
 }
-
 class SettingsPage extends StatelessWidget {
   final CashProvider cashProvider;
-
   const SettingsPage({super.key, required this.cashProvider});
-
   Future<void> _showSetResetKeyDialog(BuildContext context) async {
     final TextEditingController keyController = TextEditingController();
     final TextEditingController confirmController = TextEditingController();
     bool keysMatch = true;
-
     await showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1007,20 +927,17 @@ class SettingsPage extends StatelessWidget {
       ),
     );
   }
-
   Future<void> _showChangePasswordDialog(BuildContext context) async {
     final TextEditingController resetKeyController = TextEditingController();
     bool keyCorrect = true;
     final prefs = await SharedPreferences.getInstance();
     final String? storedResetKey = prefs.getString('app_reset_key');
-
     if (storedResetKey == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Définissez d\'abord une clé de réinitialisation.')),
       );
       return;
     }
-
     final bool? confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1058,12 +975,10 @@ class SettingsPage extends StatelessWidget {
         ),
       ),
     );
-
     if (confirmed == true) {
       final TextEditingController newPasswordController = TextEditingController();
       final TextEditingController confirmController = TextEditingController();
       bool passwordsMatch = true;
-
       await showDialog(
         context: context,
         builder: (ctx) => StatefulBuilder(
@@ -1114,11 +1029,9 @@ class SettingsPage extends StatelessWidget {
       );
     }
   }
-
   Future<void> _downloadHistory(BuildContext context) async {
     final filenameController = TextEditingController();
     String? filename;
-
     await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1144,11 +1057,8 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
-
     if (filename == null) return;
-
     final pdf = pw.Document();
-
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
@@ -1171,17 +1081,14 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
-
     final bytes = await pdf.save();
     final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$filename.pdf');
     await file.writeAsBytes(bytes);
-
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Fichier sauvegardé : ${file.path}')),
     );
   }
-
   Future<void> _showResetConfirmation(BuildContext context) async {
     final bool? confirm = await showDialog<bool>(
       context: context,
@@ -1205,7 +1112,6 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
-
     if (confirm == true) {
       await cashProvider.resetAll();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1213,7 +1119,6 @@ class SettingsPage extends StatelessWidget {
       );
     }
   }
-
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
@@ -1224,7 +1129,6 @@ class SettingsPage extends StatelessWidget {
     final double cdf = cashProvider.balanceCDF;
     final double usdThird = usd / 3;
     final double cdfThird = cdf / 3;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Paramètres'),
@@ -1323,7 +1227,6 @@ class SettingsPage extends StatelessWidget {
                 final totalCDF = totals['cdf']!;
                 final totalUsdThird = totalUSD / 3;
                 final totalCdfThird = totalCDF / 3;
-
                 return Card(
                   elevation: 2,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1372,10 +1275,8 @@ class SettingsPage extends StatelessWidget {
     );
   }
 }
-
 class KiosksListPage extends StatelessWidget {
   const KiosksListPage({super.key});
-
   Future<void> _showDeleteConfirmation(BuildContext context, String kioskName, int index) async {
     final kioskProvider = Provider.of<KioskProvider>(context, listen: false);
     final bool? confirm = await showDialog<bool>(
@@ -1399,7 +1300,6 @@ class KiosksListPage extends StatelessWidget {
         ],
       ),
     );
-
     if (confirm == true) {
       await kioskProvider.deleteKiosk(kioskName, index);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1407,12 +1307,10 @@ class KiosksListPage extends StatelessWidget {
       );
     }
   }
-
   @override
   Widget build(BuildContext context) {
     final kioskProvider = Provider.of<KioskProvider>(context);
     final theme = Theme.of(context);
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Liste des Kiosques'),
@@ -1422,7 +1320,6 @@ class KiosksListPage extends StatelessWidget {
         itemCount: kioskProvider.kiosks.length,
         itemBuilder: (context, index) {
           final kioskName = kioskProvider.kiosks[index];
-
           return FadeInUp(
             delay: Duration(milliseconds: index * 100),
             child: Padding(
@@ -1453,14 +1350,11 @@ class KiosksListPage extends StatelessWidget {
     );
   }
 }
-
 class MainMenu extends StatelessWidget {
   const MainMenu({super.key});
-
   void _showAddKioskDialog(BuildContext context) {
     final TextEditingController nameController = TextEditingController();
     final kioskProvider = Provider.of<KioskProvider>(context, listen: false);
-
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1488,11 +1382,9 @@ class MainMenu extends StatelessWidget {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Gestion Financière'),
