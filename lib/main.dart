@@ -10,6 +10,8 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:animate_do/animate_do.dart';
 // Modèle de transaction
 part 'main.g.dart';
+// Version unique pour isoler les données de cette version de l'app
+const String appDataPrefix = 'v2_'; // Changez ceci pour chaque nouvelle version (ex: 'v3_', etc.)
 @HiveType(typeId: 0)
 class TransactionModel extends HiveObject {
   @HiveField(0)
@@ -45,21 +47,21 @@ class ThemeProvider extends ChangeNotifier {
   }
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
-    _abbreviateBalance = prefs.getBool('abbreviate_balance') ?? true;
-    String? theme = prefs.getString('theme_mode');
+    _abbreviateBalance = prefs.getBool(appDataPrefix + 'abbreviate_balance') ?? true;
+    String? theme = prefs.getString(appDataPrefix + 'theme_mode');
     _themeMode = (theme == 'dark') ? ThemeMode.dark : ThemeMode.light;
     notifyListeners();
   }
   Future<void> setThemeMode(ThemeMode mode) async {
     _themeMode = mode;
     final prefs = await SharedPreferences.getInstance();
-    prefs.setString('theme_mode', mode == ThemeMode.dark ? 'dark' : 'light');
+    prefs.setString(appDataPrefix + 'theme_mode', mode == ThemeMode.dark ? 'dark' : 'light');
     notifyListeners();
   }
   Future<void> setAbbreviateBalance(bool value) async {
     _abbreviateBalance = value;
     final prefs = await SharedPreferences.getInstance();
-    prefs.setBool('abbreviate_balance', value);
+    prefs.setBool(appDataPrefix + 'abbreviate_balance', value);
     notifyListeners();
   }
 }
@@ -78,7 +80,7 @@ class CashProvider extends ChangeNotifier {
     _initFuture = initDatabase();
   }
   Future<void> initDatabase() async {
-    _box = await Hive.openBox<TransactionModel>('transactions_$category');
+    _box = await Hive.openBox<TransactionModel>(appDataPrefix + 'transactions_$category');
     // Chargement/migration des soldes persistants
     final prefs = await SharedPreferences.getInstance();
     final List<TransactionModel> allTx = _box.values.toList();
@@ -90,12 +92,12 @@ class CashProvider extends ChangeNotifier {
         .where((tx) => tx.currency == 'CDF')
         .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
         .clamp(0.0, double.infinity);
-    _balanceUSD = prefs.getDouble('balance_USD_$category') ?? calculatedUSD;
-    _balanceCDF = prefs.getDouble('balance_CDF_$category') ?? calculatedCDF;
+    _balanceUSD = prefs.getDouble(appDataPrefix + 'balance_USD_$category') ?? calculatedUSD;
+    _balanceCDF = prefs.getDouble(appDataPrefix + 'balance_CDF_$category') ?? calculatedCDF;
     // Si c'était la première fois (pas encore de clé), on sauvegarde les soldes calculés
-    if (!prefs.containsKey('balance_USD_$category')) {
-      await prefs.setDouble('balance_USD_$category', _balanceUSD);
-      await prefs.setDouble('balance_CDF_$category', _balanceCDF);
+    if (!prefs.containsKey(appDataPrefix + 'balance_USD_$category')) {
+      await prefs.setDouble(appDataPrefix + 'balance_USD_$category', _balanceUSD);
+      await prefs.setDouble(appDataPrefix + 'balance_CDF_$category', _balanceCDF);
     }
     await _loadTransactions();
   }
@@ -110,11 +112,11 @@ class CashProvider extends ChangeNotifier {
     if (currency == 'USD') {
       _balanceUSD += type == 'income' ? amount : -amount;
       _balanceUSD = _balanceUSD.clamp(0.0, double.infinity);
-      await prefs.setDouble('balance_USD_$category', _balanceUSD);
+      await prefs.setDouble(appDataPrefix + 'balance_USD_$category', _balanceUSD);
     } else {
       _balanceCDF += type == 'income' ? amount : -amount;
       _balanceCDF = _balanceCDF.clamp(0.0, double.infinity);
-      await prefs.setDouble('balance_CDF_$category', _balanceCDF);
+      await prefs.setDouble(appDataPrefix + 'balance_CDF_$category', _balanceCDF);
     }
     final tx = TransactionModel(
       amount: amount,
@@ -139,8 +141,8 @@ class CashProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _balanceUSD = 0.0;
     _balanceCDF = 0.0;
-    await prefs.setDouble('balance_USD_$category', 0.0);
-    await prefs.setDouble('balance_CDF_$category', 0.0);
+    await prefs.setDouble(appDataPrefix + 'balance_USD_$category', 0.0);
+    await prefs.setDouble(appDataPrefix + 'balance_CDF_$category', 0.0);
     await _loadTransactions();
   }
 }
@@ -154,7 +156,7 @@ class KioskProvider extends ChangeNotifier {
     _initFuture = _init();
   }
   Future<void> _init() async {
-    _kioskBox = await Hive.openBox<String>('kiosks');
+    _kioskBox = await Hive.openBox<String>(appDataPrefix + 'kiosks');
     _kiosks = _kioskBox.values.toList();
     notifyListeners();
   }
@@ -167,13 +169,13 @@ class KioskProvider extends ChangeNotifier {
   Future<void> deleteKiosk(String name, int index) async {
     await _initFuture;
     // Supprimer la box des transactions
-    final box = await Hive.openBox<TransactionModel>('transactions_$name');
+    final box = await Hive.openBox<TransactionModel>(appDataPrefix + 'transactions_$name');
     await box.clear();
     await box.close();
     // Supprimer les soldes de SharedPreferences
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('balance_USD_$name');
-    await prefs.remove('balance_CDF_$name');
+    await prefs.remove(appDataPrefix + 'balance_USD_$name');
+    await prefs.remove(appDataPrefix + 'balance_CDF_$name');
     // Supprimer le kiosque de la liste
     await _kioskBox.deleteAt(index);
     _kiosks.removeAt(index);
@@ -287,7 +289,7 @@ class _PasswordGateState extends State<PasswordGate> {
   }
   Future<void> _checkPassword() async {
     final prefs = await SharedPreferences.getInstance();
-    final String? storedPassword = prefs.getString('app_password');
+    final String? storedPassword = prefs.getString(appDataPrefix + 'app_password');
     if (storedPassword == null || storedPassword.isEmpty) {
       await _setPasswordDialog();
     }
@@ -325,7 +327,7 @@ class _PasswordGateState extends State<PasswordGate> {
               onPressed: () async {
                 if (passwordController.text == confirmController.text && passwordController.text.isNotEmpty) {
                   final prefs = await SharedPreferences.getInstance();
-                  await prefs.setString('app_password', passwordController.text);
+                  await prefs.setString(appDataPrefix + 'app_password', passwordController.text);
                   Navigator.pop(ctx);
                 } else {
                   setState(() {
@@ -344,8 +346,8 @@ class _PasswordGateState extends State<PasswordGate> {
     final TextEditingController passwordController = TextEditingController();
     bool incorrect = false;
     final prefs = await SharedPreferences.getInstance();
-    final String? storedPassword = prefs.getString('app_password');
-    final String? storedResetKey = prefs.getString('app_reset_key');
+    final String? storedPassword = prefs.getString(appDataPrefix + 'app_password');
+    final String? storedResetKey = prefs.getString(appDataPrefix + 'app_reset_key');
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -392,7 +394,7 @@ class _PasswordGateState extends State<PasswordGate> {
     final TextEditingController resetKeyController = TextEditingController();
     bool incorrect = false;
     final prefs = await SharedPreferences.getInstance();
-    final String? storedResetKey = prefs.getString('app_reset_key');
+    final String? storedResetKey = prefs.getString(appDataPrefix + 'app_reset_key');
     await showDialog(
       context: dialogContext,
       builder: (ctx) => StatefulBuilder(
@@ -863,12 +865,12 @@ class KioskHomePage extends StatelessWidget {
 }
 Future<Map<String, double>> getAllTotals() async {
   final prefs = await SharedPreferences.getInstance();
-  final kioskBox = await Hive.openBox<String>('kiosks');
+  final kioskBox = await Hive.openBox<String>(appDataPrefix + 'kiosks');
   double totalUSD = 0.0;
   double totalCDF = 0.0;
   for (var kiosk in kioskBox.values) {
-    totalUSD += prefs.getDouble('balance_USD_$kiosk') ?? 0.0;
-    totalCDF += prefs.getDouble('balance_CDF_$kiosk') ?? 0.0;
+    totalUSD += prefs.getDouble(appDataPrefix + 'balance_USD_$kiosk') ?? 0.0;
+    totalCDF += prefs.getDouble(appDataPrefix + 'balance_CDF_$kiosk') ?? 0.0;
   }
   return {'usd': totalUSD, 'cdf': totalCDF};
 }
@@ -909,7 +911,7 @@ class SettingsPage extends StatelessWidget {
               onPressed: () async {
                 if (keyController.text == confirmController.text && keyController.text.isNotEmpty) {
                   final prefs = await SharedPreferences.getInstance();
-                  await prefs.setString('app_reset_key', keyController.text);
+                  await prefs.setString(appDataPrefix + 'app_reset_key', keyController.text);
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Clé de réinitialisation définie.')),
@@ -931,7 +933,7 @@ class SettingsPage extends StatelessWidget {
     final TextEditingController resetKeyController = TextEditingController();
     bool keyCorrect = true;
     final prefs = await SharedPreferences.getInstance();
-    final String? storedResetKey = prefs.getString('app_reset_key');
+    final String? storedResetKey = prefs.getString(appDataPrefix + 'app_reset_key');
     if (storedResetKey == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Définissez d\'abord une clé de réinitialisation.')),
@@ -1010,7 +1012,7 @@ class SettingsPage extends StatelessWidget {
                 onPressed: () async {
                   if (newPasswordController.text == confirmController.text && newPasswordController.text.isNotEmpty) {
                     final prefs = await SharedPreferences.getInstance();
-                    await prefs.setString('app_password', newPasswordController.text);
+                    await prefs.setString(appDataPrefix + 'app_password', newPasswordController.text);
                     Navigator.pop(ctx);
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Mot de passe changé.')),
@@ -1286,7 +1288,7 @@ class KiosksListPage extends StatelessWidget {
         content: const Text(
           'ATTENTION ! Cette action est irréversible.\n\n'
               'Toutes les transactions de ce mois seront perdues.\n'
-              'Tout sera effacé de la base de données.',
+              'Tout sera perdu définitivement.',
         ),
         actions: [
           TextButton(
