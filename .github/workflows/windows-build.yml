@@ -31,7 +31,9 @@ jobs:
         run: choco install innosetup -y
 
       - name: Copy babu.ico for Inno Setup
-        run: copy assets\icons\babu.ico .  # copie dans la racine pour Inno Setup
+        shell: powershell
+        run: Copy-Item -Path "assets\icons\babu.ico" -Destination "."
+
 
       - name: Compile installer
         shell: powershell
