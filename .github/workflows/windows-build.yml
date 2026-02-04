@@ -30,6 +30,9 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y
 
+      - name: Copy babu.ico for Inno Setup
+        run: copy assets\icons\babu.ico .  # copie dans la racine pour Inno Setup
+
       - name: Compile installer
         shell: powershell
         run: |
