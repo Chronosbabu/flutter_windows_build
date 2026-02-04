@@ -2,8 +2,7 @@ name: Flutter Windows Build + Setup
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -31,16 +30,22 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y
 
-      - name: Compile Installer with Inno Setup
+      - name: Compile installer
         shell: powershell
         run: |
-          $issPath = "windows-exe\installer.iss"
-          $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & "$isccPath" "$issPath"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $iss  = "installer.iss"
 
-      - name: Upload Setup EXE
+          if (!(Test-Path $iss)) {
+            Write-Error "installer.iss introuvable"
+            exit 1
+          }
+
+          & "$iscc" "$iss"
+
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: C-SchoolApp-Setup
-          path: windows-exe\C-SchoolApp-Setup.exe
+          path: C-SchoolApp-Setup.exe
 
