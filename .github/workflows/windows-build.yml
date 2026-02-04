@@ -1,4 +1,4 @@
-name: Flutter Windows Build
+name: Flutter Windows Build + Setup
 
 on:
   push:
@@ -28,12 +28,15 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
-      - name: Show build directory (DEBUG)
-        run: Get-ChildItem build/windows -Recurse
+      - name: Install Inno Setup
+        run: choco install innosetup -y
 
-      - name: Upload Windows build
+      - name: Compile Installer with Inno Setup
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "windows-exe\installer.iss"'
+
+      - name: Upload Setup EXE
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: build/windows/**
+          name: C-SchoolApp-Setup
+          path: windows-exe\C-SchoolApp-Setup.exe
 
