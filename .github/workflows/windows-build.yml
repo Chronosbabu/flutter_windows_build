@@ -34,7 +34,6 @@ jobs:
         shell: powershell
         run: Copy-Item -Path "assets\icons\babu.ico" -Destination "."
 
-
       - name: Compile installer
         shell: powershell
         run: |
@@ -51,6 +50,5 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: C-SchoolApp-Setup
-          path: C-SchoolApp-Setup.exe
-
+          name: Gestion-de-Finance-Setup
+          path: Gestion-de-Finance-Setup.exe
