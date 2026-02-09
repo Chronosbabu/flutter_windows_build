@@ -27,6 +27,13 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
+      - name: Rename exe
+        shell: powershell
+        run: |
+          Rename-Item `
+            "build\windows\x64\runner\Release\c_schollapp.exe" `
+            "gestion_de_finance.exe"
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
@@ -52,3 +59,4 @@ jobs:
         with:
           name: Gestion-de-Finance-Setup
           path: Gestion-de-Finance-Setup.exe
+
