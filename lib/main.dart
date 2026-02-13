@@ -1,313 +1,609 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-
-// Modèle de transaction
-part 'main.g.dart';
-
-@HiveType(typeId: 0)
-class TransactionModel extends HiveObject {
-  @HiveField(0)
-  int? id;
-
-  @HiveField(1)
-  final double amount;
-
-  @HiveField(2)
-  final String type; // 'income' or 'expense'
-
-  @HiveField(3)
-  final String description;
-
-  @HiveField(4)
-  final DateTime date;
-
-  @HiveField(5)
-  final String currency; // 'USD' or 'CDF'
-
-  TransactionModel({
-    this.id,
-    required this.amount,
-    required this.type,
-    required this.description,
-    required this.date,
-    required this.currency,
-  });
-}
-
-// Provider pour la gestion d'état des thèmes et paramètres
-class ThemeProvider extends ChangeNotifier {
-  ThemeMode _themeMode = ThemeMode.light;
-  bool _abbreviateBalance = true;
-
-  ThemeMode get themeMode => _themeMode;
-  bool get abbreviateBalance => _abbreviateBalance;
-
-  Future<void> init() async {
-    final prefs = await SharedPreferences.getInstance();
-    _abbreviateBalance = prefs.getBool('abbreviate_balance') ?? true;
-    String? theme = prefs.getString('theme_mode');
-    _themeMode = (theme == 'dark') ? ThemeMode.dark : ThemeMode.light;
-    notifyListeners();
-  }
-
-  Future<void> setThemeMode(ThemeMode mode) async {
-    _themeMode = mode;
-    final prefs = await SharedPreferences.getInstance();
-    prefs.setString('theme_mode', mode == ThemeMode.dark ? 'dark' : 'light');
-    notifyListeners();
-  }
-
-  Future<void> setAbbreviateBalance(bool value) async {
-    _abbreviateBalance = value;
-    final prefs = await SharedPreferences.getInstance();
-    prefs.setBool('abbreviate_balance', value);
-    notifyListeners();
-  }
-}
-
-// Provider pour la gestion de caisse
-class CashProvider extends ChangeNotifier {
-  final String category;
-  double _balanceUSD = 0.0;
-  double _balanceCDF = 0.0;
-  List<TransactionModel> _transactions = [];
-  late Box<TransactionModel> _box;
-
-  double get balanceUSD => _balanceUSD;
-  double get balanceCDF => _balanceCDF;
-  List<TransactionModel> get transactions => _transactions;
-
-  CashProvider(this.category);
-
-  Future<void> initDatabase() async {
-    _box = await Hive.openBox<TransactionModel>('transactions_$category');
-    // Chargement/migration des soldes persistants
-    final prefs = await SharedPreferences.getInstance();
-    final List<TransactionModel> allTx = _box.values.toList();
-    final double calculatedUSD = allTx
-        .where((tx) => tx.currency == 'USD')
-        .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
-        .clamp(0.0, double.infinity);
-    final double calculatedCDF = allTx
-        .where((tx) => tx.currency == 'CDF')
-        .fold(0.0, (prev, tx) => prev + (tx.type == 'income' ? tx.amount : -tx.amount))
-        .clamp(0.0, double.infinity);
-    _balanceUSD = prefs.getDouble('balance_USD_$category') ?? calculatedUSD;
-    _balanceCDF = prefs.getDouble('balance_CDF_$category') ?? calculatedCDF;
-    // Si c'était la première fois (pas encore de clé), on sauvegarde les soldes calculés
-    if (!prefs.containsKey('balance_USD_$category')) {
-      await prefs.setDouble('balance_USD_$category', _balanceUSD);
-      await prefs.setDouble('balance_CDF_$category', _balanceCDF);
-    }
-    await _loadTransactions();
-  }
-
-  Future<void> _loadTransactions() async {
-    _transactions = _box.values.toList()..sort((a, b) => b.date.compareTo(a.date));
-    notifyListeners();
-  }
-
-  Future<void> addTransaction(double amount, String type, String description, String currency) async {
-    final prefs = await SharedPreferences.getInstance();
-    // Mise à jour du solde (seulement à l'ajout)
-    if (currency == 'USD') {
-      _balanceUSD += type == 'income' ? amount : -amount;
-      _balanceUSD = _balanceUSD.clamp(0.0, double.infinity);
-      await prefs.setDouble('balance_USD_$category', _balanceUSD);
-    } else {
-      _balanceCDF += type == 'income' ? amount : -amount;
-      _balanceCDF = _balanceCDF.clamp(0.0, double.infinity);
-      await prefs.setDouble('balance_CDF_$category', _balanceCDF);
-    }
-    final tx = TransactionModel(
-      amount: amount,
-      type: type,
-      description: description,
-      date: DateTime.now(),
-      currency: currency,
-    );
-    await _box.add(tx);
-    await _loadTransactions();
-  }
-
-  // Suppression sans impact sur le solde
-  Future<void> deleteTransaction(int key) async {
-    await _box.delete(key);
-    await _loadTransactions();
-  }
-
-  // Réinitialisation complète
-  Future<void> resetAll() async {
-    await _box.clear();
-    final prefs = await SharedPreferences.getInstance();
-    _balanceUSD = 0.0;
-    _balanceCDF = 0.0;
-    await prefs.setDouble('balance_USD_$category', 0.0);
-    await prefs.setDouble('balance_CDF_$category', 0.0);
-    await _loadTransactions();
-  }
-}
-
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await Hive.initFlutter();
-  Hive.registerAdapter(TransactionModelAdapter());
+import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
+void main() {
   runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(
-          create: (context) {
-            final themeProvider = ThemeProvider();
-            themeProvider.init();
-            return themeProvider;
-          },
-        ),
-      ],
+    ChangeNotifierProvider(
+      create: (context) => AppState(),
       child: const MyApp(),
     ),
   );
 }
-
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<ThemeProvider>(
-      builder: (context, themeProvider, child) {
-        return MaterialApp(
-          title: 'Gestion de Caisse',
-          theme: ThemeData(
-            useMaterial3: true,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.blue,
-              secondary: Colors.green,
-              brightness: Brightness.light,
-            ),
-            scaffoldBackgroundColor: Colors.grey[100],
-            appBarTheme: const AppBarTheme(elevation: 0),
-            elevatedButtonTheme: ElevatedButtonThemeData(
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-            inputDecorationTheme: InputDecorationTheme(
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              filled: true,
-              fillColor: Colors.white,
-            ),
-          ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.blue,
-              secondary: Colors.green,
-              brightness: Brightness.dark,
-            ),
-            scaffoldBackgroundColor: Colors.grey[900],
-            appBarTheme: const AppBarTheme(elevation: 0),
-            elevatedButtonTheme: ElevatedButtonThemeData(
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-            inputDecorationTheme: InputDecorationTheme(
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              filled: true,
-              fillColor: Colors.grey[800],
-            ),
-          ),
-          themeMode: themeProvider.themeMode,
-          home: const MainMenu(),
-        );
-      },
-    );
+class AppState extends ChangeNotifier {
+  bool isDarkMode = false;
+  AppState() {
+    _loadTheme();
+  }
+  Future _loadTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    isDarkMode = prefs.getBool('isDarkMode') ?? false;
+    notifyListeners();
+  }
+  Future toggleTheme() async {
+    isDarkMode = !isDarkMode;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isDarkMode', isDarkMode);
   }
 }
-
 extension StringExtension on String {
   String capitalize() {
+    if (isEmpty) return this;
     return "${this[0].toUpperCase()}${substring(1)}";
   }
 }
-
-String formatCategory(String category) {
-  return category
-      .replaceAll('_', ' ')
-      .split(' ')
-      .map((word) => word.capitalize())
-      .join(' ');
-}
-
-String formatBalance(double value, bool abbreviate) {
-  value = value.clamp(0.0, double.infinity);
-  if (!abbreviate) {
-    return NumberFormat("#,##0.00").format(value);
-  }
-  String suffix = '';
-  double formattedValue = value;
-  if (value >= 1e9) {
-    formattedValue /= 1e9;
-    suffix = 'B';
-  } else if (value >= 1e6) {
-    formattedValue /= 1e6;
-    suffix = 'M';
-  } else if (value >= 1e3) {
-    formattedValue /= 1e3;
-    suffix = 'K';
-  }
-  return '${NumberFormat("#,##0.#").format(formattedValue)}$suffix';
-}
-
-class BalanceCard extends StatelessWidget {
-  final String title;
-  final double balance;
-  final String symbol;
-  final Color color;
-  final Color textColor;
-  final bool abbreviate;
-
-  const BalanceCard({
-    super.key,
-    required this.title,
-    required this.balance,
-    required this.symbol,
-    required this.color,
-    required this.textColor,
-    required this.abbreviate,
-  });
-
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        height: 100,
-        padding: const EdgeInsets.all(16),
-        margin: const EdgeInsets.symmetric(horizontal: 8),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)],
+    final appState = Provider.of<AppState>(context);
+    return MaterialApp(
+      title: 'Gestion des Frais Scolaires',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+          primary: Colors.indigo[700],
+          secondary: Colors.teal,
+          surface: Colors.grey[50],
+          brightness: Brightness.light,
         ),
+        useMaterial3: true,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.indigo,
+          foregroundColor: Colors.white,
+          elevation: 0,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.indigo,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            elevation: 4,
+          ),
+        ),
+        cardTheme: CardThemeData(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          elevation: 2,
+          color: Colors.white,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          filled: true,
+          fillColor: Colors.grey[100],
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        ),
+        textTheme: const TextTheme(
+          bodyLarge: TextStyle(fontSize: 16),
+          bodyMedium: TextStyle(fontSize: 14),
+          titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+        scaffoldBackgroundColor: Colors.grey[50],
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+          primary: Colors.indigo[700],
+          secondary: Colors.teal,
+          surface: Colors.grey[900],
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+        appBarTheme: AppBarTheme(
+          backgroundColor: Colors.indigo[900],
+          foregroundColor: Colors.white,
+          elevation: 0,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.indigo[700],
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            elevation: 4,
+          ),
+        ),
+        cardTheme: CardThemeData(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          elevation: 2,
+          color: Colors.grey[800],
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          filled: true,
+          fillColor: Colors.grey[800],
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        ),
+        textTheme: const TextTheme(
+          bodyLarge: TextStyle(fontSize: 16),
+          bodyMedium: TextStyle(fontSize: 14),
+          titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+        scaffoldBackgroundColor: Colors.grey[900],
+      ),
+      themeMode: appState.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+      home: const MainHomeScreen(),
+    );
+  }
+}
+class MainHomeScreen extends StatelessWidget {
+  const MainHomeScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gestion des Frais Scolaires'),
+        centerTitle: true,
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Colors.indigo, Colors.teal],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    'Choisissez le Type d\'École',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  _buildPrettyButton(
+                    context,
+                    icon: Icons.school,
+                    label: 'École Secondaire',
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => SchoolHomeScreen(schoolType: 'secondaire'),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  _buildPrettyButton(
+                    context,
+                    icon: Icons.child_care,
+                    label: 'Primaire',
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => SchoolHomeScreen(schoolType: 'primaire'),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  _buildPrettyButton(
+                    context,
+                    icon: Icons.child_friendly,
+                    label: 'Maternelle',
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => SchoolHomeScreen(schoolType: 'maternelle'),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  _buildPrettyButton(
+                    context,
+                    icon: Icons.cut,
+                    label: 'Coupe et Couture',
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => SchoolHomeScreen(schoolType: 'coupe_couture'),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  Widget _buildPrettyButton(BuildContext context, {required IconData icon, required String label, required VoidCallback onPressed}) {
+    return ElevatedButton.icon(
+      icon: Icon(icon, size: 30, color: Colors.white),
+      label: Text(label, style: const TextStyle(fontSize: 18, color: Colors.white)),
+      onPressed: onPressed,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.8),
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        elevation: 8,
+        shadowColor: Colors.black.withOpacity(0.3),
+      ),
+    );
+  }
+}
+class Eleve {
+  String nom;
+  String postNom;
+  String prenom;
+  String classe;
+  Map<String, double> paid = {};
+  Eleve({
+    required this.nom,
+    required this.postNom,
+    required this.prenom,
+    required this.classe,
+  });
+  Map<String, dynamic> toJson() => {
+    'nom': nom,
+    'postNom': postNom,
+    'prenom': prenom,
+    'classe': classe,
+    'paid': paid,
+  };
+  factory Eleve.fromJson(Map<String, dynamic> json) {
+    return Eleve(
+      nom: json['nom'],
+      postNom: json['postNom'],
+      prenom: json['prenom'],
+      classe: json['classe'],
+    )..paid = Map<String, double>.from(json['paid'] ?? {});
+  }
+}
+class SchoolYearData {
+  Map<String, double> manualFrais;
+  List<Eleve> eleves;
+  double defaultMonthly;
+  Map<String, double> classExceptions;
+  SchoolYearData({
+    required this.manualFrais,
+    required this.eleves,
+    required this.defaultMonthly,
+    required this.classExceptions,
+  });
+  Map<String, dynamic> toJson() => {
+    'manualFrais': manualFrais,
+    'eleves': eleves.map((e) => e.toJson()).toList(),
+    'defaultMonthly': defaultMonthly,
+    'classExceptions': classExceptions,
+  };
+  factory SchoolYearData.fromJson(Map<String, dynamic> json) {
+    return SchoolYearData(
+      manualFrais: Map<String, double>.from(json['manualFrais'] ?? {}),
+      eleves: (json['eleves'] as List? ?? []).map((e) => Eleve.fromJson(e)).toList(),
+      defaultMonthly: json['defaultMonthly'] ?? 0.0,
+      classExceptions: Map<String, double>.from(json['classExceptions'] ?? {}),
+    );
+  }
+}
+class FraisScolaires {
+  final String schoolType;
+  SchoolYearData currentData = SchoolYearData(
+    manualFrais: {},
+    eleves: [],
+    defaultMonthly: 0.0,
+    classExceptions: {},
+  );
+  String currentYear = '2023-2024'; // Default year
+  Map<String, SchoolYearData> history = {};
+  final List<String> months = [
+    'Septembre',
+    'Octobre',
+    'Novembre',
+    'Décembre',
+    'Janvier',
+    'Février',
+    'Mars',
+    'Avril',
+    'Mai',
+    'Juin'
+  ];
+  FraisScolaires(this.schoolType);
+  Future loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encryptedData = prefs.getString('${schoolType}_encrypted_data');
+    if (encryptedData != null) {
+      final decrypted = _decrypt(encryptedData);
+      final data = json.decode(decrypted);
+      currentData = SchoolYearData.fromJson(data['currentData'] ?? {});
+      currentYear = data['currentYear'] ?? '2023-2024';
+      history = Map.fromEntries(
+        (data['history'] as Map? ?? {}).entries.map(
+              (entry) => MapEntry(entry.key, SchoolYearData.fromJson(entry.value)),
+        ),
+      );
+    }
+  }
+  Future saveData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = {
+      'currentData': currentData.toJson(),
+      'currentYear': currentYear,
+      'history': history.map((key, value) => MapEntry(key, value.toJson())),
+    };
+    final jsonData = json.encode(data);
+    final encrypted = _encrypt(jsonData);
+    await prefs.setString('${schoolType}_encrypted_data', encrypted);
+  }
+  void enregistrerFrais(String mois, double montant) {
+    currentData.manualFrais[mois] = (currentData.manualFrais[mois] ?? 0) + montant;
+  }
+  double getRequiredForClass(String classe) {
+    return currentData.classExceptions[classe] ?? currentData.defaultMonthly;
+  }
+  double getTotalForMonth(String mois) {
+    double studentTotal = currentData.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
+    return (currentData.manualFrais[mois] ?? 0) + studentTotal;
+  }
+  Map<String, double> calculerRepartitions(String mois) {
+    final total = getTotalForMonth(mois);
+    return {
+      '30%': total * 0.3,
+      '70%': total * 0.7,
+      '7%': total * 0.07,
+    };
+  }
+  void handlePayment(Eleve eleve, String mois, double payment) {
+    int monthIndex = months.indexOf(mois);
+    if (monthIndex == -1) return;
+    String currentMonth = mois;
+    double remaining = payment;
+    while (remaining > 0 && monthIndex < months.length) {
+      double required = getRequiredForClass(eleve.classe);
+      double alreadyPaid = eleve.paid[currentMonth] ?? 0;
+      double needed = required - alreadyPaid;
+      if (needed > 0) {
+        double toAdd = remaining > needed ? needed : remaining;
+        eleve.paid[currentMonth] = alreadyPaid + toAdd;
+        remaining -= toAdd;
+      }
+      monthIndex++;
+      if (monthIndex < months.length) {
+        currentMonth = months[monthIndex];
+      }
+    }
+  }
+  Future resetForNewYear(String newYear) async {
+    history[currentYear] = SchoolYearData(
+      manualFrais: Map.from(currentData.manualFrais),
+      eleves: List.from(currentData.eleves),
+      defaultMonthly: currentData.defaultMonthly,
+      classExceptions: Map.from(currentData.classExceptions),
+    );
+    currentData = SchoolYearData(
+      manualFrais: {},
+      eleves: [],
+      defaultMonthly: 0.0,
+      classExceptions: {},
+    );
+    currentYear = newYear;
+    await saveData();
+  }
+  String _encrypt(String text) {
+    // Simple placeholder encryption, replace with real encryption if needed
+    return base64Encode(utf8.encode(text));
+  }
+  String _decrypt(String encryptedText) {
+    // Simple placeholder decryption
+    return utf8.decode(base64Decode(encryptedText));
+  } double getStudentTotalPaid(Eleve eleve) {
+    return eleve.paid.values.fold(0.0, (sum, paid) => sum + paid);
+  }
+  double getStudentPending(Eleve eleve) {
+    return months.length * getRequiredForClass(eleve.classe) - getStudentTotalPaid(eleve);
+  }
+  double getYearTotalCollected() {
+    return months.fold(0.0, (sum, mois) => sum + getTotalForMonth(mois));
+  }
+  double getYearTotalPending() {
+    return currentData.eleves.fold(0.0, (sum, e) => sum + getStudentPending(e));
+  }
+  Future<void> generatePdf(String filename) async {
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) => [
+          pw.Header(
+            level: 0,
+            child: pw.Text('Rapport pour $schoolType - $currentYear'),
+          ),
+          pw.Paragraph(text: 'Total Collecté: ${getYearTotalCollected().toStringAsFixed(2)}'),
+          pw.Paragraph(text: 'Total En Attente: ${getYearTotalPending().toStringAsFixed(2)}'),
+          pw.Header(level: 1, child: pw.Text('Répartitions par Mois')),
+          pw.Table.fromTextArray(
+            headers: ['Mois', 'Total', '30%', '70%', '7%'],
+            data: months.map((mois) {
+              final repart = calculerRepartitions(mois);
+              final total = getTotalForMonth(mois);
+              return [
+                mois,
+                total.toStringAsFixed(2),
+                repart['30%']!.toStringAsFixed(2),
+                repart['70%']!.toStringAsFixed(2),
+                repart['7%']!.toStringAsFixed(2),
+              ];
+            }).toList(),
+          ),
+          pw.Header(level: 1, child: pw.Text('Liste des Élèves')),
+          pw.Table.fromTextArray(
+            headers: ['Nom', 'Post-nom', 'Prénom', 'Classe', 'Total Payé', 'En Attente'],
+            data: currentData.eleves.map((e) {
+              return [
+                e.nom,
+                e.postNom,
+                e.prenom,
+                e.classe,
+                getStudentTotalPaid(e).toStringAsFixed(2),
+                getStudentPending(e).toStringAsFixed(2),
+              ];
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+    final bytes = await pdf.save();
+    final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/$filename.pdf');
+    await file.writeAsBytes(bytes);
+  }
+}
+class SchoolHomeScreen extends StatefulWidget {
+  final String schoolType;
+  const SchoolHomeScreen({super.key, required this.schoolType});
+  @override
+  State<SchoolHomeScreen> createState() => _SchoolHomeScreenState();
+}
+class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
+  late FraisScolaires fraisScolaires;
+  @override
+  void initState() {
+    super.initState();
+    fraisScolaires = FraisScolaires(widget.schoolType);
+    _loadData();
+  }
+  Future _loadData() async {
+    await fraisScolaires.loadData();
+    setState(() {});
+  }
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Gestion - ${widget.schoolType.capitalize()} - ${fraisScolaires.currentYear}'),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => SettingsScreen(fraisScolaires: fraisScolaires),
+                ),
+              ).then((_) => setState(() {}));
+            },
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(title, style: TextStyle(color: textColor, fontSize: 16)),
-            const SizedBox(height: 4),
-            FittedBox(
-              fit: BoxFit.fitWidth,
-              child: Text(
-                '${formatBalance(balance, abbreviate)} $symbol',
-                style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Tableau de Bord', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 10),
+                      Text('Total Élèves: ${fraisScolaires.currentData.eleves.length}'),
+                      Text('Total Collecté: ${fraisScolaires.getYearTotalCollected().toStringAsFixed(2)}'),
+                      Text('Total En Attente: ${fraisScolaires.getYearTotalPending().toStringAsFixed(2)}'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(
+              height: 200,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                children: [
+                  _buildActionCard(
+                    icon: Icons.person_add,
+                    label: 'Enregistrer un élève',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => EnregistrerEleveScreen(fraisScolaires: fraisScolaires),
+                        ),
+                      ).then((_) => setState(() {}));
+                    },
+                  ),
+                  _buildActionCard(
+                    icon: Icons.payment,
+                    label: 'Paiement élève',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => PaiementEleveScreen(fraisScolaires: fraisScolaires),
+                        ),
+                      ).then((_) => setState(() {}));
+                    },
+                  ),
+                  _buildActionCard(
+                    icon: Icons.add_circle_outline,
+                    label: 'Frais manuel',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => EnregistrerScreen(fraisScolaires: fraisScolaires),
+                        ),
+                      ).then((_) => setState(() {}));
+                    },
+                  ),
+                  _buildActionCard(
+                    icon: Icons.bar_chart,
+                    label: 'Répartitions',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => AfficherScreen(fraisScolaires: fraisScolaires),
+                        ),
+                      );
+                    },
+                  ),
+                  _buildActionCard(
+                    icon: Icons.history,
+                    label: 'Historique',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => HistoryScreen(fraisScolaires: fraisScolaires),
+                        ),
+                      );
+                    },
+                  ),
+                  _buildActionCard(
+                    icon: Icons.exit_to_app,
+                    label: 'Quitter',
+                    onTap: () => SystemNavigator.pop(),
+                  ),
+                ],
               ),
             ),
           ],
@@ -315,324 +611,537 @@ class BalanceCard extends StatelessWidget {
       ),
     );
   }
-}
-
-class ActionButtons extends StatelessWidget {
-  final VoidCallback onIncomePressed;
-  final VoidCallback onExpensePressed;
-  final Color incomeColor;
-  final Color expenseColor;
-
-  const ActionButtons({
-    super.key,
-    required this.onIncomePressed,
-    required this.onExpensePressed,
-    required this.incomeColor,
-    required this.expenseColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          ElevatedButton.icon(
-            onPressed: onIncomePressed,
-            icon: const Icon(Icons.add),
-            label: const Text('Entrée'),
-            style: ElevatedButton.styleFrom(backgroundColor: incomeColor),
+  Widget _buildActionCard({required IconData icon, required String label, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 150,
+        margin: const EdgeInsets.symmetric(horizontal: 8.0),
+        child: Card(
+          elevation: 4,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 50, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(height: 10),
+              Text(label, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ],
           ),
-          ElevatedButton.icon(
-            onPressed: onExpensePressed,
-            icon: const Icon(Icons.remove),
-            label: const Text('Sortie'),
-            style: ElevatedButton.styleFrom(backgroundColor: expenseColor),
-          ),
-        ],
+        ),
       ),
     );
   }
 }
-
-class TransactionList extends StatelessWidget {
-  final List<TransactionModel> transactions;
-  final Function(TransactionModel) onDelete;
-  final Color incomeColor;
-  final Color expenseColor;
-  final Color deleteColor;
-
-  const TransactionList({
+class EnregistrerEleveScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const EnregistrerEleveScreen({
     super.key,
-    required this.transactions,
-    required this.onDelete,
-    required this.incomeColor,
-    required this.expenseColor,
-    required this.deleteColor,
+    required this.fraisScolaires,
   });
-
+  @override
+  State<EnregistrerEleveScreen> createState() => _EnregistrerEleveScreenState();
+}
+class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
+  late TextEditingController nomController;
+  late TextEditingController postNomController;
+  late TextEditingController prenomController;
+  late TextEditingController classeController;
+  @override
+  void initState() {
+    super.initState();
+    nomController = TextEditingController();
+    postNomController = TextEditingController();
+    prenomController = TextEditingController();
+    classeController = TextEditingController();
+  }
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: ListView.builder(
-        itemCount: transactions.length,
-        itemBuilder: (context, index) {
-          final tx = transactions[index];
-          String currencySymbol = tx.currency == 'USD' ? '\$' : 'FC';
-          return Card(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: ListTile(
-              leading: Icon(
-                tx.type == 'income' ? Icons.arrow_downward : Icons.arrow_upward,
-                color: tx.type == 'income' ? incomeColor : expenseColor,
-              ),
-              title: Text('${tx.amount.toStringAsFixed(2)} $currencySymbol - ${tx.description}'),
-              subtitle: Text('${DateFormat('dd/MM/yyyy HH:mm').format(tx.date)} - ${tx.currency}'),
-              trailing: IconButton(
-                icon: Icon(Icons.delete, color: deleteColor),
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: const Text('Confirmation'),
-                      content: const Text('Voulez-vous vraiment supprimer cette Transaction ?'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text('Annuler'),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Enregistrer un Élève'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            TextField(
+              controller: nomController,
+              decoration: const InputDecoration(labelText: 'Nom'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: postNomController,
+              decoration: const InputDecoration(labelText: 'Post-nom'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: prenomController,
+              decoration: const InputDecoration(labelText: 'Prénom'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: classeController,
+              decoration: const InputDecoration(labelText: 'Classe'),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () async {
+                final nom = nomController.text.trim();
+                final postNom = postNomController.text.trim();
+                final prenom = prenomController.text.trim();
+                final classe = classeController.text.trim();
+                if (nom.isNotEmpty && postNom.isNotEmpty && prenom.isNotEmpty && classe.isNotEmpty) {
+                  widget.fraisScolaires.currentData.eleves.add(Eleve(
+                    nom: nom,
+                    postNom: postNom,
+                    prenom: prenom,
+                    classe: classe,
+                  ));
+                  await widget.fraisScolaires.saveData();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Élève enregistré!')),
+                  );
+                  Navigator.pop(context);
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Remplir tous les champs')),
+                  );
+                }
+              },
+              child: const Text('Enregistrer'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+class PaiementEleveScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const PaiementEleveScreen({super.key, required this.fraisScolaires});
+  @override
+  State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
+}
+class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
+  final TextEditingController searchController = TextEditingController();
+  List<Eleve> filteredEleves = [];
+  String? selectedClass;
+  List<String> classes = [];
+  @override
+  void initState() {
+    super.initState();
+    filteredEleves = widget.fraisScolaires.currentData.eleves;
+    classes = widget.fraisScolaires.currentData.eleves.map((e) => e.classe).toSet().toList();
+    searchController.addListener(_filterEleves);
+  }
+  void _filterEleves() {
+    final query = searchController.text.toLowerCase();
+    setState(() {
+      filteredEleves = widget.fraisScolaires.currentData.eleves.where((eleve) {
+        final fullName = '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'.toLowerCase();
+        final classMatch = selectedClass == null || eleve.classe == selectedClass;
+        return fullName.contains(query) && classMatch;
+      }).toList()
+        ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
+    });
+  }
+  bool _canPayForMonth(Eleve eleve, String mois) {
+    int index = widget.fraisScolaires.months.indexOf(mois);
+    for (int i = 0; i < index; i++) {
+      String prev = widget.fraisScolaires.months[i];
+      double req = widget.fraisScolaires.getRequiredForClass(eleve.classe);
+      double p = eleve.paid[prev] ?? 0;
+      if (p < req) return false;
+    }
+    return true;
+  }
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gestion des Paiements'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () => _showSetMonthlyDialog(context),
+          ),
+          IconButton(
+            icon: const Icon(Icons.warning),
+            tooltip: 'Exceptions',
+            onPressed: () => _showSetExceptionsDialog(context),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                TextField(
+                  controller: searchController,
+                  decoration: const InputDecoration(
+                    labelText: 'Rechercher par nom',
+                    prefixIcon: Icon(Icons.search),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                DropdownButton<String>(
+                  hint: const Text('Filtrer par classe'),
+                  value: selectedClass,
+                  onChanged: (value) {
+                    setState(() {
+                      selectedClass = value;
+                      _filterEleves();
+                    });
+                  },
+                  items: classes.map((classe) {
+                    return DropdownMenuItem(value: classe, child: Text(classe));
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: filteredEleves.length,
+              itemBuilder: (context, index) {
+                final eleve = filteredEleves[index];
+                double totalPaid = widget.fraisScolaires.getStudentTotalPaid(eleve);
+                double pending = widget.fraisScolaires.getStudentPending(eleve);
+                return Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                         ),
-                        TextButton(
-                          onPressed: () {
-                            onDelete(tx);
-                            Navigator.pop(ctx);
-                          },
-                          child: const Text('OK'),
+                        Text('Payé: $totalPaid | En attente: $pending'),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          height: 80,
+                          child: ListView.builder(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: widget.fraisScolaires.months.length,
+                            itemBuilder: (context, monthIndex) {
+                              final mois = widget.fraisScolaires.months[monthIndex];
+                              double required = widget.fraisScolaires.getRequiredForClass(eleve.classe);
+                              double paid = eleve.paid[mois] ?? 0;
+                              bool isFullyPaid = paid >= required;
+                              Color backgroundColor = isFullyPaid
+                                  ? (isDark ? Colors.green[700]! : Colors.green[100]!)
+                                  : (isDark ? Colors.red[700]! : Colors.red[100]!);
+                              Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                                child: GestureDetector(
+                                  onTap: (isFullyPaid || !_canPayForMonth(eleve, mois)) ? null : () => _showPaymentDialog(context, eleve, mois),
+                                  child: Container(
+                                    width: 120,
+                                    decoration: BoxDecoration(
+                                      color: backgroundColor,
+                                      border: Border.all(color: borderColor),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Text(mois, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                                        Text('Requis: ${required.toStringAsFixed(0)}'),
+                                        if (paid > 0) Text('Payé: ${paid.toStringAsFixed(0)}'),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                         ),
                       ],
                     ),
-                  );
-                },
-              ),
+                  ),
+                );
+              },
             ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-class AddTransactionDialog extends StatefulWidget {
-  final String type;
-  final Function(double, String, String, String) onAdd;
-  final CashProvider cashProvider;
-
-  const AddTransactionDialog({
-    super.key,
-    required this.type,
-    required this.onAdd,
-    required this.cashProvider,
-  });
-
-  @override
-  State<AddTransactionDialog> createState() => _AddTransactionDialogState();
-}
-
-class _AddTransactionDialogState extends State<AddTransactionDialog> {
-  final amountController = TextEditingController();
-  final descController = TextEditingController();
-  String selectedCurrency = 'CDF';
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.type == 'income' ? 'Ajouter Entrée' : 'Ajouter Sortie'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: amountController,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Montant'),
-          ),
-          TextField(
-            controller: descController,
-            decoration: const InputDecoration(labelText: 'Description'),
-          ),
-          DropdownButton<String>(
-            value: selectedCurrency,
-            items: const [
-              DropdownMenuItem<String>(value: 'USD', child: Text('USD')),
-              DropdownMenuItem<String>(value: 'CDF', child: Text('CDF')),
-            ],
-            onChanged: (String? newValue) {
-              if (newValue != null) {
-                setState(() {
-                  selectedCurrency = newValue;
-                });
-              }
-            },
           ),
         ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Annuler'),
-        ),
-        ElevatedButton(
-          onPressed: () async {
-            final amount = double.tryParse(amountController.text) ?? 0.0;
-            if (amount <= 0) return;
-            bool sufficient = true;
-            if (widget.type == 'expense') {
-              double balance = selectedCurrency == 'USD' ? widget.cashProvider.balanceUSD : widget.cashProvider.balanceCDF;
-              if (amount > balance) {
-                sufficient = false;
-                showDialog(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('Erreur'),
-                    content: const Text('Impossible, le solde est insuffisant.'),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx),
-                        child: const Text('OK'),
-                      ),
-                    ],
-                  ),
-                );
-              }
-            }
-            if (sufficient) {
-              await widget.onAdd(amount, widget.type, descController.text, selectedCurrency);
-              if (mounted) Navigator.pop(context);
-            }
-          },
-          child: const Text('Ajouter'),
-        ),
-      ],
     );
   }
-}
-
-class CategoryHomePage extends StatelessWidget {
-  final String category;
-
-  const CategoryHomePage({super.key, required this.category});
-
-  void _showAddDialog(BuildContext context, String type) {
-    final provider = Provider.of<CashProvider>(context, listen: false);
+  void _showSetMonthlyDialog(BuildContext context) {
+    final controller = TextEditingController(text: widget.fraisScolaires.currentData.defaultMonthly.toString());
     showDialog(
       context: context,
-      builder: (dialogContext) => AddTransactionDialog(
-        type: type,
-        onAdd: provider.addTransaction,
-        cashProvider: provider,
+      builder: (context) => AlertDialog(
+        title: const Text('Montant Mensuel Défaut'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Montant'),
+          keyboardType: TextInputType.number,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () async {
+              final montant = double.tryParse(controller.text);
+              if (montant != null) {
+                widget.fraisScolaires.currentData.defaultMonthly = montant;
+                await widget.fraisScolaires.saveData();
+                setState(() {});
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('Enregistrer'),
+          ),
+        ],
       ),
     );
   }
-
+  void _showSetExceptionsDialog(BuildContext context) {
+    final classController = TextEditingController();
+    final montantController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Exception pour Classe'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: classController,
+              decoration: const InputDecoration(labelText: 'Classe'),
+            ),
+            TextField(
+              controller: montantController,
+              decoration: const InputDecoration(labelText: 'Montant'),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () async {
+              final classe = classController.text.trim();
+              if (classe.isNotEmpty) {
+                final montant = double.tryParse(montantController.text);
+                if (montant != null) {
+                  widget.fraisScolaires.currentData.classExceptions[classe] = montant;
+                  await widget.fraisScolaires.saveData();
+                  setState(() {});
+                  Navigator.pop(context);
+                }
+              }
+            },
+            child: const Text('Enregistrer'),
+          ),
+        ],
+      ),
+    );
+  }
+  void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Payer pour $mois'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Montant'),
+          keyboardType: TextInputType.number,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () async {
+              final montant = double.tryParse(controller.text);
+              if (montant != null && montant > 0) {
+                widget.fraisScolaires.handlePayment(eleve, mois, montant);
+                await widget.fraisScolaires.saveData();
+                setState(() {});
+                Navigator.pop(context);
+                _showReceiptDialog(context, eleve, mois, montant);
+              }
+            },
+            child: const Text('Payer'),
+          ),
+        ],
+      ),
+    );
+  }
+  void _showReceiptDialog(BuildContext context, Eleve eleve, String mois, double montant) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reçu de Paiement'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Élève: ${eleve.nom} ${eleve.prenom}'),
+            Text('Mois: $mois'),
+            Text('Montant: $montant'),
+            Text('Date: ${DateTime.now().toString()}'),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+}
+class EnregistrerScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const EnregistrerScreen({super.key, required this.fraisScolaires});
+  @override
+  State<EnregistrerScreen> createState() => _EnregistrerScreenState();
+}
+class _EnregistrerScreenState extends State<EnregistrerScreen> {
+  String? selectedMois;
+  final TextEditingController montantController = TextEditingController();
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider<CashProvider>(
-      create: (context) {
-        final provider = CashProvider(category);
-        provider.initDatabase();
-        return provider;
-      },
-      child: Builder(
-        builder: (context) {
-          final cashProvider = Provider.of<CashProvider>(context);
-          final themeProvider = Provider.of<ThemeProvider>(context);
-          final theme = Theme.of(context);
-          return Scaffold(
-            appBar: AppBar(
-              title: Text('Gestion de Caisse - ${formatCategory(category)}', style: const TextStyle(fontWeight: FontWeight.bold)),
-              centerTitle: true,
-              actions: [
-                IconButton(
-                  icon: const Icon(Icons.settings),
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (context) => SettingsPage(cashProvider: cashProvider)),
-                    );
-                  },
-                ),
-              ],
+    return Scaffold(
+      appBar: AppBar(title: const Text('Frais Manuel')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            DropdownButton<String>(
+              hint: const Text('Sélectionner Mois'),
+              value: selectedMois,
+              onChanged: (value) {
+                setState(() {
+                  selectedMois = value;
+                });
+              },
+              items: widget.fraisScolaires.months.map((mois) {
+                return DropdownMenuItem(value: mois, child: Text(mois));
+              }).toList(),
             ),
-            body: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      BalanceCard(
-                        title: 'Solde USD',
-                        balance: cashProvider.balanceUSD,
-                        symbol: '\$',
-                        color: theme.colorScheme.primary,
-                        textColor: theme.colorScheme.onPrimary,
-                        abbreviate: themeProvider.abbreviateBalance,
-                      ),
-                      BalanceCard(
-                        title: 'Solde CDF',
-                        balance: cashProvider.balanceCDF,
-                        symbol: 'FC',
-                        color: theme.colorScheme.secondary,
-                        textColor: theme.colorScheme.onSecondary,
-                        abbreviate: themeProvider.abbreviateBalance,
-                      ),
-                    ],
-                  ),
-                ),
-                ActionButtons(
-                  onIncomePressed: () => _showAddDialog(context, 'income'),
-                  onExpensePressed: () => _showAddDialog(context, 'expense'),
-                  incomeColor: theme.colorScheme.secondary,
-                  expenseColor: theme.colorScheme.error,
-                ),
-                const SizedBox(height: 16),
-                const Text('Historique des Transactions', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                TransactionList(
-                  transactions: cashProvider.transactions,
-                  onDelete: (tx) => cashProvider.deleteTransaction(tx.key ?? 0),
-                  incomeColor: theme.colorScheme.secondary,
-                  expenseColor: theme.colorScheme.error,
-                  deleteColor: theme.colorScheme.error,
-                ),
-              ],
+            const SizedBox(height: 20),
+            TextField(
+              controller: montantController,
+              decoration: const InputDecoration(labelText: 'Montant'),
+              keyboardType: TextInputType.number,
             ),
-          );
-        },
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () async {
+                final mois = selectedMois;
+                final montantStr = montantController.text.trim();
+                if (mois != null && montantStr.isNotEmpty) {
+                  final montant = double.tryParse(montantStr);
+                  if (montant != null) {
+                    widget.fraisScolaires.enregistrerFrais(mois, montant);
+                    await widget.fraisScolaires.saveData();
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Frais enregistré!')));
+                    Navigator.pop(context);
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Montant invalide')));
+                  }
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Remplir tous les champs')));
+                }
+              },
+              child: const Text('Enregistrer'),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
-
-Future<Map<String, double>> getSchoolTotals() async {
-  final prefs = await SharedPreferences.getInstance();
-  double totalUSD = 0.0;
-  double totalCDF = 0.0;
-  final schoolCategories = ['secondaire', 'primaire', 'maternelle'];
-  for (var cat in schoolCategories) {
-    totalUSD += prefs.getDouble('balance_USD_$cat') ?? 0.0;
-    totalCDF += prefs.getDouble('balance_CDF_$cat') ?? 0.0;
-  }
-  return {'usd': totalUSD, 'cdf': totalCDF};
+class AfficherScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const AfficherScreen({super.key, required this.fraisScolaires});
+  @override
+  State<AfficherScreen> createState() => _AfficherScreenState();
 }
-
-class SettingsPage extends StatelessWidget {
-  final CashProvider cashProvider;
-
-  const SettingsPage({super.key, required this.cashProvider});
-
-  Future<void> _downloadHistory(BuildContext context) async {
+class _AfficherScreenState extends State<AfficherScreen> {
+  Map<String, Map<String, double>> allRepartitions = {};
+  @override
+  void initState() {
+    super.initState();
+    _computeAllRepartitions();
+  }
+  void _computeAllRepartitions() {
+    setState(() {
+      for (var mois in widget.fraisScolaires.months) {
+        allRepartitions[mois] = widget.fraisScolaires.calculerRepartitions(mois);
+      }
+    });
+  }
+  @override
+  Widget build(BuildContext context) {
+    double totalCollected = widget.fraisScolaires.getYearTotalCollected();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Répartitions')),
+      body: SingleChildScrollView(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text('Total Collecté Année: $totalCollected', style: const TextStyle(fontSize: 18)),
+                ),
+              ),
+            ),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: widget.fraisScolaires.months.length,
+              itemBuilder: (context, index) {
+                final mois = widget.fraisScolaires.months[index];
+                final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0, '7%': 0.0};
+                return Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('$mois:', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 10),
+                        ...repartitions.entries.map((entry) => Text('${entry.key}: ${entry.value.toStringAsFixed(2)}')),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+class SettingsScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const SettingsScreen({super.key, required this.fraisScolaires});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+class _SettingsScreenState extends State<SettingsScreen> {
+  final TextEditingController yearController = TextEditingController();
+  final TextEditingController monthlyController = TextEditingController();
+  Future<void> _downloadHistory() async {
     final filenameController = TextEditingController();
-    String? filename;
     await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -647,10 +1156,11 @@ class SettingsPage extends StatelessWidget {
             child: const Text('Annuler'),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               if (filenameController.text.isNotEmpty) {
-                filename = filenameController.text;
+                await widget.fraisScolaires.generatePdf(filenameController.text);
                 Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('PDF généré!')));
               }
             },
             child: const Text('OK'),
@@ -658,451 +1168,257 @@ class SettingsPage extends StatelessWidget {
         ],
       ),
     );
-    if (filename == null) return;
-    final pdf = pw.Document();
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        build: (pw.Context pwContext) => [
-          pw.Text('Solde USD: ${formatBalance(cashProvider.balanceUSD, false)} \$'),
-          pw.Text('Solde CDF: ${formatBalance(cashProvider.balanceCDF, false)} FC'),
-          pw.SizedBox(height: 20),
-          pw.Text('Historique des Transactions'),
-          pw.SizedBox(height: 10),
-          pw.Table.fromTextArray(
-            headers: ['Date', 'Type', 'Montant', 'Devise', 'Description'],
-            data: cashProvider.transactions.map((tx) => [
-              DateFormat('dd/MM/yyyy HH:mm').format(tx.date),
-              tx.type == 'income' ? 'Entrée' : 'Sortie',
-              tx.amount.toStringAsFixed(2),
-              tx.currency,
-              tx.description,
-            ]).toList(),
-          ),
-        ],
-      ),
-    );
-    final bytes = await pdf.save();
-    final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/$filename.pdf');
-    await file.writeAsBytes(bytes);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Fichier sauvegardé : ${file.path}')),
-    );
   }
-
-  Future<void> _showResetConfirmation(BuildContext context) async {
-    final bool? confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Réinitialiser tout ?'),
-        content: const Text(
-          'ATTENTION ! Cette action est irréversible.\n\n'
-              'Tous les soldes seront remis à zéro.\n'
-              'L\'historique complet des transactions sera effacé.\n'
-              'Tout sera perdu définitivement.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Annuler'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Réinitialiser', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
-    if (confirm == true) {
-      await cashProvider.resetAll();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Tout a été réinitialisé à zéro.')),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    final themeProvider = Provider.of<ThemeProvider>(context);
-    final theme = Theme.of(context);
-    final String category = cashProvider.category;
-    final bool isSchoolCategory = ['secondaire', 'primaire', 'maternelle'].contains(category);
-    final abbreviate = themeProvider.abbreviateBalance;
-    final double usd = cashProvider.balanceUSD;
-    final double cdf = cashProvider.balanceCDF;
-    final double usd70 = usd * 0.7;
-    final double usd30 = usd * 0.3;
-    final double cdf70 = cdf * 0.7;
-    final double cdf30 = cdf * 0.3;
-
+    final appState = Provider.of<AppState>(context);
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Paramètres'),
+      appBar: AppBar(title: const Text('Paramètres')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            TextField(
+              controller: monthlyController,
+              decoration: const InputDecoration(labelText: 'Montant Mensuel Défaut'),
+              keyboardType: TextInputType.number,
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final montant = double.tryParse(monthlyController.text);
+                if (montant != null) {
+                  widget.fraisScolaires.currentData.defaultMonthly = montant;
+                  await widget.fraisScolaires.saveData();
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mis à jour')));
+                }
+              },
+              child: const Text('Enregistrer Montant'),
+            ),
+            const SizedBox(height: 20),
+            TextField(
+              controller: yearController,
+              decoration: const InputDecoration(labelText: 'Nouvelle Année (ex: 2024-2025)'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final newYear = yearController.text.trim();
+                if (newYear.isNotEmpty) {
+                  await widget.fraisScolaires.resetForNewYear(newYear);
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text('Nouvelle Année'),
+            ),
+            const SizedBox(height: 20),
+            ListTile(
+              title: const Text('Mode Sombre'),
+              trailing: Switch(
+                value: appState.isDarkMode,
+                onChanged: (value) {
+                  appState.toggleTheme();
+                },
+              ),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: _downloadHistory,
+              child: const Text('Télécharger Rapport PDF'),
+            ),
+          ],
+        ),
       ),
-      body: ListView(
+    );
+  }
+}
+class HistoryScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const HistoryScreen({super.key, required this.fraisScolaires});
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+class _HistoryScreenState extends State<HistoryScreen> {
+  String? selectedYear;
+  String? selectedView;
+  Map<String, Map<String, double>> allRepartitions = {};
+  List<Eleve> filteredHistoryEleves = [];
+  final TextEditingController searchHistoryController = TextEditingController();
+  @override
+  void initState() {
+    super.initState();
+    searchHistoryController.addListener(_filterHistoryEleves);
+  }
+  void _computeRepartitions(String year) {
+    final data = widget.fraisScolaires.history[year];
+    if (data != null) {
+      setState(() {
+        allRepartitions = {};
+        for (var mois in widget.fraisScolaires.months) {
+          double studentTotal = data.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
+          double total = (data.manualFrais[mois] ?? 0) + studentTotal;
+          allRepartitions[mois] = {
+            '30%': total * 0.3,
+            '70%': total * 0.7,
+            '7%': total * 0.07,
+          };
+        }
+      });
+    }
+  }
+  void _filterHistoryEleves() {
+    if (selectedYear == null) return;
+    final data = widget.fraisScolaires.history[selectedYear!];
+    if (data == null) return;
+    final query = searchHistoryController.text.toLowerCase();
+    setState(() {
+      filteredHistoryEleves = data.eleves.where((eleve) {
+        final fullName = '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'.toLowerCase();
+        return fullName.contains(query);
+      }).toList()
+        ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
+    });
+  }
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Historique')),
+      body: Column(
         children: [
-          SwitchListTile(
-            title: const Text('Abréger les soldes (ex: 1000 → 1K)'),
-            value: themeProvider.abbreviateBalance,
-            onChanged: (bool value) {
-              themeProvider.setAbbreviateBalance(value);
+          DropdownButton<String>(
+            hint: const Text('Année'),
+            value: selectedYear,
+            onChanged: (value) {
+              setState(() {
+                selectedYear = value;
+                selectedView = null;
+                searchHistoryController.clear();
+                filteredHistoryEleves = [];
+                if (value != null) {
+                  _computeRepartitions(value);
+                  _filterHistoryEleves();
+                }
+              });
             },
+            items: widget.fraisScolaires.history.keys.map((year) => DropdownMenuItem(value: year, child: Text(year))).toList(),
           ),
-          RadioListTile<ThemeMode>(
-            title: const Text('Mode Clair'),
-            value: ThemeMode.light,
-            groupValue: themeProvider.themeMode,
-            onChanged: (ThemeMode? value) {
-              if (value != null) themeProvider.setThemeMode(value);
-            },
-          ),
-          RadioListTile<ThemeMode>(
-            title: const Text('Mode Sombre'),
-            value: ThemeMode.dark,
-            groupValue: themeProvider.themeMode,
-            onChanged: (ThemeMode? value) {
-              if (value != null) themeProvider.setThemeMode(value);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.download),
-            title: const Text('Télécharger l\'historique'),
-            onTap: () => _downloadHistory(context),
-          ),
-          const Divider(),
-          if (isSchoolCategory)
+          if (selectedYear != null)
             Padding(
               padding: const EdgeInsets.all(16.0),
-              child: Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Totaux ${formatCategory(category)}',
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Solde USD: ${formatBalance(usd, abbreviate)} \$',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                      Text(
-                        '70% Enseignants: ${formatBalance(usd70, abbreviate)} \$',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      Text(
-                        '30% Établissement: ${formatBalance(usd30, abbreviate)} \$',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Solde CDF: ${formatBalance(cdf, abbreviate)} FC',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                      Text(
-                        '70% Enseignants: ${formatBalance(cdf70, abbreviate)} FC',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      Text(
-                        '30% Établissement: ${formatBalance(cdf30, abbreviate)} FC',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ],
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 20,
+                children: [
+                  ElevatedButton(
+                    onPressed: () => setState(() => selectedView = 'repartitions'),
+                    child: const Text('Répartitions'),
                   ),
+                  ElevatedButton(
+                    onPressed: () => setState(() => selectedView = 'paiements'),
+                    child: const Text('Paiements Élèves'),
+                  ),
+                ],
+              ),
+            ),
+          if (selectedYear != null && selectedView == 'paiements')
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: TextField(
+                controller: searchHistoryController,
+                decoration: const InputDecoration(
+                  labelText: 'Rechercher Élève',
+                  prefixIcon: Icon(Icons.search),
                 ),
               ),
             ),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: FutureBuilder<Map<String, double>>(
-              future: getSchoolTotals(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasError) {
-                  return const Text('Erreur de chargement des totaux');
-                }
-                final totals = snapshot.data ?? {'usd': 0.0, 'cdf': 0.0};
-                final totalUSD = totals['usd']!;
-                final totalCDF = totals['cdf']!;
-                final totalUsd70 = totalUSD * 0.7;
-                final totalUsd30 = totalUSD * 0.3;
-                final totalCdf70 = totalCDF * 0.7;
-                final totalCdf30 = totalCDF * 0.3;
-                return Card(
-                  elevation: 2,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Totaux Écoles (Secondaire + Primaire + Maternelle)',
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Solde Total USD: ${formatBalance(totalUSD, abbreviate)} \$',
-                          style: const TextStyle(fontSize: 16),
-                        ),
-                        Text(
-                          '70% Enseignants: ${formatBalance(totalUsd70, abbreviate)} \$',
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                        Text(
-                          '30% Établissement: ${formatBalance(totalUsd30, abbreviate)} \$',
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'Solde Total CDF: ${formatBalance(totalCDF, abbreviate)} FC',
-                          style: const TextStyle(fontSize: 16),
-                        ),
-                        Text(
-                          '70% Enseignants: ${formatBalance(totalCdf70, abbreviate)} FC',
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                        Text(
-                          '30% Établissement: ${formatBalance(totalCdf30, abbreviate)} FC',
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                      ],
+          if (selectedYear != null && selectedView != null)
+            Expanded(
+              child: selectedView == 'repartitions'
+                  ? ListView.builder(
+                padding: const EdgeInsets.all(16.0),
+                itemCount: widget.fraisScolaires.months.length,
+                itemBuilder: (context, index) {
+                  final mois = widget.fraisScolaires.months[index];
+                  final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0, '7%': 0.0};
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 16.0),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('$mois ($selectedYear):', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 10),
+                          ...repartitions.entries.map((entry) => Text('${entry.key}: ${entry.value.toStringAsFixed(2)}')),
+                        ],
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              )
+                  : ListView.builder(
+                padding: const EdgeInsets.all(16.0),
+                itemCount: filteredHistoryEleves.length,
+                itemBuilder: (context, index) {
+                  final data = widget.fraisScolaires.history[selectedYear!]!;
+                  final eleve = filteredHistoryEleves[index];
+                  double totalPaid = eleve.paid.values.fold(0.0, (sum, p) => sum + p);
+                  double pending = widget.fraisScolaires.months.fold(0.0, (sum, m) => sum + ((data.classExceptions[eleve.classe] ?? data.defaultMonthly) - (eleve.paid[m] ?? 0)));
+                  return Card(
+                    margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          Text('Payé: $totalPaid | En attente: $pending'),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            height: 80,
+                            child: ListView.builder(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: widget.fraisScolaires.months.length,
+                              itemBuilder: (context, monthIndex) {
+                                final mois = widget.fraisScolaires.months[monthIndex];
+                                double required = data.classExceptions[eleve.classe] ?? data.defaultMonthly;
+                                double paid = eleve.paid[mois] ?? 0;
+                                bool isFullyPaid = paid >= required;
+                                Color backgroundColor = isFullyPaid
+                                    ? (isDark ? Colors.green[700]! : Colors.green[100]!)
+                                    : (isDark ? Colors.red[700]! : Colors.red[100]!);
+                                Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                                  child: Container(
+                                    width: 120,
+                                    decoration: BoxDecoration(
+                                      color: backgroundColor,
+                                      border: Border.all(color: borderColor),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Text(mois, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                                        Text('Requis: ${required.toStringAsFixed(0)}'),
+                                        if (paid > 0) Text('Payé: ${paid.toStringAsFixed(0)}'),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.restore_page, color: Colors.red),
-            title: const Text('Réinitialiser tout', style: TextStyle(color: Colors.red)),
-            onTap: () => _showResetConfirmation(context),
-          ),
         ],
       ),
     );
   }
 }
-
-class ParoisseMenu extends StatelessWidget {
-  const ParoisseMenu({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Paroisse', style: TextStyle(fontWeight: FontWeight.bold)),
-        centerTitle: true,
-        backgroundColor: theme.colorScheme.primary,
-        foregroundColor: theme.colorScheme.onPrimary,
-      ),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [theme.scaffoldBackgroundColor, theme.colorScheme.primary.withOpacity(0.1)],
-          ),
-        ),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  'Gestion des Quêtes',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.primary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 32),
-                Card(
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'paroisse_matinale'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.wb_sunny),
-                          label: const Text('Quête Matinale'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'paroisse_dimanche'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.event),
-                          label: const Text('Quête de Dimanche'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class MainMenu extends StatelessWidget {
-  const MainMenu({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('C-Finance', style: TextStyle(fontWeight: FontWeight.bold)),
-        centerTitle: true,
-        backgroundColor: theme.colorScheme.primary,
-        foregroundColor: theme.colorScheme.onPrimary,
-      ),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [theme.scaffoldBackgroundColor, theme.colorScheme.primary.withOpacity(0.1)],
-          ),
-        ),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  'Bienvenue dans Gestion de Caisse',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.primary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 32),
-                Card(
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const ParoisseMenu(),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.church),
-                          label: const Text('Paroisse'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'secondaire'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.school),
-                          label: const Text('Secondaire'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'primaire'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.school),
-                          label: const Text('Primaire'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const CategoryHomePage(category: 'maternelle'),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.child_care),
-                          label: const Text('Maternelle'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
