@@ -32,7 +32,7 @@ jobs:
         run: |
           Rename-Item `
             "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "gestion_de_finance.exe"
+            "C-SchoolApp.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -57,6 +57,6 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Gestion-de-Finance-Setup
-          path: Gestion-de-Finance-Setup.exe
+          name: C-SchoolApp-Setup
+          path: Gestion-de-SchoolApp.exe
 
