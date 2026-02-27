@@ -381,7 +381,7 @@ class FraisScolaires {
         return 45000;
       }
     } else if (schoolType == 'primaire' || schoolType == 'maternelle') {
-      return 35000;
+      return 45000;
     } else if (schoolType == 'coupe_couture') {
       return 38000;
     }
@@ -398,7 +398,6 @@ class FraisScolaires {
     return {
       '30%': total * 0.3,
       '70%': total * 0.7,
-      '7%': total * 0.07,
     };
   }
 
@@ -462,6 +461,79 @@ class FraisScolaires {
     return currentData.eleves.fold(0.0, (sum, e) => sum + getStudentPending(e));
   }
 
+  Map<String, Map<String, dynamic>> getSectionBreakdowns() {
+    if (schoolType == 'secondaire') {
+      return {
+        '1ère à 5ème': {
+          'somme': 45000.0,
+          'libelles': {
+            'Construction': 1000.0,
+            'Frais d\'informatique': 1500.0,
+            'Frais d\'examen': 1000.0,
+            'Juin': 4000.0,
+            'Bonus': 1000.0,
+          },
+        },
+        '6ème': {
+          'somme': 70000.0,
+          'libelles': {
+            'Construction': 1000.0,
+            'Frais d\'informatique': 2000.0,
+            'Frais d\'examen': 1000.0,
+            'Juin': 6000.0,
+            'Bonus': 4000.0,
+            'Frais cours supplémentaires': 5000.0,
+          },
+        },
+      };
+    } else if (schoolType == 'primaire') {
+      return {
+        'Primaire': {
+          'somme': 45000.0,
+          'libelles': {
+            'Construction': 1000.0,
+            'Examens': 1000.0,
+            'Juin': 3000.0,
+            'Bonus': 1000.0,
+          },
+        },
+      };
+    } else if (schoolType == 'maternelle') {
+      return {
+        'Maternelle': {
+          'somme': 45000.0,
+          'libelles': {
+            'Construction': 1000.0,
+            'Examens': 1000.0,
+            'Juin': 3000.0,
+            'Bonus': 1000.0,
+          },
+        },
+      };
+    } else if (schoolType == 'coupe_couture') {
+      var libelles = {
+        'Construction et Meca': 3000.0,
+        'Juin': 3500.0,
+        'Informatique': 2500.0,
+      };
+      return {
+        '1ère, 2ème et 3ème': {
+          'somme': 38000.0,
+          'libelles': libelles,
+        },
+        '4ème': {
+          'somme': 38000.0,
+          'libelles': libelles,
+        },
+        'TCC 1ère, 2ème': {
+          'somme': 38000.0,
+          'libelles': libelles,
+        },
+      };
+    }
+    return {};
+  }
+
   Future<void> generatePdf(String filename) async {
     final pdf = pw.Document();
     pdf.addPage(
@@ -470,13 +542,13 @@ class FraisScolaires {
         build: (pw.Context context) => [
           pw.Header(
             level: 0,
-            child: pw.Text('Rapport pour $schoolType - $currentYear'),
+            child: pw.Text('Rapport pour ${schoolType.capitalize()} - $currentYear'),
           ),
           pw.Paragraph(text: 'Total Collecté: ${getYearTotalCollected().toStringAsFixed(2)}'),
           pw.Paragraph(text: 'Total En Attente: ${getYearTotalPending().toStringAsFixed(2)}'),
           pw.Header(level: 1, child: pw.Text('Répartitions par Mois')),
           pw.Table.fromTextArray(
-            headers: ['Mois', 'Total', '30%', '70%', '7%'],
+            headers: ['Mois', 'Total', '30%', '70%'],
             data: months.map((mois) {
               final repart = calculerRepartitions(mois);
               final total = getTotalForMonth(mois);
@@ -485,7 +557,6 @@ class FraisScolaires {
                 total.toStringAsFixed(2),
                 repart['30%']!.toStringAsFixed(2),
                 repart['70%']!.toStringAsFixed(2),
-                repart['7%']!.toStringAsFixed(2),
               ];
             }).toList(),
           ),
@@ -502,6 +573,67 @@ class FraisScolaires {
                 getStudentPending(e).toStringAsFixed(2),
               ];
             }).toList(),
+          ),
+          pw.Header(level: 1, child: pw.Text('Répartition des Frais par Section')),
+          pw.Table.fromTextArray(
+            headers: ['Section', 'Somme Générale', 'Libellé', 'Montant', 'Reste'],
+            data: () {
+              List<List<String>> breakdownData = [];
+              final sections = getSectionBreakdowns();
+              for (var sec in sections.keys) {
+                var somme = sections[sec]!['somme'] as double;
+                var libelles = sections[sec]!['libelles'] as Map<String, double>;
+                double total_deduct = libelles.values.fold(0.0, (prev, curr) => prev + curr);
+                double reste = somme - total_deduct;
+                double seventy = reste * 0.7;
+                double thirty = reste * 0.3;
+                breakdownData.add([sec, somme.toStringAsFixed(2), '', '', '']);
+                libelles.forEach((key, value) {
+                  breakdownData.add(['', '', key, value.toStringAsFixed(2), '']);
+                });
+                breakdownData.add(['', '', 'Total Déductions', total_deduct.toStringAsFixed(2), '']);
+                breakdownData.add(['', '', 'Reste', '', reste.toStringAsFixed(2)]);
+                breakdownData.add(['', '', '70% du Reste', seventy.toStringAsFixed(2), '']);
+                breakdownData.add(['', '', '30% du Reste', thirty.toStringAsFixed(2), '']);
+              }
+              return breakdownData;
+            }(),
+          ),
+          pw.SizedBox(height: 20),
+          pw.Text('Signatures:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 10),
+          pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text('Pour la Comptabilité :'),
+                  pw.SizedBox(height: 40),
+                  pw.Text('Eric KITUMAINI'),
+                ],
+              ),
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text('Pour la Direction :'),
+                  pw.SizedBox(height: 40),
+                  pw.Text('TSHAKAL ZENG'),
+                  pw.Text('NGOBOLA MULIMI'),
+                ],
+              ),
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text("Pour l'équipe syndicale :"),
+                  pw.SizedBox(height: 40),
+                  pw.Text('BANGWE MUYONGO'),
+                  pw.Text('NYEMBO KAINDA'),
+                  pw.Text('MUKALAY MUYAMBI'),
+                  pw.Text('MUYUMBA GASTON'),
+                ],
+              ),
+            ],
           ),
         ],
       ),
@@ -1104,7 +1236,7 @@ class _AfficherScreenState extends State<AfficherScreen> {
               itemCount: widget.fraisScolaires.months.length,
               itemBuilder: (context, index) {
                 final mois = widget.fraisScolaires.months[index];
-                final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0, '7%': 0.0};
+                final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0};
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                   child: Padding(
@@ -1248,7 +1380,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
           allRepartitions[mois] = {
             '30%': total * 0.3,
             '70%': total * 0.7,
-            '7%': total * 0.07,
           };
         }
       });
@@ -1331,7 +1462,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 itemCount: widget.fraisScolaires.months.length,
                 itemBuilder: (context, index) {
                   final mois = widget.fraisScolaires.months[index];
-                  final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0, '7%': 0.0};
+                  final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0};
                   return Card(
                     margin: const EdgeInsets.only(bottom: 16.0),
                     child: Padding(
