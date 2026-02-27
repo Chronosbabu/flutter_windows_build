@@ -19,17 +19,14 @@ void main() {
 
 class AppState extends ChangeNotifier {
   bool isDarkMode = false;
-
   AppState() {
     _loadTheme();
   }
-
   Future _loadTheme() async {
     final prefs = await SharedPreferences.getInstance();
     isDarkMode = prefs.getBool('isDarkMode') ?? false;
     notifyListeners();
   }
-
   Future toggleTheme() async {
     isDarkMode = !isDarkMode;
     notifyListeners();
@@ -47,7 +44,6 @@ extension StringExtension on String {
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -147,7 +143,6 @@ class MyApp extends StatelessWidget {
 
 class MainHomeScreen extends StatelessWidget {
   const MainHomeScreen({super.key});
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -243,8 +238,7 @@ class MainHomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildPrettyButton(BuildContext context,
-      {required IconData icon, required String label, required VoidCallback onPressed}) {
+  Widget _buildPrettyButton(BuildContext context, {required IconData icon, required String label, required VoidCallback onPressed}) {
     return ElevatedButton.icon(
       icon: Icon(icon, size: 30, color: Colors.white),
       label: Text(label, style: const TextStyle(fontSize: 18, color: Colors.white)),
@@ -266,14 +260,12 @@ class Eleve {
   String prenom;
   String classe;
   Map<String, double> paid = {};
-
   Eleve({
     required this.nom,
     required this.postNom,
     required this.prenom,
     required this.classe,
   });
-
   Map<String, dynamic> toJson() => {
     'nom': nom,
     'postNom': postNom,
@@ -281,7 +273,6 @@ class Eleve {
     'classe': classe,
     'paid': paid,
   };
-
   factory Eleve.fromJson(Map<String, dynamic> json) {
     return Eleve(
       nom: json['nom'],
@@ -295,17 +286,14 @@ class Eleve {
 class SchoolYearData {
   Map<String, double> manualFrais;
   List<Eleve> eleves;
-
   SchoolYearData({
     required this.manualFrais,
     required this.eleves,
   });
-
   Map<String, dynamic> toJson() => {
     'manualFrais': manualFrais,
     'eleves': eleves.map((e) => e.toJson()).toList(),
   };
-
   factory SchoolYearData.fromJson(Map<String, dynamic> json) {
     return SchoolYearData(
       manualFrais: Map<String, double>.from(json['manualFrais'] ?? {}),
@@ -320,7 +308,7 @@ class FraisScolaires {
     manualFrais: {},
     eleves: [],
   );
-  String currentYear = '2023-2024'; // Default year
+  String currentYear = '2023-2024';
   Map<String, SchoolYearData> history = {};
   final List<String> months = [
     'Septembre',
@@ -372,10 +360,7 @@ class FraisScolaires {
   double getRequiredForClass(String classe) {
     final lowerClasse = classe.toLowerCase();
     if (schoolType == 'secondaire') {
-      if (lowerClasse == '6 ieme' ||
-          lowerClasse == '6ieme' ||
-          lowerClasse == '6ème' ||
-          lowerClasse.startsWith('6')) {
+      if (lowerClasse == '6 ieme' || lowerClasse == '6ieme' || lowerClasse == '6ème' || lowerClasse.startsWith('6')) {
         return 70000;
       } else {
         return 45000;
@@ -393,10 +378,12 @@ class FraisScolaires {
     return (currentData.manualFrais[mois] ?? 0) + studentTotal;
   }
 
+  // === MISE À JOUR : Répartition automatique 7% / 23% / 70% ===
   Map<String, double> calculerRepartitions(String mois) {
     final total = getTotalForMonth(mois);
     return {
       '7%': total * 0.07,
+      '23%': total * 0.23,
       '70%': total * 0.7,
     };
   }
@@ -436,12 +423,10 @@ class FraisScolaires {
   }
 
   String _encrypt(String text) {
-    // Simple placeholder encryption, replace with real encryption if needed
     return base64Encode(utf8.encode(text));
   }
 
   String _decrypt(String encryptedText) {
-    // Simple placeholder decryption
     return utf8.decode(base64Decode(encryptedText));
   }
 
@@ -534,6 +519,7 @@ class FraisScolaires {
     return {};
   }
 
+  // === PDF GÉNÉRÉ AVEC LES 5 COLONNES DEMANDÉES + DERNIER TABLEAU MIS À JOUR ===
   Future<void> generatePdf(String filename) async {
     final pdf = pw.Document();
     pdf.addPage(
@@ -548,7 +534,7 @@ class FraisScolaires {
           pw.Paragraph(text: 'Total En Attente: ${getYearTotalPending().toStringAsFixed(2)}'),
           pw.Header(level: 1, child: pw.Text('Répartitions par Mois')),
           pw.Table.fromTextArray(
-            headers: ['Mois', 'Total', '7%', '70%'],
+            headers: ['Mois', 'Total', '7%', '23%', '70%'],
             data: months.map((mois) {
               final repart = calculerRepartitions(mois);
               final total = getTotalForMonth(mois);
@@ -556,6 +542,7 @@ class FraisScolaires {
                 mois,
                 total.toStringAsFixed(2),
                 repart['7%']!.toStringAsFixed(2),
+                repart['23%']!.toStringAsFixed(2),
                 repart['70%']!.toStringAsFixed(2),
               ];
             }).toList(),
@@ -585,16 +572,21 @@ class FraisScolaires {
                 var libelles = sections[sec]!['libelles'] as Map<String, double>;
                 double total_deduct = libelles.values.fold(0.0, (prev, curr) => prev + curr);
                 double reste = somme - total_deduct;
+
+                // === CALCUL 7% / 23% / 70% DU RESTE (comme demandé) ===
+                double seven = reste * 0.07;
+                double twentythree = reste * 0.23;
                 double seventy = reste * 0.7;
-                double thirty = reste * 0.3;
+
                 breakdownData.add([sec, somme.toStringAsFixed(2), '', '', '']);
                 libelles.forEach((key, value) {
                   breakdownData.add(['', '', key, value.toStringAsFixed(2), '']);
                 });
                 breakdownData.add(['', '', 'Total Déductions', total_deduct.toStringAsFixed(2), '']);
                 breakdownData.add(['', '', 'Reste', '', reste.toStringAsFixed(2)]);
+                breakdownData.add(['', '', '7% du Reste', seven.toStringAsFixed(2), '']);
+                breakdownData.add(['', '', '23% du Reste', twentythree.toStringAsFixed(2), '']);
                 breakdownData.add(['', '', '70% du Reste', seventy.toStringAsFixed(2), '']);
-                breakdownData.add(['', '', '30% du Reste', thirty.toStringAsFixed(2), '']);
               }
               return breakdownData;
             }(),
@@ -647,28 +639,23 @@ class FraisScolaires {
 
 class SchoolHomeScreen extends StatefulWidget {
   final String schoolType;
-
   const SchoolHomeScreen({super.key, required this.schoolType});
-
   @override
   State<SchoolHomeScreen> createState() => _SchoolHomeScreenState();
 }
 
 class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   late FraisScolaires fraisScolaires;
-
   @override
   void initState() {
     super.initState();
     fraisScolaires = FraisScolaires(widget.schoolType);
     _loadData();
   }
-
   Future _loadData() async {
     await fraisScolaires.loadData();
     setState(() {});
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -815,12 +802,7 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
 
 class EnregistrerEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
-
-  const EnregistrerEleveScreen({
-    super.key,
-    required this.fraisScolaires,
-  });
-
+  const EnregistrerEleveScreen({super.key, required this.fraisScolaires});
   @override
   State<EnregistrerEleveScreen> createState() => _EnregistrerEleveScreenState();
 }
@@ -830,7 +812,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   late TextEditingController postNomController;
   late TextEditingController prenomController;
   late TextEditingController classeController;
-
   @override
   void initState() {
     super.initState();
@@ -839,36 +820,21 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     prenomController = TextEditingController();
     classeController = TextEditingController();
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Enregistrer un Élève'),
-      ),
+      appBar: AppBar(title: const Text('Enregistrer un Élève')),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            TextField(
-              controller: nomController,
-              decoration: const InputDecoration(labelText: 'Nom'),
-            ),
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: 'Nom')),
             const SizedBox(height: 12),
-            TextField(
-              controller: postNomController,
-              decoration: const InputDecoration(labelText: 'Post-nom'),
-            ),
+            TextField(controller: postNomController, decoration: const InputDecoration(labelText: 'Post-nom')),
             const SizedBox(height: 12),
-            TextField(
-              controller: prenomController,
-              decoration: const InputDecoration(labelText: 'Prénom'),
-            ),
+            TextField(controller: prenomController, decoration: const InputDecoration(labelText: 'Prénom')),
             const SizedBox(height: 12),
-            TextField(
-              controller: classeController,
-              decoration: const InputDecoration(labelText: 'Classe'),
-            ),
+            TextField(controller: classeController, decoration: const InputDecoration(labelText: 'Classe')),
             const SizedBox(height: 20),
             ElevatedButton(
               onPressed: () async {
@@ -884,14 +850,10 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                     classe: classe,
                   ));
                   await widget.fraisScolaires.saveData();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Élève enregistré!')),
-                  );
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Élève enregistré!')));
                   Navigator.pop(context);
                 } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Remplir tous les champs')),
-                  );
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Remplir tous les champs')));
                 }
               },
               child: const Text('Enregistrer'),
@@ -905,9 +867,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
 class PaiementEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
-
   const PaiementEleveScreen({super.key, required this.fraisScolaires});
-
   @override
   State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
 }
@@ -917,7 +877,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   List<Eleve> filteredEleves = [];
   String? selectedClass;
   List<String> classes = [];
-
   @override
   void initState() {
     super.initState();
@@ -925,7 +884,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     classes = widget.fraisScolaires.currentData.eleves.map((e) => e.classe).toSet().toList();
     searchController.addListener(_filterEleves);
   }
-
   void _filterEleves() {
     final query = searchController.text.toLowerCase();
     setState(() {
@@ -937,7 +895,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
     });
   }
-
   bool _canPayForMonth(Eleve eleve, String mois) {
     int index = widget.fraisScolaires.months.indexOf(mois);
     for (int i = 0; i < index; i++) {
@@ -948,21 +905,17 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
     return true;
   }
-
   @override
   void dispose() {
     searchController.dispose();
     super.dispose();
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gestion des Paiements'),
-      ),
+      appBar: AppBar(title: const Text('Gestion des Paiements')),
       body: Column(
         children: [
           Padding(
@@ -1122,9 +1075,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
 class EnregistrerScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
-
   const EnregistrerScreen({super.key, required this.fraisScolaires});
-
   @override
   State<EnregistrerScreen> createState() => _EnregistrerScreenState();
 }
@@ -1132,7 +1083,6 @@ class EnregistrerScreen extends StatefulWidget {
 class _EnregistrerScreenState extends State<EnregistrerScreen> {
   String? selectedMois;
   final TextEditingController montantController = TextEditingController();
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1189,22 +1139,18 @@ class _EnregistrerScreenState extends State<EnregistrerScreen> {
 
 class AfficherScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
-
   const AfficherScreen({super.key, required this.fraisScolaires});
-
   @override
   State<AfficherScreen> createState() => _AfficherScreenState();
 }
 
 class _AfficherScreenState extends State<AfficherScreen> {
   Map<String, Map<String, double>> allRepartitions = {};
-
   @override
   void initState() {
     super.initState();
     _computeAllRepartitions();
   }
-
   void _computeAllRepartitions() {
     setState(() {
       for (var mois in widget.fraisScolaires.months) {
@@ -1212,7 +1158,6 @@ class _AfficherScreenState extends State<AfficherScreen> {
       }
     });
   }
-
   @override
   Widget build(BuildContext context) {
     double totalCollected = widget.fraisScolaires.getYearTotalCollected();
@@ -1236,7 +1181,7 @@ class _AfficherScreenState extends State<AfficherScreen> {
               itemCount: widget.fraisScolaires.months.length,
               itemBuilder: (context, index) {
                 final mois = widget.fraisScolaires.months[index];
-                final repartitions = allRepartitions[mois] ?? {'7%': 0.0, '70%': 0.0};
+                final repartitions = allRepartitions[mois] ?? {'7%': 0.0, '23%': 0.0, '70%': 0.0};
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                   child: Padding(
@@ -1262,16 +1207,13 @@ class _AfficherScreenState extends State<AfficherScreen> {
 
 class SettingsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
-
   const SettingsScreen({super.key, required this.fraisScolaires});
-
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController yearController = TextEditingController();
-
   Future<void> _downloadHistory() async {
     final filenameController = TextEditingController();
     await showDialog(
@@ -1283,10 +1225,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           decoration: const InputDecoration(labelText: 'Entrez le nom du fichier (sans extension)'),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Annuler'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
           ElevatedButton(
             onPressed: () async {
               if (filenameController.text.isNotEmpty) {
@@ -1301,7 +1240,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -1349,9 +1287,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
 class HistoryScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
-
   const HistoryScreen({super.key, required this.fraisScolaires});
-
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
@@ -1362,13 +1298,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Map<String, Map<String, double>> allRepartitions = {};
   List<Eleve> filteredHistoryEleves = [];
   final TextEditingController searchHistoryController = TextEditingController();
-
   @override
   void initState() {
     super.initState();
     searchHistoryController.addListener(_filterHistoryEleves);
   }
-
   void _computeRepartitions(String year) {
     final data = widget.fraisScolaires.history[year];
     if (data != null) {
@@ -1377,15 +1311,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
         for (var mois in widget.fraisScolaires.months) {
           double studentTotal = data.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
           double total = (data.manualFrais[mois] ?? 0) + studentTotal;
+          // === MISE À JOUR HISTORIQUE : 7% / 23% / 70% ===
           allRepartitions[mois] = {
             '7%': total * 0.07,
+            '23%': total * 0.23,
             '70%': total * 0.7,
           };
         }
       });
     }
   }
-
   void _filterHistoryEleves() {
     if (selectedYear == null) return;
     final data = widget.fraisScolaires.history[selectedYear!];
@@ -1399,7 +1334,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
     });
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1462,7 +1396,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 itemCount: widget.fraisScolaires.months.length,
                 itemBuilder: (context, index) {
                   final mois = widget.fraisScolaires.months[index];
-                  final repartitions = allRepartitions[mois] ?? {'7%': 0.0, '70%': 0.0};
+                  final repartitions = allRepartitions[mois] ?? {'7%': 0.0, '23%': 0.0, '70%': 0.0};
                   return Card(
                     margin: const EdgeInsets.only(bottom: 16.0),
                     child: Padding(
@@ -1488,7 +1422,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   double totalPaid = eleve.paid.values.fold(0.0, (sum, p) => sum + p);
                   double required = widget.fraisScolaires.getRequiredForClass(eleve.classe);
                   double pending = widget.fraisScolaires.months.fold(
-                      0.0, (sum, m) => sum + (required - (eleve.paid[m] ?? 0)));
+                    0.0,
+                        (sum, m) => sum + (required - (eleve.paid[m] ?? 0)),
+                  );
                   return Card(
                     margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                     child: Padding(
@@ -1496,8 +1432,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          Text('${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                           Text('Payé: $totalPaid | En attente: $pending'),
                           const SizedBox(height: 10),
                           SizedBox(
