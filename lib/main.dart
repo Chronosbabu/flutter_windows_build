@@ -396,7 +396,7 @@ class FraisScolaires {
   Map<String, double> calculerRepartitions(String mois) {
     final total = getTotalForMonth(mois);
     return {
-      '30%': total * 0.3,
+      '7%': total * 0.07,
       '70%': total * 0.7,
     };
   }
@@ -548,14 +548,14 @@ class FraisScolaires {
           pw.Paragraph(text: 'Total En Attente: ${getYearTotalPending().toStringAsFixed(2)}'),
           pw.Header(level: 1, child: pw.Text('Répartitions par Mois')),
           pw.Table.fromTextArray(
-            headers: ['Mois', 'Total', '30%', '70%'],
+            headers: ['Mois', 'Total', '7%', '70%'],
             data: months.map((mois) {
               final repart = calculerRepartitions(mois);
               final total = getTotalForMonth(mois);
               return [
                 mois,
                 total.toStringAsFixed(2),
-                repart['30%']!.toStringAsFixed(2),
+                repart['7%']!.toStringAsFixed(2),
                 repart['70%']!.toStringAsFixed(2),
               ];
             }).toList(),
@@ -1236,7 +1236,7 @@ class _AfficherScreenState extends State<AfficherScreen> {
               itemCount: widget.fraisScolaires.months.length,
               itemBuilder: (context, index) {
                 final mois = widget.fraisScolaires.months[index];
-                final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0};
+                final repartitions = allRepartitions[mois] ?? {'7%': 0.0, '70%': 0.0};
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                   child: Padding(
@@ -1378,7 +1378,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           double studentTotal = data.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
           double total = (data.manualFrais[mois] ?? 0) + studentTotal;
           allRepartitions[mois] = {
-            '30%': total * 0.3,
+            '7%': total * 0.07,
             '70%': total * 0.7,
           };
         }
@@ -1462,7 +1462,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 itemCount: widget.fraisScolaires.months.length,
                 itemBuilder: (context, index) {
                   final mois = widget.fraisScolaires.months[index];
-                  final repartitions = allRepartitions[mois] ?? {'30%': 0.0, '70%': 0.0};
+                  final repartitions = allRepartitions[mois] ?? {'7%': 0.0, '70%': 0.0};
                   return Card(
                     margin: const EdgeInsets.only(bottom: 16.0),
                     child: Padding(
