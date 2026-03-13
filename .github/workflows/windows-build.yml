@@ -32,7 +32,7 @@ jobs:
         run: |
           Rename-Item `
             "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "C-SchoolApp.exe"
+            "C-Primaire-maternelle.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -57,6 +57,5 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: C-SchoolApp-Setup
-          path: C-SchoolApp.exe
-
+          name: C-Primaire-maternelle-Setup
+          path: C-Primaire-maternelle.exe
