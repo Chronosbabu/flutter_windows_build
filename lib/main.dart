@@ -48,7 +48,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
     return MaterialApp(
-      title: 'Gestion des Frais Scolaires - Primaire & Maternelle',
+      title: 'Gestion des Frais Scolaires - Secondaire',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.indigo,
@@ -147,7 +147,7 @@ class MainHomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Gestion Primaire & Maternelle'),
+        title: const Text('Gestion École Secondaire'),
         centerTitle: true,
       ),
       body: Container(
@@ -166,7 +166,7 @@ class MainHomeScreen extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Text(
-                    'Choisissez Primaire ou Maternelle',
+                    'École Secondaire',
                     style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
@@ -176,27 +176,13 @@ class MainHomeScreen extends StatelessWidget {
                   const SizedBox(height: 32),
                   _buildPrettyButton(
                     context,
-                    icon: Icons.child_care,
-                    label: 'Primaire',
+                    icon: Icons.school,
+                    label: 'École Secondaire',
                     onPressed: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => SchoolHomeScreen(schoolType: 'primaire'),
-                        ),
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  _buildPrettyButton(
-                    context,
-                    icon: Icons.child_friendly,
-                    label: 'Maternelle',
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => SchoolHomeScreen(schoolType: 'maternelle'),
+                          builder: (context) => SchoolHomeScreen(schoolType: 'secondaire'),
                         ),
                       );
                     },
@@ -763,7 +749,6 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   }
 }
 
-// === TOUS LES AUTRES ÉCRANS (identiques à l’original) ===
 class EnregistrerEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const EnregistrerEleveScreen({super.key, required this.fraisScolaires});
