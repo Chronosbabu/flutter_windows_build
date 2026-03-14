@@ -32,7 +32,7 @@ jobs:
         run: |
           Rename-Item `
             "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "C-Secondaire.exe"
+            "C-TCC_MAPENDO.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -57,5 +57,5 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: C-Secondaire-Setup
-          path: C-Secondaire.exe
+          name: C-TCC_MAPENDO-Setup
+          path: C-TCC_MAPENDO.exe
