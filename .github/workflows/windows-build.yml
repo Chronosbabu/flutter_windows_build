@@ -1,12 +1,14 @@
-name: Flutter Windows Build + Setup
+name: Build Flutter Desktop (Windows + macOS)
 
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -16,7 +18,8 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.38.4'
+          flutter-version: '3.24.3'   # ou la version que tu veux
+          channel: 'stable'
 
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
@@ -27,35 +30,44 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
-      - name: Rename exe
+      - name: Rename executable (optional)
         shell: powershell
         run: |
-          Rename-Item `
-            "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "C-TCC_MAPENDO.exe"
-
-      - name: Install Inno Setup
-        run: choco install innosetup -y
-
-      - name: Copy babu.ico for Inno Setup
-        shell: powershell
-        run: Copy-Item -Path "assets\icons\babu.ico" -Destination "."
-
-      - name: Compile installer
-        shell: powershell
-        run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          $iss  = "installer.iss"
-
-          if (!(Test-Path $iss)) {
-            Write-Error "installer.iss introuvable"
-            exit 1
+          if (Test-Path "build\windows\x64\runner\Release\flutter_windows.dll") {
+            Rename-Item "build\windows\x64\runner\Release\your_app_name.exe" "C-TCC_MAPENDO.exe" -ErrorAction SilentlyContinue
           }
 
-          & "$iscc" "$iss"
-
-      - name: Upload installer
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: C-TCC_MAPENDO-Setup
-          path: C-TCC_MAPENDO.exe
+          name: C-TCC_MAPENDO-Windows
+          path: build/windows/x64/runner/Release/
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.3'
+          channel: 'stable'
+
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build macOS release
+        run: flutter build macos --release
+
+      - name: Upload macOS artifact (the .app bundle)
+        uses: actions/upload-artifact@v4
+        with:
+          name: C-TCC_MAPENDO-macOS
+          path: build/macos/Build/Products/Release/C-TCC_MAPENDO.app
+
