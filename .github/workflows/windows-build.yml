@@ -1,75 +1,14 @@
-name: Build Flutter Desktop (Windows + macOS)
+- name: Rename macOS app
+  run: |
+    mv build/macos/Build/Products/Release/Runner.app build/macos/Build/Products/Release/C-TCC_MAPENDO.app
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
+- name: Zip macOS app
+  run: |
+    cd build/macos/Build/Products/Release
+    zip -r C-TCC_MAPENDO-macOS.zip C-TCC_MAPENDO.app
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-jobs:
-  build-windows:
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.38.4'
-          channel: 'stable'
-
-      - name: Enable Windows desktop
-        run: flutter config --enable-windows-desktop
-
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Build Windows release
-        run: flutter build windows --release
-
-      - name: Rename executable
-        shell: powershell
-        run: |
-          Rename-Item `
-            "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "C-TCC_MAPENDO.exe"
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: C-TCC_MAPENDO-Windows
-          path: build/windows/x64/runner/Release/
-
-  build-macos:
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.38.4'
-          channel: 'stable'
-
-      - name: Enable macOS desktop
-        run: flutter config --enable-macos-desktop
-
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Build macOS release
-        run: flutter build macos --release
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: C-TCC_MAPENDO-macOS
-          path: build/macos/Build/Products/Release/
+- name: Upload macOS artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: C-TCC_MAPENDO-macOS
+    path: build/macos/Build/Products/Release/C-TCC_MAPENDO-macOS.zip
