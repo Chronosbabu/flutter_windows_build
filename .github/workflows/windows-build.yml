@@ -7,6 +7,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -18,7 +21,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.3'   # ou la version que tu veux
+          flutter-version: '3.38.4'
           channel: 'stable'
 
       - name: Enable Windows desktop
@@ -30,12 +33,12 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
-      - name: Rename executable (optional)
+      - name: Rename executable
         shell: powershell
         run: |
-          if (Test-Path "build\windows\x64\runner\Release\flutter_windows.dll") {
-            Rename-Item "build\windows\x64\runner\Release\your_app_name.exe" "C-TCC_MAPENDO.exe" -ErrorAction SilentlyContinue
-          }
+          Rename-Item `
+            "build\windows\x64\runner\Release\c_schollapp.exe" `
+            "C-TCC_MAPENDO.exe"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -53,7 +56,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.3'
+          flutter-version: '3.38.4'
           channel: 'stable'
 
       - name: Enable macOS desktop
@@ -65,9 +68,8 @@ jobs:
       - name: Build macOS release
         run: flutter build macos --release
 
-      - name: Upload macOS artifact (the .app bundle)
+      - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: C-TCC_MAPENDO-macOS
-          path: build/macos/Build/Products/Release/C-TCC_MAPENDO.app
-
+          path: build/macos/Build/Products/Release/
