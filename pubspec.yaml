@@ -38,6 +38,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icons/baba.png
+    - assets/secondaire.json
 
 flutter_icons:
   android: true

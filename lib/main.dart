@@ -7,7 +7,6 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
-
 void main() {
   runApp(
     ChangeNotifierProvider(
@@ -16,7 +15,6 @@ void main() {
     ),
   );
 }
-
 class AppState extends ChangeNotifier {
   bool isDarkMode = false;
   AppState() {
@@ -34,21 +32,19 @@ class AppState extends ChangeNotifier {
     await prefs.setBool('isDarkMode', isDarkMode);
   }
 }
-
 extension StringExtension on String {
   String capitalize() {
     if (isEmpty) return this;
     return "${this[0].toUpperCase()}${substring(1)}";
   }
 }
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
     return MaterialApp(
-      title: 'Gestion des Frais Scolaires - MAPENDO TCC',
+      title: 'Gestion des Frais Scolaires - Secondaire',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.indigo,
@@ -140,14 +136,13 @@ class MyApp extends StatelessWidget {
     );
   }
 }
-
 class MainHomeScreen extends StatelessWidget {
   const MainHomeScreen({super.key});
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Gestion MAPENDO TCC'),
+        title: const Text('Gestion École Secondaire'),
         centerTitle: true,
       ),
       body: Container(
@@ -166,7 +161,7 @@ class MainHomeScreen extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Text(
-                    'MAPENDO TCC',
+                    'École Secondaire',
                     style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
@@ -176,13 +171,13 @@ class MainHomeScreen extends StatelessWidget {
                   const SizedBox(height: 32),
                   _buildPrettyButton(
                     context,
-                    icon: Icons.cut,
-                    label: 'MAPENDO TCC',
+                    icon: Icons.school,
+                    label: 'École Secondaire',
                     onPressed: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => SchoolHomeScreen(schoolType: 'coupe_couture'),
+                          builder: (context) => SchoolHomeScreen(schoolType: 'secondaire'),
                         ),
                       );
                     },
@@ -195,7 +190,6 @@ class MainHomeScreen extends StatelessWidget {
       ),
     );
   }
-
   Widget _buildPrettyButton(BuildContext context, {required IconData icon, required String label, required VoidCallback onPressed}) {
     return ElevatedButton.icon(
       icon: Icon(icon, size: 30, color: Colors.white),
@@ -211,7 +205,6 @@ class MainHomeScreen extends StatelessWidget {
     );
   }
 }
-
 class Eleve {
   String nom;
   String postNom;
@@ -235,7 +228,6 @@ class Eleve {
     )..paid = Map<String, double>.from(json['paid'] ?? {});
   }
 }
-
 class SchoolYearData {
   Map<String, double> manualFrais;
   List<Eleve> eleves;
@@ -251,7 +243,6 @@ class SchoolYearData {
     );
   }
 }
-
 class FraisScolaires {
   final String schoolType;
   SchoolYearData currentData = SchoolYearData(manualFrais: {}, eleves: []);
@@ -270,11 +261,9 @@ class FraisScolaires {
     'Mai',
     'Juin'
   ];
-
   FraisScolaires(this.schoolType);
-
   Future<void> loadData() async {
-    final dir = await getApplicationSupportDirectory();
+    final dir = await getApplicationDocumentsDirectory();
     _dataFilePath = '${dir.path}/${schoolType}_data.json';
     final file = File(_dataFilePath!);
     if (await file.exists()) {
@@ -291,11 +280,36 @@ class FraisScolaires {
         history = {};
       }
     }
+    if (currentData.eleves.isEmpty && schoolType == 'secondaire') {
+      await _loadFromAssets();
+    }
   }
-
+  Future<void> _loadFromAssets() async {
+    try {
+      final String jsonStr = await rootBundle.loadString('assets/secondaire.json');
+      final Map<String, dynamic> data = json.decode(jsonStr);
+      List<Eleve> allEleves = [];
+      data.forEach((key, value) {
+        if (value is List) {
+          for (var student in value) {
+            if (student is Map<String, dynamic>) {
+              allEleves.add(Eleve(
+                nom: student['nom']?.toString() ?? '',
+                postNom: student['post_nom']?.toString() ?? '',
+                prenom: student['prenom']?.toString() ?? '',
+                classe: student['classe']?.toString() ?? '',
+              ));
+            }
+          }
+        }
+      });
+      currentData.eleves = allEleves;
+      await saveData();
+    } catch (e) {}
+  }
   Future<void> saveData() async {
     if (_dataFilePath == null) {
-      final dir = await getApplicationSupportDirectory();
+      final dir = await getApplicationDocumentsDirectory();
       _dataFilePath = '${dir.path}/${schoolType}_data.json';
     }
     final file = File(_dataFilePath!);
@@ -306,15 +320,13 @@ class FraisScolaires {
     };
     await file.writeAsString(json.encode(data));
   }
-
   void enregistrerFrais(String mois, double montant) {
     currentData.manualFrais[mois] = (currentData.manualFrais[mois] ?? 0) + montant;
   }
-
   double getRequiredForClass(String classe) {
     final lowerClasse = classe.toLowerCase().trim();
     if (schoolType == 'secondaire') {
-      if (lowerClasse == '6 ieme' || lowerClasse == '6ieme' || lowerClasse == '6ème' || lowerClasse.startsWith('6')) {
+      if (lowerClasse.contains('6') || lowerClasse.contains('4')) {
         return 70000;
       } else {
         return 45000;
@@ -332,12 +344,10 @@ class FraisScolaires {
     }
     return 0.0;
   }
-
   double getTotalForMonth(String mois) {
     double studentTotal = currentData.eleves.fold(0, (sum, e) => sum + (e.paid[mois] ?? 0));
     return (currentData.manualFrais[mois] ?? 0) + studentTotal;
   }
-
   Map<String, double> calculerRepartitions(String mois) {
     final total = getTotalForMonth(mois);
     return {
@@ -346,7 +356,6 @@ class FraisScolaires {
       '70%': total * 0.7,
     };
   }
-
   void handlePayment(Eleve eleve, String mois, double payment) {
     int monthIndex = months.indexOf(mois);
     if (monthIndex == -1) return;
@@ -367,7 +376,6 @@ class FraisScolaires {
       }
     }
   }
-
   Future<void> resetForNewYear(String newYear) async {
     history[currentYear] = SchoolYearData(
       manualFrais: Map.from(currentData.manualFrais),
@@ -377,23 +385,18 @@ class FraisScolaires {
     currentYear = newYear;
     await saveData();
   }
-
   double getStudentTotalPaid(Eleve eleve) {
     return eleve.paid.values.fold(0.0, (sum, paid) => sum + paid);
   }
-
   double getStudentPending(Eleve eleve) {
     return months.length * getRequiredForClass(eleve.classe) - getStudentTotalPaid(eleve);
   }
-
   double getYearTotalCollected() {
     return months.fold(0.0, (sum, mois) => sum + getTotalForMonth(mois));
   }
-
   double getYearTotalPending() {
     return currentData.eleves.fold(0.0, (sum, e) => sum + getStudentPending(e));
   }
-
   Map<String, Map<String, dynamic>> getSectionBreakdowns() {
     if (schoolType == 'secondaire') {
       return {
@@ -454,16 +457,13 @@ class FraisScolaires {
     }
     return {};
   }
-
   Future<void> generatePdf(String filename, {String reportType = 'year', String? selectedMonth}) async {
     final pdf = pw.Document();
-
     String reportTitle = 'Rapport pour ${schoolType.capitalize()} - $currentYear';
     List<String> monthsToDisplay = months;
     double totalCollected = getYearTotalCollected();
     bool isSingleMonth = false;
     String? displayMonth;
-
     if ((reportType == 'daily' || reportType == 'monthly') && selectedMonth != null) {
       displayMonth = selectedMonth;
       monthsToDisplay = [selectedMonth];
@@ -473,7 +473,6 @@ class FraisScolaires {
           ? 'Rapport Journalier - Mois de $selectedMonth ($currentYear)'
           : 'Rapport Mensuel Complet - $selectedMonth ($currentYear)';
     }
-
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
@@ -598,50 +597,30 @@ class FraisScolaires {
         ],
       ),
     );
-
     final bytes = await pdf.save();
-
-    Directory? outputDir;
-    if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
-      outputDir = await getApplicationDocumentsDirectory();
-    } else {
-      outputDir = await getApplicationSupportDirectory();
-    }
-
-    final safeName = filename.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_').trim();
-    final targetPath = '${outputDir.path}/${safeName}_rapport.pdf';
-    final file = File(targetPath);
-
-    try {
-      await file.writeAsBytes(bytes);
-    } catch (e) {
-      // Erreur silencieuse (tu peux ajouter un SnackBar dans SettingsScreen si tu veux)
-    }
+    final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/$filename.pdf');
+    await file.writeAsBytes(bytes);
   }
 }
-
 class SchoolHomeScreen extends StatefulWidget {
   final String schoolType;
   const SchoolHomeScreen({super.key, required this.schoolType});
   @override
   State<SchoolHomeScreen> createState() => _SchoolHomeScreenState();
 }
-
 class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   late FraisScolaires fraisScolaires;
-
   @override
   void initState() {
     super.initState();
     fraisScolaires = FraisScolaires(widget.schoolType);
     _loadData();
   }
-
   Future<void> _loadData() async {
     await fraisScolaires.loadData();
     setState(() {});
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -762,7 +741,6 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
       ),
     );
   }
-
   Widget _buildActionCard({required IconData icon, required String label, required VoidCallback onTap}) {
     return GestureDetector(
       onTap: onTap,
@@ -785,20 +763,17 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     );
   }
 }
-
 class EnregistrerEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const EnregistrerEleveScreen({super.key, required this.fraisScolaires});
   @override
   State<EnregistrerEleveScreen> createState() => _EnregistrerEleveScreenState();
 }
-
 class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   late TextEditingController nomController;
   late TextEditingController postNomController;
   late TextEditingController prenomController;
   late TextEditingController classeController;
-
   @override
   void initState() {
     super.initState();
@@ -807,7 +782,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     prenomController = TextEditingController();
     classeController = TextEditingController();
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -852,20 +826,17 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     );
   }
 }
-
 class PaiementEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const PaiementEleveScreen({super.key, required this.fraisScolaires});
   @override
   State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
 }
-
 class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   final TextEditingController searchController = TextEditingController();
   List<Eleve> filteredEleves = [];
   String? selectedClass;
   List<String> classes = [];
-
   @override
   void initState() {
     super.initState();
@@ -873,7 +844,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     classes = widget.fraisScolaires.currentData.eleves.map((e) => e.classe).toSet().toList();
     searchController.addListener(_filterEleves);
   }
-
   void _filterEleves() {
     final query = searchController.text.toLowerCase();
     setState(() {
@@ -885,7 +855,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
     });
   }
-
   bool _canPayForMonth(Eleve eleve, String mois) {
     int index = widget.fraisScolaires.months.indexOf(mois);
     for (int i = 0; i < index; i++) {
@@ -896,13 +865,53 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
     return true;
   }
-
+  Future<void> _editEleve(Eleve eleve) async {
+    final nomCtrl = TextEditingController(text: eleve.nom);
+    final postNomCtrl = TextEditingController(text: eleve.postNom);
+    final prenomCtrl = TextEditingController(text: eleve.prenom);
+    final classeCtrl = TextEditingController(text: eleve.classe);
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Modifier l\'élève'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nomCtrl, decoration: const InputDecoration(labelText: 'Nom')),
+              const SizedBox(height: 8),
+              TextField(controller: postNomCtrl, decoration: const InputDecoration(labelText: 'Post-nom')),
+              const SizedBox(height: 8),
+              TextField(controller: prenomCtrl, decoration: const InputDecoration(labelText: 'Prénom')),
+              const SizedBox(height: 8),
+              TextField(controller: classeCtrl, decoration: const InputDecoration(labelText: 'Classe')),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          ElevatedButton(
+            onPressed: () async {
+              eleve.nom = nomCtrl.text.trim();
+              eleve.postNom = postNomCtrl.text.trim();
+              eleve.prenom = prenomCtrl.text.trim();
+              eleve.classe = classeCtrl.text.trim();
+              await widget.fraisScolaires.saveData();
+              _filterEleves();
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Élève modifié !')));
+            },
+            child: const Text('Enregistrer'),
+          ),
+        ],
+      ),
+    );
+  }
   @override
   void dispose() {
     searchController.dispose();
     super.dispose();
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -953,9 +962,20 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          '${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
+                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.indigo),
+                              onPressed: () => _editEleve(eleve),
+                            ),
+                          ],
                         ),
                         Text('Payé: $totalPaid | En attente: $pending'),
                         const SizedBox(height: 10),
@@ -1011,7 +1031,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       ),
     );
   }
-
   void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
     final controller = TextEditingController();
     showDialog(
@@ -1042,7 +1061,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       ),
     );
   }
-
   void _showReceiptDialog(BuildContext context, Eleve eleve, String mois, double montant) {
     showDialog(
       context: context,
@@ -1065,18 +1083,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     );
   }
 }
-
 class EnregistrerScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const EnregistrerScreen({super.key, required this.fraisScolaires});
   @override
   State<EnregistrerScreen> createState() => _EnregistrerScreenState();
 }
-
 class _EnregistrerScreenState extends State<EnregistrerScreen> {
   String? selectedMois;
   final TextEditingController montantController = TextEditingController();
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1130,23 +1145,19 @@ class _EnregistrerScreenState extends State<EnregistrerScreen> {
     );
   }
 }
-
 class AfficherScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const AfficherScreen({super.key, required this.fraisScolaires});
   @override
   State<AfficherScreen> createState() => _AfficherScreenState();
 }
-
 class _AfficherScreenState extends State<AfficherScreen> {
   Map<String, Map<String, double>> allRepartitions = {};
-
   @override
   void initState() {
     super.initState();
     _computeAllRepartitions();
   }
-
   void _computeAllRepartitions() {
     setState(() {
       for (var mois in widget.fraisScolaires.months) {
@@ -1154,7 +1165,6 @@ class _AfficherScreenState extends State<AfficherScreen> {
       }
     });
   }
-
   @override
   Widget build(BuildContext context) {
     double totalCollected = widget.fraisScolaires.getYearTotalCollected();
@@ -1201,17 +1211,14 @@ class _AfficherScreenState extends State<AfficherScreen> {
     );
   }
 }
-
 class SettingsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const SettingsScreen({super.key, required this.fraisScolaires});
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
-
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController yearController = TextEditingController();
-
   Future<void> _downloadReport() async {
     String? selectedType = await showDialog<String>(
       context: context,
@@ -1247,7 +1254,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       },
     );
     if (selectedType == null) return;
-
     String? chosenMonth;
     if (selectedType != 'year') {
       chosenMonth = await showDialog<String>(
@@ -1271,11 +1277,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       if (chosenMonth == null) return;
     }
-
     final filenameController = TextEditingController(
       text: '${selectedType == 'daily' ? 'Rapport_Journalier' : selectedType == 'monthly' ? 'Rapport_Mensuel' : 'Rapport_Annuel'}_${chosenMonth ?? widget.fraisScolaires.currentYear}',
     );
-
     await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1300,16 +1304,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               );
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Rapport PDF généré et sauvegardé avec succès !')),
+                const SnackBar(content: Text('Rapport PDF généré et téléchargé avec succès !')),
               );
             },
-            child: const Text('Générer et Sauvegarder'),
+            child: const Text('Générer et Télécharger'),
           ),
         ],
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -1354,27 +1357,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 }
-
 class HistoryScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const HistoryScreen({super.key, required this.fraisScolaires});
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
-
 class _HistoryScreenState extends State<HistoryScreen> {
   String? selectedYear;
   String? selectedView;
   Map<String, Map<String, double>> allRepartitions = {};
   List<Eleve> filteredHistoryEleves = [];
   final TextEditingController searchHistoryController = TextEditingController();
-
   @override
   void initState() {
     super.initState();
     searchHistoryController.addListener(_filterHistoryEleves);
   }
-
   void _computeRepartitions(String year) {
     final data = widget.fraisScolaires.history[year];
     if (data != null) {
@@ -1392,7 +1391,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
       });
     }
   }
-
   void _filterHistoryEleves() {
     if (selectedYear == null) return;
     final data = widget.fraisScolaires.history[selectedYear!];
@@ -1406,7 +1404,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
     });
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
