@@ -48,7 +48,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
     return MaterialApp(
-      title: 'Gestion des Frais Scolaires - Secondaire',
+      title: 'Gestion des Frais Scolaires - MAPENDO TCC',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.indigo,
@@ -147,7 +147,7 @@ class MainHomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Gestion École Secondaire'),
+        title: const Text('Gestion MAPENDO TCC'),
         centerTitle: true,
       ),
       body: Container(
@@ -166,7 +166,7 @@ class MainHomeScreen extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Text(
-                    'École Secondaire',
+                    'MAPENDO TCC',
                     style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
@@ -176,13 +176,13 @@ class MainHomeScreen extends StatelessWidget {
                   const SizedBox(height: 32),
                   _buildPrettyButton(
                     context,
-                    icon: Icons.school,
-                    label: 'École Secondaire',
+                    icon: Icons.cut,
+                    label: 'MAPENDO TCC',
                     onPressed: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => SchoolHomeScreen(schoolType: 'secondaire'),
+                          builder: (context) => SchoolHomeScreen(schoolType: 'coupe_couture'),
                         ),
                       );
                     },
@@ -801,6 +801,7 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   }
 }
 
+// === TOUS LES AUTRES ÉCRANS (identiques) ===
 class EnregistrerEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const EnregistrerEleveScreen({super.key, required this.fraisScolaires});
