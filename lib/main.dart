@@ -218,21 +218,30 @@ class Eleve {
   String prenom;
   String classe;
   Map<String, double> paid = {};
+  List<Map<String, dynamic>> transactions = [];
+
   Eleve({required this.nom, required this.postNom, required this.prenom, required this.classe});
+
   Map<String, dynamic> toJson() => {
     'nom': nom,
     'postNom': postNom,
     'prenom': prenom,
     'classe': classe,
     'paid': paid,
+    'transactions': transactions,
   };
+
   factory Eleve.fromJson(Map<String, dynamic> json) {
     return Eleve(
       nom: json['nom'],
       postNom: json['postNom'],
       prenom: json['prenom'],
       classe: json['classe'],
-    )..paid = Map<String, double>.from(json['paid'] ?? {});
+    )
+      ..paid = Map<String, double>.from(json['paid'] ?? {})
+      ..transactions = (json['transactions'] as List? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
   }
 }
 
@@ -274,8 +283,8 @@ class FraisScolaires {
   FraisScolaires(this.schoolType);
 
   Future<void> loadData() async {
-    final dir = await getApplicationSupportDirectory(); // Changé pour un dossier propre à l'application (plus sécurisé et isolé)
-    _dataFilePath = '${dir.path}/gestion_frais_scolaires_${schoolType}_unique_secure_data.json'; // Nom UNIQUE et sécurisé pour que cette app ait sa base ABSOLUMENT différente de toute autre app similaire
+    final dir = await getApplicationDocumentsDirectory();
+    _dataFilePath = '${dir.path}/${schoolType}_data.json';
     final file = File(_dataFilePath!);
     if (await file.exists()) {
       try {
@@ -291,39 +300,12 @@ class FraisScolaires {
         history = {};
       }
     }
-    if (currentData.eleves.isEmpty && schoolType == 'secondaire') {
-      await _loadFromAssets();
-    }
-  }
-
-  Future<void> _loadFromAssets() async {
-    try {
-      final String jsonStr = await rootBundle.loadString('assets/secondaire.json');
-      final Map<String, dynamic> data = json.decode(jsonStr);
-      List<Eleve> allEleves = [];
-      data.forEach((key, value) {
-        if (value is List) {
-          for (var student in value) {
-            if (student is Map<String, dynamic>) {
-              allEleves.add(Eleve(
-                nom: student['nom']?.toString() ?? '',
-                postNom: student['post_nom']?.toString() ?? '',
-                prenom: student['prenom']?.toString() ?? '',
-                classe: student['classe']?.toString() ?? '',
-              ));
-            }
-          }
-        }
-      });
-      currentData.eleves = allEleves;
-      await saveData();
-    } catch (e) {}
   }
 
   Future<void> saveData() async {
     if (_dataFilePath == null) {
-      final dir = await getApplicationSupportDirectory(); // Même dossier sécurisé et propre à l'app
-      _dataFilePath = '${dir.path}/gestion_frais_scolaires_${schoolType}_unique_secure_data.json';
+      final dir = await getApplicationDocumentsDirectory();
+      _dataFilePath = '${dir.path}/${schoolType}_data.json';
     }
     final file = File(_dataFilePath!);
     final data = {
@@ -341,7 +323,7 @@ class FraisScolaires {
   double getRequiredForClass(String classe) {
     final lowerClasse = classe.toLowerCase().trim();
     if (schoolType == 'secondaire') {
-      if (lowerClasse.contains('6') || lowerClasse.contains('4')) {
+      if (lowerClasse == '6 ieme' || lowerClasse == '6ieme' || lowerClasse == '6ème' || lowerClasse.startsWith('6')) {
         return 70000;
       } else {
         return 45000;
@@ -377,15 +359,26 @@ class FraisScolaires {
   void handlePayment(Eleve eleve, String mois, double payment) {
     int monthIndex = months.indexOf(mois);
     if (monthIndex == -1) return;
+
+    String today = DateTime.now().toString().split(' ')[0];
     String currentMonth = mois;
     double remaining = payment;
+
     while (remaining > 0 && monthIndex < months.length) {
       double required = getRequiredForClass(eleve.classe);
       double alreadyPaid = eleve.paid[currentMonth] ?? 0;
       double needed = required - alreadyPaid;
+
       if (needed > 0) {
         double toAdd = remaining > needed ? needed : remaining;
         eleve.paid[currentMonth] = alreadyPaid + toAdd;
+
+        eleve.transactions.add({
+          'date': today,
+          'mois': currentMonth,
+          'amount': toAdd,
+        });
+
         remaining -= toAdd;
       }
       monthIndex++;
@@ -489,13 +482,17 @@ class FraisScolaires {
     double totalCollected = getYearTotalCollected();
     bool isSingleMonth = false;
     String? displayMonth;
+
     if ((reportType == 'daily' || reportType == 'monthly') && selectedMonth != null) {
       displayMonth = selectedMonth;
       monthsToDisplay = [selectedMonth];
       totalCollected = getTotalForMonth(selectedMonth);
       isSingleMonth = true;
-      reportTitle = reportType == 'daily' ? 'Rapport Journalier - Mois de $selectedMonth ($currentYear)' : 'Rapport Mensuel Complet - $selectedMonth ($currentYear)';
+      reportTitle = reportType == 'daily'
+          ? 'Rapport Journalier - $selectedMonth ($currentYear)'
+          : 'Rapport Mensuel Complet - $selectedMonth ($currentYear)';
     }
+
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
@@ -526,15 +523,31 @@ class FraisScolaires {
           ),
           pw.Header(level: 1, child: pw.Text('Liste des Élèves')),
           pw.Table.fromTextArray(
-            headers: isSingleMonth ? ['Nom Complet', 'Classe', 'Payé ce mois', 'En Attente ce mois'] : ['Nom', 'Post-nom', 'Prénom', 'Classe', 'Total Payé', 'En Attente'],
+            headers: isSingleMonth
+                ? (reportType == 'daily'
+                ? ['Nom Complet', 'Classe', 'Payé AUJOURD\'HUI', 'En Attente ce mois']
+                : ['Nom Complet', 'Classe', 'Payé ce mois', 'En Attente ce mois'])
+                : ['Nom', 'Post-nom', 'Prénom', 'Classe', 'Total Payé', 'En Attente'],
             data: () {
               List<Eleve> elevesList = currentData.eleves;
               if (reportType == 'daily' && displayMonth != null) {
-                elevesList = currentData.eleves.where((e) => (e.paid[displayMonth!] ?? 0) > 0).toList();
+                String today = DateTime.now().toString().split(' ')[0];
+                elevesList = currentData.eleves.where((e) {
+                  return e.transactions.any((t) =>
+                  t['date'] == today && t['mois'] == displayMonth);
+                }).toList();
               }
               return elevesList.map((e) {
                 if (isSingleMonth) {
-                  double paidThis = e.paid[displayMonth!] ?? 0;
+                  double paidThis;
+                  if (reportType == 'daily') {
+                    String today = DateTime.now().toString().split(' ')[0];
+                    paidThis = e.transactions
+                        .where((t) => t['date'] == today && t['mois'] == displayMonth)
+                        .fold(0.0, (sum, t) => sum + (t['amount'] as double));
+                  } else {
+                    paidThis = e.paid[displayMonth!] ?? 0;
+                  }
                   double req = getRequiredForClass(e.classe);
                   double pendThis = req - paidThis;
                   String fullName = '${e.nom} ${e.postNom} ${e.prenom}';
@@ -618,6 +631,7 @@ class FraisScolaires {
         ],
       ),
     );
+
     final bytes = await pdf.save();
     final dir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$filename.pdf');
@@ -764,7 +778,6 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
       ),
     );
   }
-
   Widget _buildActionCard({required IconData icon, required String label, required VoidCallback onTap}) {
     return GestureDetector(
       onTap: onTap,
@@ -794,7 +807,6 @@ class EnregistrerEleveScreen extends StatefulWidget {
   @override
   State<EnregistrerEleveScreen> createState() => _EnregistrerEleveScreenState();
 }
-
 class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   late TextEditingController nomController;
   late TextEditingController postNomController;
@@ -859,13 +871,11 @@ class PaiementEleveScreen extends StatefulWidget {
   @override
   State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
 }
-
 class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   final TextEditingController searchController = TextEditingController();
   List<Eleve> filteredEleves = [];
   String? selectedClass;
   List<String> classes = [];
-
   @override
   void initState() {
     super.initState();
@@ -873,7 +883,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     classes = widget.fraisScolaires.currentData.eleves.map((e) => e.classe).toSet().toList();
     searchController.addListener(_filterEleves);
   }
-
   void _filterEleves() {
     final query = searchController.text.toLowerCase();
     setState(() {
@@ -885,7 +894,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
     });
   }
-
   bool _canPayForMonth(Eleve eleve, String mois) {
     int index = widget.fraisScolaires.months.indexOf(mois);
     for (int i = 0; i < index; i++) {
@@ -896,56 +904,11 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
     return true;
   }
-
-  Future<void> _editEleve(Eleve eleve) async {
-    final nomCtrl = TextEditingController(text: eleve.nom);
-    final postNomCtrl = TextEditingController(text: eleve.postNom);
-    final prenomCtrl = TextEditingController(text: eleve.prenom);
-    final classeCtrl = TextEditingController(text: eleve.classe);
-    await showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Modifier l\'élève'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(controller: nomCtrl, decoration: const InputDecoration(labelText: 'Nom')),
-              const SizedBox(height: 8),
-              TextField(controller: postNomCtrl, decoration: const InputDecoration(labelText: 'Post-nom')),
-              const SizedBox(height: 8),
-              TextField(controller: prenomCtrl, decoration: const InputDecoration(labelText: 'Prénom')),
-              const SizedBox(height: 8),
-              TextField(controller: classeCtrl, decoration: const InputDecoration(labelText: 'Classe')),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
-          ElevatedButton(
-            onPressed: () async {
-              eleve.nom = nomCtrl.text.trim();
-              eleve.postNom = postNomCtrl.text.trim();
-              eleve.prenom = prenomCtrl.text.trim();
-              eleve.classe = classeCtrl.text.trim();
-              await widget.fraisScolaires.saveData();
-              _filterEleves();
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Élève modifié !')));
-            },
-            child: const Text('Enregistrer'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   void dispose() {
     searchController.dispose();
     super.dispose();
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -996,96 +959,49 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Expanded(
-                              child: Text(
-                                '${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
-                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.indigo),
-                              onPressed: () => _editEleve(eleve),
-                            ),
-                          ],
+                        Text(
+                          '${eleve.nom} ${eleve.postNom} ${eleve.prenom} - ${eleve.classe}',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                         ),
                         Text('Payé: $totalPaid | En attente: $pending'),
                         const SizedBox(height: 10),
-                        // === NOUVEAUTÉ : Boutons gauche/droite + Scroll horizontal fluide et fiable même sur Windows ===
                         SizedBox(
                           height: 80,
-                          child: StatefulBuilder(
-                            builder: (BuildContext innerContext, StateSetter setLocalState) {
-                              final ScrollController scrollController = ScrollController();
-                              return Row(
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.arrow_left, color: Colors.indigo, size: 32),
-                                    tooltip: 'Scroller à gauche (mois précédents)',
-                                    onPressed: () {
-                                      if (scrollController.hasClients) {
-                                        scrollController.animateTo(
-                                          scrollController.offset - 250,
-                                          duration: const Duration(milliseconds: 400),
-                                          curve: Curves.easeInOut,
-                                        );
-                                      }
-                                    },
-                                  ),
-                                  Expanded(
-                                    child: ListView.builder(
-                                      controller: scrollController,
-                                      scrollDirection: Axis.horizontal,
-                                      physics: const AlwaysScrollableScrollPhysics(), // Rend le scroll ultra fluide sur Windows
-                                      itemCount: widget.fraisScolaires.months.length,
-                                      itemBuilder: (context, monthIndex) {
-                                        final mois = widget.fraisScolaires.months[monthIndex];
-                                        double required = widget.fraisScolaires.getRequiredForClass(eleve.classe);
-                                        double paid = eleve.paid[mois] ?? 0;
-                                        bool isFullyPaid = paid >= required;
-                                        Color backgroundColor = isFullyPaid ? (isDark ? Colors.green[700]! : Colors.green[100]!) : (isDark ? Colors.red[700]! : Colors.red[100]!);
-                                        Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
-                                        return Padding(
-                                          padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                                          child: GestureDetector(
-                                            onTap: (isFullyPaid || !_canPayForMonth(eleve, mois)) ? null : () => _showPaymentDialog(context, eleve, mois),
-                                            child: Container(
-                                              width: 120,
-                                              decoration: BoxDecoration(
-                                                color: backgroundColor,
-                                                border: Border.all(color: borderColor),
-                                                borderRadius: BorderRadius.circular(8),
-                                              ),
-                                              child: Column(
-                                                mainAxisAlignment: MainAxisAlignment.center,
-                                                children: [
-                                                  Text(mois, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                                                  Text('Requis: ${required.toStringAsFixed(0)}'),
-                                                  if (paid > 0) Text('Payé: ${paid.toStringAsFixed(0)}'),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                        );
-                                      },
+                          child: ListView.builder(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: widget.fraisScolaires.months.length,
+                            itemBuilder: (context, monthIndex) {
+                              final mois = widget.fraisScolaires.months[monthIndex];
+                              double required = widget.fraisScolaires.getRequiredForClass(eleve.classe);
+                              double paid = eleve.paid[mois] ?? 0;
+                              bool isFullyPaid = paid >= required;
+                              Color backgroundColor = isFullyPaid
+                                  ? (isDark ? Colors.green[700]! : Colors.green[100]!)
+                                  : (isDark ? Colors.red[700]! : Colors.red[100]!);
+                              Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                                child: GestureDetector(
+                                  onTap: (isFullyPaid || !_canPayForMonth(eleve, mois))
+                                      ? null
+                                      : () => _showPaymentDialog(context, eleve, mois),
+                                  child: Container(
+                                    width: 120,
+                                    decoration: BoxDecoration(
+                                      color: backgroundColor,
+                                      border: Border.all(color: borderColor),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Text(mois, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                                        Text('Requis: ${required.toStringAsFixed(0)}'),
+                                        if (paid > 0) Text('Payé: ${paid.toStringAsFixed(0)}'),
+                                      ],
                                     ),
                                   ),
-                                  IconButton(
-                                    icon: const Icon(Icons.arrow_right, color: Colors.indigo, size: 32),
-                                    tooltip: 'Scroller à droite (mois suivants)',
-                                    onPressed: () {
-                                      if (scrollController.hasClients) {
-                                        scrollController.animateTo(
-                                          scrollController.offset + 250,
-                                          duration: const Duration(milliseconds: 400),
-                                          curve: Curves.easeInOut,
-                                        );
-                                      }
-                                    },
-                                  ),
-                                ],
+                                ),
                               );
                             },
                           ),
@@ -1101,7 +1017,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       ),
     );
   }
-
   void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
     final controller = TextEditingController();
     showDialog(
@@ -1132,7 +1047,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       ),
     );
   }
-
   void _showReceiptDialog(BuildContext context, Eleve eleve, String mois, double montant) {
     showDialog(
       context: context,
@@ -1162,7 +1076,6 @@ class EnregistrerScreen extends StatefulWidget {
   @override
   State<EnregistrerScreen> createState() => _EnregistrerScreenState();
 }
-
 class _EnregistrerScreenState extends State<EnregistrerScreen> {
   String? selectedMois;
   final TextEditingController montantController = TextEditingController();
@@ -1226,7 +1139,6 @@ class AfficherScreen extends StatefulWidget {
   @override
   State<AfficherScreen> createState() => _AfficherScreenState();
 }
-
 class _AfficherScreenState extends State<AfficherScreen> {
   Map<String, Map<String, double>> allRepartitions = {};
   @override
@@ -1294,7 +1206,6 @@ class SettingsScreen extends StatefulWidget {
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
-
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController yearController = TextEditingController();
   Future<void> _downloadReport() async {
@@ -1391,7 +1302,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -1443,20 +1353,17 @@ class HistoryScreen extends StatefulWidget {
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
-
 class _HistoryScreenState extends State<HistoryScreen> {
   String? selectedYear;
   String? selectedView;
   Map<String, Map<String, double>> allRepartitions = {};
   List<Eleve> filteredHistoryEleves = [];
   final TextEditingController searchHistoryController = TextEditingController();
-
   @override
   void initState() {
     super.initState();
     searchHistoryController.addListener(_filterHistoryEleves);
   }
-
   void _computeRepartitions(String year) {
     final data = widget.fraisScolaires.history[year];
     if (data != null) {
@@ -1474,7 +1381,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
       });
     }
   }
-
   void _filterHistoryEleves() {
     if (selectedYear == null) return;
     final data = widget.fraisScolaires.history[selectedYear!];
@@ -1488,7 +1394,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ..sort((a, b) => '${a.nom} ${a.postNom} ${a.prenom}'.compareTo('${b.nom} ${b.postNom} ${b.prenom}'));
     });
   }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1599,7 +1504,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                 final mois = widget.fraisScolaires.months[monthIndex];
                                 double paid = eleve.paid[mois] ?? 0;
                                 bool isFullyPaid = paid >= required;
-                                Color backgroundColor = isFullyPaid ? (isDark ? Colors.green[700]! : Colors.green[100]!) : (isDark ? Colors.red[700]! : Colors.red[100]!);
+                                Color backgroundColor = isFullyPaid
+                                    ? (isDark ? Colors.green[700]! : Colors.green[100]!)
+                                    : (isDark ? Colors.red[700]! : Colors.red[100]!);
                                 Color borderColor = isDark ? Colors.grey[600]! : Colors.grey[300]!;
                                 return Padding(
                                   padding: const EdgeInsets.symmetric(horizontal: 4.0),
