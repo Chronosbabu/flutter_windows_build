@@ -21,7 +21,9 @@ jobs:
           flutter-version: '3.38.4'
 
       - name: Enable macOS desktop
-        run: flutter config --enable-macos-desktop
+        run: |
+          flutter config --enable-macos-desktop
+          flutter doctor
 
       - name: Install dependencies
         run: flutter pub get
@@ -31,8 +33,13 @@ jobs:
 
       - name: Rename app
         run: |
-          mv build/macos/Build/Products/Release/Runner.app \
-             build/macos/Build/Products/Release/C-MAPENDO.app
+          if [ -d "build/macos/Build/Products/Release/Runner.app" ]; then
+            mv build/macos/Build/Products/Release/Runner.app \
+               build/macos/Build/Products/Release/C-MAPENDO.app
+          else
+            echo "Error: Runner.app not found"
+            exit 1
+          fi
 
       - name: Zip app
         run: |
