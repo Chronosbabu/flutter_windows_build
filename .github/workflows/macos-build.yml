@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -20,20 +20,35 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.38.4'
+          channel: stable
+
+      - name: Verify Flutter
+        run: flutter doctor -v
 
       - name: Enable macOS desktop
         run: flutter config --enable-macos-desktop
 
-      - name: Install dependencies
+      - name: Get dependencies
         run: flutter pub get
 
-      - name: Build macOS app
+      - name: Clean project
+        run: flutter clean
+
+      - name: Build macOS
         run: flutter build macos --release
+
+      - name: Check build output
+        run: ls build/macos/Build/Products/Release
 
       - name: Rename app
         run: |
-          mv build/macos/Build/Products/Release/Runner.app \
-             build/macos/Build/Products/Release/C-MAPENDO.app
+          if [ -d "build/macos/Build/Products/Release/Runner.app" ]; then
+            mv build/macos/Build/Products/Release/Runner.app \
+               build/macos/Build/Products/Release/C-MAPENDO.app
+          else
+            echo "❌ Runner.app not found"
+            exit 1
+          fi
 
       - name: Zip app
         run: |
