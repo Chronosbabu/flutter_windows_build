@@ -1,392 +1,328 @@
-import 'package:flutter/material.dart';
-import 'dart:io';
 import 'dart:convert';
-import 'dart:async';
+import 'dart:math' as math;
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'video_player_screen.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Système Examens',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-        useMaterial3: true,
-      ),
-      home: const ProfHomePage(),
+      title: 'IPTV',
       debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: Colors.black,
+        appBarTheme: AppBarTheme(backgroundColor: Colors.black, elevation: 0),
+      ),
+      home: HomePage(),
     );
   }
 }
 
-class ProfHomePage extends StatefulWidget {
-  const ProfHomePage({super.key});
-
+class HomePage extends StatefulWidget {
   @override
-  State<ProfHomePage> createState() => _ProfHomePageState();
+  _HomePageState createState() => _HomePageState();
 }
 
-class _ProfHomePageState extends State<ProfHomePage> {
-  Socket? _socket;
-  bool _isConnected = false;
+class _HomePageState extends State<HomePage> {
+  List<dynamic> videos = [];
+  List<dynamic> filteredVideos = [];
+  Map<String, dynamic>? featuredVideo;
+  bool isLoading = false;
+
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
+  bool isSearching = false;
+
+  // ================== CONFIGURATION (compatible Windows) ==================
+  // Si tu lances le serveur sur la même machine Windows → utilise "http://127.0.0.1:5000"
+  // Sinon garde ton IP actuelle (172.20.10.10)
+  static const String SERVER_URL = "http://172.20.10.10:5000";
+  // =====================================================================
 
   @override
   void initState() {
     super.initState();
-    _connectToServer();
+    fetchVideos();
+    _searchController.addListener(_onSearchChanged);
+    _searchFocus.addListener(() {
+      setState(() => isSearching = _searchFocus.hasFocus || _searchController.text.isNotEmpty);
+    });
   }
 
   @override
   void dispose() {
-    _socket?.close();
+    _searchController.removeListener(_onSearchChanged);
+    _searchFocus.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
-  Future<void> _connectToServer() async {
-    for (int attempt = 1; attempt <= 5; attempt++) {
-      try {
-        _socket = await Socket.connect('192.168.4.1', 9999);
-        final msg = {'type': 'PROF'};
-        _socket!.add(utf8.encode(jsonEncode(msg)));
+  void _onSearchChanged() {
+    final query = _searchController.text.trim().toLowerCase();
+    setState(() {
+      isSearching = query.isNotEmpty || _searchFocus.hasFocus;
+      filteredVideos = query.isEmpty
+          ? List.from(videos)
+          : videos.where((v) => v['name'].toString().toLowerCase().contains(query)).toList();
+    });
+  }
 
-        setState(() => _isConnected = true);
+  void fetchVideos() async {
+    setState(() => isLoading = true);
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Connecté au serveur")),
-        );
-        return;
-      } catch (e) {
-        if (attempt == 5) {
-          _showErrorDialog("Aucune connexion au réseau");
-        } else {
-          await Future.delayed(const Duration(seconds: 2));
-        }
+    try {
+      final response = await http
+          .get(Uri.parse("$SERVER_URL/videos"))
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final List<dynamic> data = json.decode(response.body);
+        setState(() {
+          videos = data;
+          filteredVideos = List.from(videos);
+          if (videos.isNotEmpty) {
+            featuredVideo = videos[math.Random().nextInt(videos.length)];
+          }
+        });
+        print("✅ ${videos.length} vidéos chargées avec succès");
+      } else {
+        print("❌ Erreur serveur : ${response.statusCode} - ${response.body}");
       }
+    } catch (e) {
+      print("❌ Impossible de joindre le serveur : $e");
+    } finally {
+      setState(() => isLoading = false);
     }
   }
 
-  void _showErrorDialog(String message) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Erreur"),
-        content: Text(message),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("OK"))],
-      ),
+  void _clearSearch() {
+    _searchController.clear();
+    setState(() => isSearching = false);
+    _searchFocus.unfocus();
+  }
+
+  // Widget image réseau ultra-stable (plus jamais d'erreur 404 dans la console)
+  Widget _buildNetworkImage(String url, {double? height, BoxFit fit = BoxFit.cover}) {
+    return Image.network(
+      url,
+      height: height,
+      fit: fit,
+      errorBuilder: (context, error, stackTrace) {
+        return Container(
+          color: Colors.grey[850],
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: const [
+                Icon(Icons.broken_image, color: Colors.white54, size: 50),
+                SizedBox(height: 8),
+                Text("Image non disponible", style: TextStyle(color: Colors.white54, fontSize: 12)),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("Application Professeur"), centerTitle: true),
-      body: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text("Bienvenue", textAlign: TextAlign.center, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 60),
-            ElevatedButton(
-              onPressed: _isConnected
-                  ? () => Navigator.push(context, MaterialPageRoute(builder: (_) => GenerateExamPage(socket: _socket!)))
-                  : null,
-              style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 18)),
-              child: const Text("Générer un examen"),
+    return WillPopScope(
+      onWillPop: () async {
+        if (isSearching) {
+          _clearSearch();
+          return false;
+        }
+        return true;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text("IPTV"),
+          backgroundColor: Colors.black,
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh, color: Colors.white),
+              onPressed: fetchVideos,
             ),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: _isConnected
-                  ? () => Navigator.push(context, MaterialPageRoute(builder: (_) => SubmissionsPage(socket: _socket!)))
-                  : null,
-              style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 18)),
-              child: const Text("Voir examens reçus"),
-            ),
-            if (!_isConnected)
-              const Padding(padding: EdgeInsets.only(top: 30), child: Text("Connexion en cours...", textAlign: TextAlign.center, style: TextStyle(color: Colors.grey))),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ====================== PAGE GÉNÉRER UN EXAMEN ======================
-class GenerateExamPage extends StatefulWidget {
-  final Socket socket;
-  const GenerateExamPage({super.key, required this.socket});
-  @override
-  State<GenerateExamPage> createState() => _GenerateExamPageState();
-}
-
-class _GenerateExamPageState extends State<GenerateExamPage> {
-  final List<TextEditingController> _questionControllers = [];
-  final TextEditingController _durationController = TextEditingController(text: "60");
-
-  @override
-  void initState() {
-    super.initState();
-    _addQuestionField();
-  }
-
-  void _addQuestionField() {
-    setState(() => _questionControllers.add(TextEditingController()));
-  }
-
-  Future<void> _publishExam() async {
-    final questions = _questionControllers.map((c) => c.text.trim()).where((q) => q.isNotEmpty).toList();
-    if (questions.isEmpty) {
-      _showError("Ajoutez au moins une question");
-      return;
-    }
-    final examText = questions.join(" --- ");
-    try {
-      final duration = int.parse(_durationController.text);
-      final msg = {'action': 'PUBLISH_EXAM', 'exam': examText, 'duration': duration};
-      widget.socket.add(utf8.encode(jsonEncode(msg)));
-
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Examen publié")));
-      Navigator.pop(context);
-    } catch (e) {
-      _showError("Erreur lors de la publication");
-    }
-  }
-
-  void _showError(String message) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Erreur"),
-        content: Text(message),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("OK"))],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("GENERER UN EXAMEN")),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
+        body: Column(
           children: [
-            Expanded(
-              child: ListView.builder(
-                itemCount: _questionControllers.length,
-                itemBuilder: (context, index) => Card(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text("Question ${index + 1}", style: const TextStyle(fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _questionControllers[index],
-                          maxLines: 5,
-                          decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "Entrez la question ici..."),
-                        ),
-                      ],
-                    ),
+            // Barre de recherche
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              color: Colors.black,
+              child: TextField(
+                controller: _searchController,
+                focusNode: _searchFocus,
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+                decoration: InputDecoration(
+                  hintText: "Rechercher...",
+                  hintStyle: const TextStyle(color: Colors.white54),
+                  prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                  suffixIcon: _searchController.text.isNotEmpty
+                      ? IconButton(
+                    icon: const Icon(Icons.clear, color: Colors.white54),
+                    onPressed: _clearSearch,
+                  )
+                      : null,
+                  filled: true,
+                  fillColor: Colors.grey[900],
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(30),
+                    borderSide: BorderSide.none,
                   ),
                 ),
               ),
             ),
-            ElevatedButton(onPressed: _addQuestionField, child: const Text("+ Ajouter une question")),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                const Text("Durée de l'examen (minutes) :"),
-                const SizedBox(width: 10),
-                Expanded(child: TextField(controller: _durationController, keyboardType: TextInputType.number, decoration: const InputDecoration(border: OutlineInputBorder()))),
-              ],
-            ),
-            const SizedBox(height: 30),
-            SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: ElevatedButton(
-                onPressed: _publishExam,
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-                child: const Text("PUBLIER L'EXAMEN", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+
+            // Vidéo mise en avant
+            if (!isSearching && featuredVideo != null)
+              GestureDetector(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => VideoPlayerScreen(
+                      url: featuredVideo!['url'],
+                      name: featuredVideo!['name'],
+                    ),
+                  ),
+                ).then((_) => fetchVideos()),
+                child: Stack(
+                  children: [
+                    _buildNetworkImage(
+                      featuredVideo!['thumbnail'],
+                      height: 280,
+                    ),
+                    Positioned(
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      child: Container(
+                        height: 160,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Colors.transparent, Colors.black],
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 50,
+                      left: 20,
+                      right: 20,
+                      child: Text(
+                        featuredVideo!['name'],
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 32,
+                          fontWeight: FontWeight.w900,
+                          shadows: [Shadow(blurRadius: 12, color: Colors.black)],
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 45,
+                      right: 30,
+                      child: Container(
+                        width: 60,
+                        height: 60,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE50914),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.play_arrow, size: 40, color: Colors.white),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
-// ====================== PAGE EXAMENS REÇUS ======================
-class SubmissionsPage extends StatefulWidget {
-  final Socket socket;
-  const SubmissionsPage({super.key, required this.socket});
-  @override
-  State<SubmissionsPage> createState() => _SubmissionsPageState();
-}
-
-class _SubmissionsPageState extends State<SubmissionsPage> {
-  List<String> _students = [];
-  bool _loading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadSubmissions());
-  }
-
-  Future<void> _loadSubmissions() async {
-    setState(() => _loading = true);
-
-    try {
-      widget.socket.add(utf8.encode(jsonEncode({'action': 'GET_SUBMISSIONS'})));
-      // Correction : Socket n'a pas de méthode .read() → on utilise .first
-      final data = await widget.socket.first.timeout(const Duration(seconds: 8));
-      final resp = jsonDecode(utf8.decode(data));
-
-      setState(() {
-        _students = List<String>.from(resp['names'] ?? []);
-        _loading = false;
-      });
-    } catch (e) {
-      setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Impossible de charger la liste")));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("Examens reçus des étudiants"),
-        actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: _loadSubmissions)],
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _students.isEmpty
-          ? const Center(child: Text("Aucun étudiant n'a encore rendu sa copie"))
-          : ListView.builder(
-        itemCount: _students.length,
-        itemBuilder: (context, index) {
-          final name = _students[index];
-          return Card(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: ListTile(
-              title: Text(name, style: const TextStyle(fontSize: 18)),
-              trailing: const Icon(Icons.arrow_forward_ios),
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => CorrectionPage(socket: widget.socket, studentName: name))),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-// ====================== PAGE CORRECTION ======================
-class CorrectionPage extends StatefulWidget {
-  final Socket socket;
-  final String studentName;
-  const CorrectionPage({super.key, required this.socket, required this.studentName});
-  @override
-  State<CorrectionPage> createState() => _CorrectionPageState();
-}
-
-class _CorrectionPageState extends State<CorrectionPage> {
-  List<String> _questions = [];
-  List<String> _answers = [];
-  bool _loading = true;
-  final TextEditingController _scoreController = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadSubmission());
-  }
-
-  Future<void> _loadSubmission() async {
-    setState(() => _loading = true);
-
-    try {
-      final msg = {'action': 'GET_SUBMISSION', 'name': widget.studentName};
-      widget.socket.add(utf8.encode(jsonEncode(msg)));
-      // Correction : Socket n'a pas de méthode .read() → on utilise .first
-      final data = await widget.socket.first.timeout(const Duration(seconds: 8));
-      final resp = jsonDecode(utf8.decode(data));
-
-      setState(() {
-        _questions = resp['exam'].toString().split('---').map((q) => q.trim()).where((q) => q.isNotEmpty).toList();
-        _answers = (resp['answers'] ?? "").toString().split('---').map((a) => a.trim()).toList();
-        _loading = false;
-      });
-    } catch (e) {
-      setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Impossible de charger la copie")));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text("Correction - ${widget.studentName}")),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _questions.isEmpty
-          ? const Center(child: Text("Aucune donnée reçue pour cet étudiant"))
-          : ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: _questions.length,
-        itemBuilder: (context, i) {
-          final answer = i < _answers.length ? _answers[i] : "Aucune réponse fournie";
-          return Card(
-            margin: const EdgeInsets.only(bottom: 20),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text("Question ${i + 1}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  Text(_questions[i], style: const TextStyle(fontSize: 15)),
-                  const SizedBox(height: 16),
-                  const Text("Réponse de l'étudiant :", style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  Text(answer, style: const TextStyle(fontSize: 15)),
-                  const Divider(height: 30),
-                ],
+            // Liste des vidéos
+            Expanded(
+              child: isLoading && videos.isEmpty
+                  ? const Center(
+                child: CircularProgressIndicator(color: Color(0xFFE50914)),
+              )
+                  : RefreshIndicator(
+                onRefresh: () async => fetchVideos(),
+                child: filteredVideos.isEmpty
+                    ? const Center(
+                  child: Text(
+                    "Aucun résultat trouvé",
+                    style: TextStyle(color: Colors.white54, fontSize: 18),
+                  ),
+                )
+                    : GridView.builder(
+                  padding: const EdgeInsets.all(12),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    childAspectRatio: 0.68,
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                  ),
+                  itemCount: filteredVideos.length,
+                  itemBuilder: (context, index) {
+                    final video = filteredVideos[index];
+                    return GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => VideoPlayerScreen(
+                            url: video['url'],
+                            name: video['name'],
+                          ),
+                        ),
+                      ).then((_) => fetchVideos()),
+                      child: Card(
+                        clipBehavior: Clip.antiAlias,
+                        elevation: 8,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            _buildNetworkImage(video['thumbnail']),
+                            Positioned(
+                              bottom: 0,
+                              left: 0,
+                              right: 0,
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [Colors.transparent, Colors.black87],
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                  ),
+                                ),
+                                child: Text(
+                                  video['name'],
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 15,
+                                  ),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
-            ),
-          );
-        },
-      ),
-      bottomNavigationBar: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(
-          children: [
-            const Text("Note finale /20 :", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(width: 15),
-            Expanded(child: TextField(controller: _scoreController, keyboardType: TextInputType.number, decoration: const InputDecoration(border: OutlineInputBorder()))),
-            const SizedBox(width: 15),
-            ElevatedButton(
-              onPressed: () {
-                final note = _scoreController.text.trim();
-                if (note.isNotEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Note de ${widget.studentName} : $note/20")));
-                  Navigator.pop(context);
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Veuillez entrer une note")));
-                }
-              },
-              child: const Text("Enregistrer la note"),
             ),
           ],
         ),
