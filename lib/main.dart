@@ -33,15 +33,12 @@ class _HomePageState extends State<HomePage> {
   List<dynamic> filteredVideos = [];
   Map<String, dynamic>? featuredVideo;
   bool isLoading = false;
-
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
   bool isSearching = false;
 
   // ================== CONFIGURATION (compatible Windows) ==================
-  // Si tu lances le serveur sur la même machine Windows → utilise "http://127.0.0.1:5000"
-  // Sinon garde ton IP actuelle (172.20.10.10)
-  static const String SERVER_URL = "http://172.20.10.10:5000";
+  static const String SERVER_URL = "http://172.20.10.10:5000"; // change en 127.0.0.1 si serveur sur même PC
   // =====================================================================
 
   @override
@@ -74,12 +71,10 @@ class _HomePageState extends State<HomePage> {
 
   void fetchVideos() async {
     setState(() => isLoading = true);
-
     try {
       final response = await http
           .get(Uri.parse("$SERVER_URL/videos"))
           .timeout(const Duration(seconds: 10));
-
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
         setState(() {
@@ -106,7 +101,6 @@ class _HomePageState extends State<HomePage> {
     _searchFocus.unfocus();
   }
 
-  // Widget image réseau ultra-stable (plus jamais d'erreur 404 dans la console)
   Widget _buildNetworkImage(String url, {double? height, BoxFit fit = BoxFit.cover}) {
     return Image.network(
       url,

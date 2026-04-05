@@ -42,24 +42,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
   void _toggleFullScreen() async {
     if (_isFullScreen) {
-      // === SORTIE DU MODE PAYSAGE ===
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
       await Future.delayed(const Duration(milliseconds: 300));
-      if (mounted) {
-        setState(() => _isFullScreen = false);
-      }
+      if (mounted) setState(() => _isFullScreen = false);
     } else {
-      // === ENTRÉE EN MODE PAYSAGE ===
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       await SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
       ]);
       await Future.delayed(const Duration(milliseconds: 300));
-      if (mounted) {
-        setState(() => _isFullScreen = true);
-      }
+      if (mounted) setState(() => _isFullScreen = true);
     }
   }
 
@@ -126,7 +120,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
               ? Stack(
             alignment: Alignment.center,
             children: [
-              // === 1. VIDÉO (fond) ===
+              // Vidéo
               _isFullScreen
                   ? SizedBox.expand(
                 child: ClipRect(
@@ -145,7 +139,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                 child: VideoPlayer(controller),
               ),
 
-              // === 2. Double tap seek (gauche / droite) ===
+              // Double tap seek
               Row(
                 children: [
                   Expanded(
@@ -163,7 +157,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                 ],
               ),
 
-              // === 3. Tap partout pour afficher/masquer les contrôles ===
+              // Tap pour controls
               Positioned.fill(
                 child: GestureDetector(
                   onTap: _toggleControls,
@@ -171,29 +165,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                 ),
               ),
 
-              // === 4. WATERMARK "Chronostv" → TOUJOURS VISIBLE (portrait + paysage) ===
+              // Watermark Chronostv
               Positioned(
                 top: 20,
                 right: 20,
                 child: Text(
                   "Chronostv",
                   style: TextStyle(
-                    color: const Color(0xFF00FFCC), // très belle couleur cyan néon
+                    color: const Color(0xFF00FFCC),
                     fontSize: 22,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 1.5,
                     shadows: [
-                      Shadow(
-                        blurRadius: 12,
-                        color: Colors.black.withOpacity(0.7),
-                        offset: const Offset(2, 2),
-                      ),
+                      Shadow(blurRadius: 12, color: Colors.black.withOpacity(0.7), offset: const Offset(2, 2)),
                     ],
                   ),
                 ),
               ),
 
-              // === 5. Nom de la vidéo (plein écran) → N'AFFICHE QUE SI LES CONTRÔLES SONT VISIBLES ===
+              // Nom de la vidéo en plein écran
               if (_isFullScreen && _showControls)
                 Positioned(
                   top: 50,
@@ -211,7 +201,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                   ),
                 ),
 
-              // === 6. CONTRÔLES (barre de progression + boutons) ===
+              // Contrôles
               if (_showControls)
                 Positioned(
                   bottom: 0,
@@ -241,30 +231,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                         SizedBox(height: 8),
                         Row(
                           children: [
-                            Text(
-                              _formatDuration(controller.value.position),
-                              style: TextStyle(color: Colors.white),
-                            ),
+                            Text(_formatDuration(controller.value.position), style: TextStyle(color: Colors.white)),
                             Spacer(),
-                            Text(
-                              _formatDuration(controller.value.duration),
-                              style: TextStyle(color: Colors.white),
-                            ),
+                            Text(_formatDuration(controller.value.duration), style: TextStyle(color: Colors.white)),
                             SizedBox(width: 30),
+                            IconButton(icon: Icon(Icons.replay_10, color: Colors.white, size: 32), onPressed: _seekBackward),
+                            IconButton(icon: Icon(Icons.forward_10, color: Colors.white, size: 32), onPressed: _seekForward),
                             IconButton(
-                              icon: Icon(Icons.replay_10, color: Colors.white, size: 32),
-                              onPressed: _seekBackward,
-                            ),
-                            IconButton(
-                              icon: Icon(Icons.forward_10, color: Colors.white, size: 32),
-                              onPressed: _seekForward,
-                            ),
-                            IconButton(
-                              icon: Icon(
-                                _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                                color: Colors.white,
-                                size: 32,
-                              ),
+                              icon: Icon(_isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.white, size: 32),
                               onPressed: _toggleFullScreen,
                             ),
                           ],
@@ -274,15 +248,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                   ),
                 ),
 
-              // === 7. Bouton play central (quand pause) ===
+              // Bouton play central
               if (!controller.value.isPlaying)
                 GestureDetector(
                   onTap: () => controller.play(),
                   child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.black54,
-                      shape: BoxShape.circle,
-                    ),
+                    decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
                     padding: EdgeInsets.all(24),
                     child: Icon(Icons.play_arrow, color: Colors.white, size: 80),
                   ),
