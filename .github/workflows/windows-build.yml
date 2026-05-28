@@ -30,29 +30,20 @@ jobs:
       - name: Rename exe
         shell: powershell
         run: |
-          Rename-Item `
-            "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "ChronosTv.exe"
+          Rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "ChronosTv.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup -y
 
-      - name: Copy babu.ico for Inno Setup
+      - name: Copy icon
         shell: powershell
-        run: Copy-Item -Path "assets\icons\babu.ico" -Destination "."
+        run: Copy-Item "assets\icons\babu.ico" -Destination "."
 
       - name: Compile installer
         shell: powershell
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          $iss  = "installer.iss"
-
-          if (!(Test-Path $iss)) {
-            Write-Error "installer.iss introuvable"
-            exit 1
-          }
-
-          & "$iscc" "$iss"
+          & "$iscc" "installer.iss"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

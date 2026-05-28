@@ -12,10 +12,10 @@ SetupIconFile=babu.ico
 WizardStyle=modern
 
 [Files]
-; Copie tout le contenu du dossier Release
+; IMPORTANT: copie TOUT le build Flutter Windows
 Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
-; Icône personnalisée
+; Icône
 Source: "babu.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
