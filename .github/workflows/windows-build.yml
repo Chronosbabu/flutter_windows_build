@@ -1,4 +1,4 @@
-name: Flutter Windows Build + Setup
+name: Windows Build Only
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Flutter
@@ -18,13 +18,13 @@ jobs:
         with:
           flutter-version: '3.38.4'
 
-      - name: Enable Windows desktop
+      - name: Enable Windows
         run: flutter config --enable-windows-desktop
 
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Build Windows release
+      - name: Build Windows
         run: flutter build windows --release
 
       - name: Rename exe
@@ -34,10 +34,6 @@ jobs:
 
       - name: Install Inno Setup
         run: choco install innosetup -y
-
-      - name: Copy icon
-        shell: powershell
-        run: Copy-Item "assets\icons\babu.ico" -Destination "."
 
       - name: Compile installer
         shell: powershell
