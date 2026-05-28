@@ -8,15 +8,12 @@ OutputBaseFilename=ChronosTv
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
-SetupIconFile=babu.ico
+SetupIconFile=assets\icons\babu.ico
 WizardStyle=modern
 
 [Files]
-; IMPORTANT: copie TOUT le build Flutter Windows
 Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
-
-; Icône
-Source: "babu.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: ignoreversion
 
 [Icons]
 Name: "{commondesktop}\ChronosTv"; Filename: "{app}\ChronosTv.exe"; IconFilename: "{app}\babu.ico"
