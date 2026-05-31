@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
@@ -119,9 +120,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               controller: feeController,
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
-                labelText: selectedSectionForFee != null
-                    ? "Frais mensuel pour ${selectedSectionForFee}"
-                    : "Frais mensuel",
+                labelText: selectedSectionForFee != null ? "Frais mensuel pour ${selectedSectionForFee}" : "Frais mensuel",
               ),
             ),
             ElevatedButton(
@@ -293,7 +292,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Nouvelle Section"),
-        content: TextField(controller: controller, decoration: const InputDecoration(labelText: "Nom de la section (ex: Électricité)")),
+        content: TextField(controller: controller, decoration: const InputDecoration(labelText: "Nom de la section")),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(

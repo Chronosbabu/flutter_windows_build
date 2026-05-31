@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
@@ -13,8 +12,7 @@ class RecoveryScreen extends StatefulWidget {
 }
 
 class _RecoveryScreenState extends State<RecoveryScreen> {
-  bool isRecoverMode = true; // true = Récupérer | false = Nouvelle école
-
+  bool isRecoverMode = true;
   final codeController = TextEditingController();
   final passwordController = TextEditingController();
   bool isLoading = false;
@@ -24,7 +22,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     final appState = Provider.of<AppState>(context, listen: false);
     final fraisScolaires = FraisScolaires();
 
-    if (codeController.text.trim().isEmpty || passwordController.text.trim().isEmpty) {
+    String code = codeController.text.trim();
+    String password = passwordController.text.trim();
+
+    if (code.isEmpty || password.isEmpty) {
       setState(() => errorMessage = "Veuillez remplir les deux champs");
       return;
     }
@@ -34,34 +35,35 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       errorMessage = null;
     });
 
-    String code = codeController.text.trim();
-    String password = passwordController.text.trim();
+    print("🔄 Début de ${isRecoverMode ? 'RÉCUPÉRATION' : 'CRÉATION'}");
+    print("Code: $code | Mot de passe: ${password.isNotEmpty ? '***' : 'vide'}");
 
     if (isRecoverMode) {
-      // === MODE RÉCUPÉRATION ===
-      await fraisScolaires.loadData();
       bool success = await fraisScolaires.restoreFromServer(code, password);
 
       if (success) {
         await appState.setSchoolCode(code);
         await appState.setBackupPassword(password);
+        print("✅ Récupération réussie !");
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ Données récupérées avec succès !"), backgroundColor: Colors.green));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("✅ Données récupérées avec succès !"), backgroundColor: Colors.green),
+          );
           Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const SchoolHomeScreen()));
         }
       } else {
-        setState(() => errorMessage = "Échec de récupération.\nVérifiez votre code et mot de passe.");
+        setState(() => errorMessage = "Échec de récupération.\nVérifiez le code et le mot de passe.\n\nEssayez de refaire une sauvegarde depuis le téléphone.");
+        print("❌ Échec de restoreFromServer");
       }
     } else {
-      // === MODE NOUVELLE ÉCOLE ===
+      // Nouvelle école
       await appState.setSchoolCode(code);
       await appState.setBackupPassword(password);
-
-      // Créer une nouvelle configuration
-      await fraisScolaires.loadData(); // Charge les données par défaut
-
+      await fraisScolaires.loadData();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ Nouvelle école créée avec succès !"), backgroundColor: Colors.green));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("✅ Nouvelle école créée"), backgroundColor: Colors.green),
+        );
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const SchoolHomeScreen()));
       }
     }
@@ -85,23 +87,12 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 children: [
                   const Icon(Icons.school, size: 90, color: Colors.white),
                   const SizedBox(height: 20),
-
                   Text(
                     isRecoverMode ? "Récupérer mes Données" : "Nouvelle École",
                     style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
-                  const SizedBox(height: 10),
-
-                  Text(
-                    isRecoverMode
-                        ? "Entrez vos identifiants pour restaurer toutes vos données"
-                        : "Créez votre nouvelle école",
-                    style: const TextStyle(fontSize: 16, color: Colors.white70),
-                    textAlign: TextAlign.center,
-                  ),
                   const SizedBox(height: 40),
 
-                  // Toggle entre les deux modes
                   SegmentedButton<bool>(
                     segments: const [
                       ButtonSegment(value: true, label: Text("Récupérer")),
@@ -121,10 +112,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     style: const TextStyle(color: Colors.white),
                     decoration: const InputDecoration(
                       labelText: "Code de l'École",
-                      labelStyle: TextStyle(color: Colors.white70),
                       hintText: "Ex: MAPENDO2026",
                       border: OutlineInputBorder(),
-                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -135,15 +124,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     style: const TextStyle(color: Colors.white),
                     decoration: const InputDecoration(
                       labelText: "Mot de Passe de Sauvegarde",
-                      labelStyle: TextStyle(color: Colors.white70),
                       border: OutlineInputBorder(),
-                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
                     ),
                   ),
 
                   if (errorMessage != null) ...[
                     const SizedBox(height: 20),
-                    Text(errorMessage!, style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+                    Text(errorMessage!, style: const TextStyle(color: Colors.redAccent), textAlign: TextAlign.center),
                   ],
 
                   const SizedBox(height: 40),
@@ -153,17 +140,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     height: 55,
                     child: ElevatedButton(
                       onPressed: isLoading ? null : _handleAction,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.indigo,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
                       child: isLoading
-                          ? const CircularProgressIndicator(color: Colors.indigo)
-                          : Text(
-                        isRecoverMode ? "RÉCUPÉRER MES DONNÉES" : "CRÉER LA NOUVELLE ÉCOLE",
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
+                          ? const CircularProgressIndicator()
+                          : Text(isRecoverMode ? "RÉCUPÉRER MES DONNÉES" : "CRÉER LA NOUVELLE ÉCOLE"),
                     ),
                   ),
                 ],

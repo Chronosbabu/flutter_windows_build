@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
+// Imports complets et explicites
 import '../frais_scolaires.dart';
 import '../app_state.dart';
+
 import 'enregistrer_eleve_screen.dart';
 import 'paiement_eleve_screen.dart';
 import 'repartition_screen.dart';
-import 'settings_screen.dart';
+import 'settings_screen.dart';   // ← Import obligatoire
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -40,7 +43,11 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => Navigator.push(
-                context, MaterialPageRoute(builder: (_) => SettingsScreen(fraisScolaires: fraisScolaires))),
+              context,
+              MaterialPageRoute(
+                builder: (_) => SettingsScreen(fraisScolaires: fraisScolaires),
+              ),
+            ),
           ),
         ],
       ),
@@ -113,37 +120,19 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Générer Rapport PDF"),
-        content: const Text("Le rapport sera généré avec les montants par section et la répartition."),
+        content: const Text("Le rapport sera généré avec les montants par section."),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () async {
-              Navigator.pop(ctx); // Ferme la boîte de dialogue
+              Navigator.pop(ctx);
+              final filename = "Rapport_${DateTime.now().toString().split(' ')[0]}";
+              await fraisScolaires.generatePdf(filename);
 
-              try {
-                final filename = "Rapport_${DateTime.now().toString().split(' ')[0]}";
-                await fraisScolaires.generatePdf(filename);
-
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text("✅ PDF généré et ouvert avec succès !"),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text("❌ Erreur lors de la génération du PDF: $e"),
-                      backgroundColor: Colors.red,
-                    ),
-                  );
-                }
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("✅ PDF généré")),
+                );
               }
             },
             child: const Text("Générer le PDF"),

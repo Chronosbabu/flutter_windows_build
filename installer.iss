@@ -1,10 +1,10 @@
 [Setup]
-AppName=ChronosTv
+AppName=PayScol
 AppVersion=1.0
-DefaultDirName={commonpf}\ChronosTv
-DefaultGroupName=ChronosTv
+DefaultDirName={commonpf}\PayScol
+DefaultGroupName=PayScol
 OutputDir=.
-OutputBaseFilename=ChronosTv
+OutputBaseFilename=PayScol
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
@@ -16,8 +16,8 @@ Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesu
 Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: ignoreversion
 
 [Icons]
-Name: "{commondesktop}\ChronosTv"; Filename: "{app}\ChronosTv.exe"; IconFilename: "{app}\babu.ico"
-Name: "{group}\ChronosTv"; Filename: "{app}\ChronosTv.exe"; IconFilename: "{app}\babu.ico"
+Name: "{commondesktop}\PayScol"; Filename: "{app}\PayScol.exe"; IconFilename: "{app}\babu.ico"
+Name: "{group}\PayScol"; Filename: "{app}\PayScol.exe"; IconFilename: "{app}\babu.ico"
 
 [Run]
-Filename: "{app}\ChronosTv.exe"; Description: "Lancer ChronosTv"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\PayScol.exe"; Description: "Lancer PayScol"; Flags: nowait postinstall skipifsilent
