@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-// Imports complets et explicites
 import '../frais_scolaires.dart';
 import '../app_state.dart';
 
 import 'enregistrer_eleve_screen.dart';
 import 'paiement_eleve_screen.dart';
 import 'repartition_screen.dart';
-import 'settings_screen.dart';   // ← Import obligatoire
+import 'settings_screen.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -44,9 +43,7 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
             icon: const Icon(Icons.settings),
             onPressed: () => Navigator.push(
               context,
-              MaterialPageRoute(
-                builder: (_) => SettingsScreen(fraisScolaires: fraisScolaires),
-              ),
+              MaterialPageRoute(builder: (_) => SettingsScreen(fraisScolaires: fraisScolaires)),
             ),
           ),
         ],
@@ -115,30 +112,65 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     );
   }
 
+  // ==================== NOUVELLE BOÎTE DE DIALOGUE POUR CHOISIR LE TYPE DE RAPPORT ====================
   void _showReportDialog(BuildContext context) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Générer Rapport PDF"),
-        content: const Text("Le rapport sera généré avec les montants par section."),
+        title: const Text("Type de Rapport PDF"),
+        content: const Text("Choisissez le type de rapport à générer :"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Annuler"),
+          ),
           ElevatedButton(
             onPressed: () async {
               Navigator.pop(ctx);
-              final filename = "Rapport_${DateTime.now().toString().split(' ')[0]}";
-              await fraisScolaires.generatePdf(filename);
-
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("✅ PDF généré")),
-                );
-              }
+              await _generateSpecificReport("daily");
             },
-            child: const Text("Générer le PDF"),
+            child: const Text("Journalier"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _generateSpecificReport("monthly");
+            },
+            child: const Text("Mensuel"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _generateSpecificReport("annual");
+            },
+            child: const Text("Annuel"),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _generateSpecificReport(String type) async {
+    String reportName = "";
+    if (type == "daily") reportName = "Journalier";
+    else if (type == "monthly") reportName = "Mensuel";
+    else reportName = "Annuel";
+
+    final filename = "Rapport_${reportName}_${DateTime.now().toString().split(' ')[0]}";
+
+    try {
+      await fraisScolaires.generatePdf(filename, type);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("✅ Rapport $reportName généré avec succès")),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("❌ Erreur lors de la génération : $e")),
+        );
+      }
+    }
   }
 }

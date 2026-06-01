@@ -4,8 +4,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AppState extends ChangeNotifier {
   bool isDarkMode = false;
   String schoolName = "MAPENDO TCC";
-  String? schoolCode;
-  String? backupPassword; // Nouveau : mot de passe de sauvegarde
+  String? schoolCode;        // Sera l'ID unique de l'école (fourni par l'admin)
+  String? backupPassword;    // Mot de passe de sauvegarde
 
   AppState() {
     _loadPreferences();
@@ -13,10 +13,12 @@ class AppState extends ChangeNotifier {
 
   Future<void> _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
+
     isDarkMode = prefs.getBool('isDarkMode') ?? false;
     schoolName = prefs.getString('schoolName') ?? "MAPENDO TCC";
     schoolCode = prefs.getString('schoolCode');
     backupPassword = prefs.getString('backupPassword');
+
     notifyListeners();
   }
 

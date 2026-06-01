@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
@@ -158,6 +157,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ElevatedButton(
               onPressed: () => _editExceptionForSection(),
               child: const Text("Ajouter / Modifier Exception"),
+            ),
+
+            const Divider(),
+
+            // ==================== GESTION DES ADMINISTRATIONS ====================
+            const Text("Administrations & Répartition (%)", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            ...widget.fraisScolaires.config.administrations.map((admin) => ListTile(
+              title: Text(admin.nom),
+              subtitle: Text("${admin.pourcentage}%"),
+              trailing: IconButton(
+                icon: const Icon(Icons.edit),
+                onPressed: () => _editAdministration(admin),
+              ),
+            )).toList(),
+
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add),
+              label: const Text("Ajouter Administration"),
+              onPressed: _addAdministration,
             ),
 
             const Divider(),
@@ -361,6 +379,78 @@ class _SettingsScreenState extends State<SettingsScreen> {
               widget.fraisScolaires.saveData();
               if (mounted) setState(() {});
               Navigator.pop(ctx);
+            },
+            child: const Text("Enregistrer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==================== GESTION DES ADMINISTRATIONS ====================
+  void _addAdministration() async {
+    if (!await _verifyBackupPassword()) return;
+    final nomController = TextEditingController();
+    final percentController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Nouvelle Administration"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
+            TextField(controller: percentController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Pourcentage (%)")),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () {
+              final percent = double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty && percent != null) {
+                widget.fraisScolaires.config.administrations.add(
+                  Administration(nom: nomController.text, pourcentage: percent),
+                );
+                widget.fraisScolaires.saveData();
+                if (mounted) setState(() {});
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text("Ajouter"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _editAdministration(Administration admin) async {
+    if (!await _verifyBackupPassword()) return;
+    final nomController = TextEditingController(text: admin.nom);
+    final percentController = TextEditingController(text: admin.pourcentage.toString());
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Modifier Administration"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
+            TextField(controller: percentController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Pourcentage (%)")),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () {
+              final percent = double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty && percent != null) {
+                admin.nom = nomController.text;
+                admin.pourcentage = percent;
+                widget.fraisScolaires.saveData();
+                if (mounted) setState(() {});
+                Navigator.pop(ctx);
+              }
             },
             child: const Text("Enregistrer"),
           ),

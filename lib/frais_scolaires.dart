@@ -34,6 +34,7 @@ class FraisScolaires {
     return config.feesBySection[section] ?? 35000;
   }
 
+  // ==================== MÉTHODES DE CALCUL ====================
   Map<String, double> getTotalByClass() {
     Map<String, double> totals = {};
     for (var eleve in currentData.eleves) {
@@ -56,6 +57,94 @@ class FraisScolaires {
     return months.fold(0.0, (sum, m) => sum + currentData.eleves.fold(0.0, (s, e) => s + (e.paid[m] ?? 0)));
   }
 
+  // ==================== FONCTIONS POUR RAPPORTS PDF ====================
+  List<Eleve> getPaidStudentsToday() {
+    String today = DateTime.now().toString().split(' ')[0];
+    return currentData.eleves.where((eleve) =>
+        eleve.transactions.any((t) => t['date'] == today)).toList();
+  }
+
+  List<Eleve> getPaidStudentsThisMonth() {
+    String currentMonthName = months[DateTime.now().month - 1];
+    return currentData.eleves.where((eleve) =>
+    eleve.paid.containsKey(currentMonthName) && eleve.paid[currentMonthName]! > 0).toList();
+  }
+
+  // ==================== GÉNÉRATION PDF (Mobile + Desktop) ====================
+  Future<void> generatePdf(String filename, String reportType) async {
+    final pdf = pw.Document();
+    List<Eleve> students = [];
+    String title = "";
+    double total = 0.0;
+
+    if (reportType == "daily") {
+      students = getPaidStudentsToday();
+      title = "RAPPORT JOURNALIER";
+    } else if (reportType == "monthly") {
+      students = getPaidStudentsThisMonth();
+      title = "RAPPORT MENSUEL";
+    } else {
+      students = currentData.eleves;
+      title = "RAPPORT ANNUEL";
+    }
+
+    total = students.fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(40),
+        build: (pw.Context context) => [
+          pw.Text(title, style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold)),
+          pw.Text('${config.schoolName} - $currentYear'),
+          pw.Text('Date: ${DateTime.now().toString().split(" ")[0]}'),
+          pw.SizedBox(height: 20),
+          pw.Text("Total Collecté : ${total.toStringAsFixed(0)} FC",
+              style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 20),
+
+          pw.Text("LISTE DES ÉLÈVES AYANT PAYÉ", style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 10),
+          pw.Table.fromTextArray(
+            headers: ['Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)'],
+            data: students.map((e) => [
+              "${e.nom} ${e.postNom} ${e.prenom}",
+              e.section,
+              e.classe,
+              getStudentTotalPaid(e).toStringAsFixed(0)
+            ]).toList(),
+          ),
+        ],
+      ),
+    );
+
+    try {
+      final bytes = await pdf.save();
+
+      final directory = await getDownloadsDirectory();
+      if (directory != null) {
+        final fileName = '${filename}_${reportType}_$currentYear.pdf';
+        final file = File('${directory.path}/$fileName');
+        await file.writeAsBytes(bytes);
+        await OpenFile.open(file.path);
+        print("✅ PDF sauvegardé dans Téléchargements : ${file.path}");
+      } else {
+        final saveLocation = await getSaveLocation(
+          suggestedName: '${filename}_${reportType}_$currentYear.pdf',
+          acceptedTypeGroups: [XTypeGroup(label: 'PDF', extensions: ['pdf'])],
+        );
+        if (saveLocation != null) {
+          final file = File(saveLocation.path);
+          await file.writeAsBytes(bytes);
+          await OpenFile.open(file.path);
+        }
+      }
+    } catch (e) {
+      print("❌ Erreur lors de la génération PDF: $e");
+    }
+  }
+
+  // ==================== GESTION DES DONNÉES ====================
   Future<void> loadData() async {
     final dir = await getApplicationDocumentsDirectory();
     _dataFilePath = '${dir.path}/school_fees_data.json';
@@ -161,67 +250,6 @@ class FraisScolaires {
 
   double getStudentPending(Eleve eleve) {
     return months.fold(0.0, (sum, m) => sum + (getRequiredForMonth(m, eleve.section) - (eleve.paid[m] ?? 0)));
-  }
-
-  // ==================== PDF SIMPLE ====================
-  Future<void> generatePdf(String filename) async {
-    final pdf = pw.Document();
-    final totalGeneral = getYearTotalCollected();
-    final totalsBySection = getTotalBySection();
-
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(40),
-        build: (pw.Context context) => [
-          pw.Text('RAPPORT FINANCIER', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 10),
-          pw.Text('${config.schoolName} - Année $currentYear'),
-          pw.Text('Date: ${DateTime.now().toString().split(" ")[0]}'),
-          pw.SizedBox(height: 30),
-
-          pw.Text('TOTAL COLLECTÉ: ${totalGeneral.toStringAsFixed(0)} FC',
-              style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 20),
-
-          pw.Text('MONTANT PAR SECTION:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 10),
-          pw.Table.fromTextArray(
-            headers: ['Section', 'Montant (FC)'],
-            data: totalsBySection.entries.map((e) => [e.key, e.value.toStringAsFixed(0)]).toList(),
-          ),
-          pw.SizedBox(height: 30),
-
-          pw.Text('RÉPARTITION ADMINISTRATIONS:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 10),
-          pw.Table.fromTextArray(
-            headers: ['Administration', 'Pourcentage', 'Montant (FC)'],
-            data: config.administrations.map((admin) {
-              double montant = totalGeneral * (admin.pourcentage / 100);
-              return [admin.nom, "${admin.pourcentage}%", montant.toStringAsFixed(0)];
-            }).toList(),
-          ),
-        ],
-      ),
-    );
-
-    try {
-      final bytes = await pdf.save();
-      final saveLocation = await getSaveLocation(
-        suggestedName: '${filename}_$currentYear.pdf',
-        acceptedTypeGroups: [XTypeGroup(label: 'PDF', extensions: ['pdf'])],
-      );
-
-      if (saveLocation == null) return;
-
-      final file = File(saveLocation.path);
-      await file.writeAsBytes(bytes);
-      await OpenFile.open(file.path);
-
-      print("PDF généré avec succès");
-    } catch (e) {
-      print("Erreur PDF: $e");
-    }
   }
 
   // ==================== BACKUP & RESTORE ====================

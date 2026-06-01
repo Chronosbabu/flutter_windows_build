@@ -3,7 +3,7 @@ class Eleve {
   String postNom;
   String prenom;
   String classe;
-  String section;                    // NOUVEAU : Section ajoutée
+  String section;
   Map<String, double> paid = {};
   List<Map<String, dynamic>> transactions = [];
 
@@ -12,7 +12,7 @@ class Eleve {
     required this.postNom,
     required this.prenom,
     required this.classe,
-    required this.section,           // Obligatoire maintenant
+    required this.section,
   });
 
   Map<String, dynamic> toJson() => {
@@ -20,7 +20,7 @@ class Eleve {
     'postNom': postNom,
     'prenom': prenom,
     'classe': classe,
-    'section': section,          // Sauvegardé
+    'section': section,
     'paid': paid,
     'transactions': transactions,
   };
@@ -31,7 +31,7 @@ class Eleve {
       postNom: json['postNom'] ?? '',
       prenom: json['prenom'] ?? '',
       classe: json['classe'] ?? '',
-      section: json['section'] ?? 'Secondaire', // Valeur par défaut si ancien fichier
+      section: json['section'] ?? 'Secondaire',
     )
       ..paid = Map<String, double>.from(json['paid'] ?? {})
       ..transactions = (json['transactions'] as List? ?? [])
@@ -61,9 +61,9 @@ class Administration {
 
 class SchoolConfig {
   String schoolName;
-  Map<String, double> feesBySection;                    // Frais mensuel par section
-  Map<String, Map<String, double>> monthlyExceptionsBySection; // Exceptions par section
-  List<String> sections;                                // Liste des sections
+  Map<String, double> feesBySection;
+  Map<String, Map<String, double>> monthlyExceptionsBySection;
+  List<String> sections;
   List<Administration> administrations = [];
 
   SchoolConfig({
