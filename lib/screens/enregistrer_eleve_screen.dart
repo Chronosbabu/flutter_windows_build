@@ -20,7 +20,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
   final List<String> availableClasses = ['7ème', '8ème', '1ère', '2ème', '3ème', '4ème'];
 
-  // Focus pour navigation rapide au clavier
+  // Focus pour navigation rapide
   final FocusNode nomFocus = FocusNode();
   final FocusNode postNomFocus = FocusNode();
   final FocusNode prenomFocus = FocusNode();
@@ -59,7 +59,15 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       return;
     }
 
+    // Génération automatique de l'ID unique
+    String nomComplet = nomController.text.trim();
+    String generatedId = widget.fraisScolaires.generateUniqueStudentId(
+      nomComplet,
+      widget.fraisScolaires.config.schoolName,
+    );
+
     final nouvelEleve = Eleve(
+      id: generatedId,
       nom: nomController.text.trim(),
       postNom: postNomController.text.trim(),
       prenom: prenomController.text.trim(),
@@ -72,12 +80,12 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text("✅ ${nouvelEleve.nom} ${nouvelEleve.postNom} ajouté en ${nouvelEleve.section}"),
-        duration: const Duration(seconds: 2),
+        content: Text("✅ ${nouvelEleve.nom} ${nouvelEleve.postNom} ajouté\nID: ${nouvelEleve.id}"),
+        duration: const Duration(seconds: 3),
       ),
     );
 
-    _clearFields(); // Prépare pour l'élève suivant
+    _clearFields(); // Prépare pour l’élève suivant
   }
 
   @override
@@ -158,13 +166,12 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             ),
             const SizedBox(height: 20),
 
-            // === NOUVEAU : CHOIX DE LA SECTION ===
             DropdownButtonFormField<String>(
               value: selectedSection,
               decoration: const InputDecoration(
                 labelText: "Section",
                 border: OutlineInputBorder(),
-                helperText: "Ex: Maternelle, Primaire, Secondaire, Électricité...",
+                helperText: "Ex: Maternelle, Primaire, Secondaire...",
               ),
               items: widget.fraisScolaires.config.sections.map((section) {
                 return DropdownMenuItem(value: section, child: Text(section));
@@ -173,7 +180,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                 setState(() => selectedSection = value);
               },
             ),
-
             const SizedBox(height: 40),
 
             SizedBox(
@@ -189,7 +195,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                 onPressed: _ajouterEleve,
               ),
             ),
-
             const SizedBox(height: 15),
 
             SizedBox(
@@ -201,12 +206,12 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                 onPressed: () => Navigator.pop(context),
               ),
             ),
-
             const SizedBox(height: 30),
+
             const Center(
               child: Text(
                 "Les champs se vident automatiquement après chaque ajout\n"
-                    "Vous pouvez ajouter plusieurs élèves rapidement",
+                    "L'ID unique est généré automatiquement pour chaque élève",
                 style: TextStyle(color: Colors.grey, fontSize: 13),
                 textAlign: TextAlign.center,
               ),

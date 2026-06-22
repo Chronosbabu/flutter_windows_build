@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
+import 'recovery_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -75,18 +76,157 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return isCorrect ?? false;
   }
 
+  // ==================== ENREGISTRER NOM DE L'ÉCOLE ====================
+  void _saveSchoolName() async {
+    if (nameController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Le nom ne peut pas être vide")));
+      return;
+    }
+
+    if (!await _verifyBackupPassword()) return;
+
+    // Mise à jour dans FraisScolaires
+    widget.fraisScolaires.config.schoolName = nameController.text.trim();
+    await widget.fraisScolaires.saveData();
+
+    // Mise à jour dans AppState (IMPORTANT pour que toutes les pages voient le changement)
+    final appState = Provider.of<AppState>(context, listen: false);
+    await appState.updateSchoolName(nameController.text.trim());
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("✅ Nom de l'école enregistré avec succès")),
+      );
+    }
+  }
+
+  // ==================== CHANGEMENT SÉCURISÉ DU MOT DE PASSE ====================
+  void _changeBackupPassword(BuildContext context, AppState appState) async {
+    if (appState.backupPassword == null) {
+      _setBackupPassword(context, appState);
+      return;
+    }
+
+    final oldPassController = TextEditingController();
+    bool? oldCorrect = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Changer le mot de passe"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("Entrez votre ancien mot de passe"),
+            const SizedBox(height: 10),
+            TextField(
+              controller: oldPassController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: "Ancien mot de passe"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () {
+              if (oldPassController.text.trim() == appState.backupPassword) {
+                Navigator.pop(ctx, true);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ancien mot de passe incorrect")));
+              }
+            },
+            child: const Text("Continuer"),
+          ),
+        ],
+      ),
+    );
+
+    if (oldCorrect != true) return;
+
+    final newPassController = TextEditingController();
+    final confirmPassController = TextEditingController();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Nouveau mot de passe"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: newPassController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: "Nouveau mot de passe (min 6 caractères)"),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: confirmPassController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: "Confirmer le nouveau mot de passe"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () {
+              String newPass = newPassController.text.trim();
+              String confirmPass = confirmPassController.text.trim();
+
+              if (newPass.length < 6) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Le mot de passe doit contenir au moins 6 caractères")));
+                return;
+              }
+              if (newPass != confirmPass) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Les deux mots de passe ne correspondent pas")));
+                return;
+              }
+
+              appState.setBackupPassword(newPass);
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("✅ Mot de passe changé avec succès")),
+              );
+            },
+            child: const Text("Enregistrer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==================== DÉCONNEXION ====================
+  void _deconnexion() {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const RecoveryScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
-
     return Scaffold(
       appBar: AppBar(title: const Text("Paramètres")),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            // Nom de l'établissement
-            TextField(controller: nameController, decoration: const InputDecoration(labelText: "Nom de l'établissement")),
+            // Nom de l'établissement avec bouton Enregistrer
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(labelText: "Nom de l'établissement"),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _saveSchoolName,
+                  child: const Text("Enregistrer"),
+                ),
+              ],
+            ),
             const SizedBox(height: 20),
 
             const Text("Gestion des Sections", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -105,8 +245,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onDeleted: () => _removeSection(section),
               )).toList(),
             ),
-
             const Divider(),
+
             const Text("Frais Mensuel par Section", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             DropdownButton<String>(
               value: selectedSectionForFee,
@@ -136,8 +276,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
               child: const Text("Enregistrer Frais pour cette Section"),
             ),
-
             const Divider(),
+
             const Text("Exceptions par Mois et par Section", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             DropdownButton<String>(
               value: selectedSectionForException,
@@ -158,10 +298,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: () => _editExceptionForSection(),
               child: const Text("Ajouter / Modifier Exception"),
             ),
-
             const Divider(),
 
-            // ==================== GESTION DES ADMINISTRATIONS ====================
             const Text("Administrations & Répartition (%)", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ...widget.fraisScolaires.config.administrations.map((admin) => ListTile(
               title: Text(admin.nom),
@@ -171,16 +309,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onPressed: () => _editAdministration(admin),
               ),
             )).toList(),
-
             ElevatedButton.icon(
               icon: const Icon(Icons.add),
               label: const Text("Ajouter Administration"),
               onPressed: _addAdministration,
             ),
-
             const Divider(),
 
-            // Année Scolaire
             const Text("Année Scolaire", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             DropdownButton<String>(
               value: selectedYear,
@@ -222,10 +357,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 }
               },
             ),
-
             const Divider(),
 
-            // Synchronisation Serveur
             const Text("Synchronisation Serveur", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             if (appState.schoolCode == null)
               ElevatedButton.icon(
@@ -239,7 +372,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 subtitle: Text(appState.schoolCode!),
                 trailing: IconButton(icon: const Icon(Icons.edit), onPressed: () => _setSchoolCode(context, appState)),
               ),
-
             const SizedBox(height: 10),
 
             if (appState.backupPassword == null)
@@ -252,9 +384,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ListTile(
                 title: const Text("Mot de Passe Sauvegarde"),
                 subtitle: const Text("••••••••"),
-                trailing: IconButton(icon: const Icon(Icons.edit), onPressed: () => _setBackupPassword(context, appState)),
+                trailing: IconButton(
+                  icon: const Icon(Icons.edit),
+                  onPressed: () => _changeBackupPassword(context, appState),
+                ),
               ),
-
             const SizedBox(height: 15),
 
             ElevatedButton.icon(
@@ -269,7 +403,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success ? "✅ Sauvegarde réussie" : "❌ Erreur de sauvegarde")));
               },
             ),
-
             const SizedBox(height: 10),
 
             ElevatedButton.icon(
@@ -289,12 +422,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 }
               },
             ),
-
             const Divider(),
+
             SwitchListTile(
               title: const Text("Mode Sombre"),
               value: appState.isDarkMode,
               onChanged: (v) => appState.toggleTheme(),
+            ),
+            const Divider(),
+
+            ElevatedButton.icon(
+              icon: const Icon(Icons.logout, color: Colors.white),
+              label: const Text("Déconnexion", style: TextStyle(fontSize: 16)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+              onPressed: _deconnexion,
             ),
           ],
         ),
@@ -387,7 +532,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==================== GESTION DES ADMINISTRATIONS ====================
   void _addAdministration() async {
     if (!await _verifyBackupPassword()) return;
     final nomController = TextEditingController();
@@ -459,7 +603,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==================== CODE & MOT DE PASSE ====================
   void _setSchoolCode(BuildContext context, AppState appState) {
     final codeController = TextEditingController();
     showDialog(

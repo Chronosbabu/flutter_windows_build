@@ -26,22 +26,52 @@ class FraisScolaires {
 
   FraisScolaires() : config = SchoolConfig(schoolName: "MAPENDO TCC");
 
+  // ==================== GÉNÉRATION D'ID UNIQUE ULTRA SÉCURISÉE ====================
+  String generateUniqueStudentId(String nom, String schoolName) {
+    String yearShort = currentYear.length >= 2
+        ? currentYear.substring(currentYear.length - 2)
+        : "26";
+
+    String schoolLetter = (schoolName.isNotEmpty && schoolName.length >= 1)
+        ? schoolName[0].toUpperCase()
+        : 'B';
+
+    String namePrefix = "XX";
+    String trimmedNom = nom.trim();
+    if (trimmedNom.isNotEmpty) {
+      namePrefix = trimmedNom.length >= 2
+          ? trimmedNom.substring(0, 2).toUpperCase()
+          : trimmedNom.toUpperCase();
+    }
+
+    String baseId = "$namePrefix$yearShort$schoolLetter";
+
+    int counter = 1;
+    String candidateId = "$baseId$counter";
+
+    while (_idExists(candidateId)) {
+      counter++;
+      candidateId = "$baseId$counter";
+    }
+
+    return candidateId;
+  }
+
+  bool _idExists(String id) {
+    for (var yearData in history.values) {
+      for (var eleve in yearData.eleves) {
+        if (eleve.id == id) return true;
+      }
+    }
+    return false;
+  }
+
   double getRequiredForMonth(String mois, String section) {
     final exceptions = config.monthlyExceptionsBySection[section];
     if (exceptions != null && exceptions.containsKey(mois)) {
       return exceptions[mois]!;
     }
     return config.feesBySection[section] ?? 35000;
-  }
-
-  // ==================== MÉTHODES DE CALCUL ====================
-  Map<String, double> getTotalByClass() {
-    Map<String, double> totals = {};
-    for (var eleve in currentData.eleves) {
-      double totalEleve = getStudentTotalPaid(eleve);
-      totals[eleve.classe] = (totals[eleve.classe] ?? 0) + totalEleve;
-    }
-    return totals;
   }
 
   Map<String, double> getTotalBySection() {
@@ -53,11 +83,20 @@ class FraisScolaires {
     return totals;
   }
 
+  Map<String, double> getTotalByClass() {
+    Map<String, double> totals = {};
+    for (var eleve in currentData.eleves) {
+      double totalEleve = getStudentTotalPaid(eleve);
+      String key = "${eleve.section} - ${eleve.classe}";
+      totals[key] = (totals[key] ?? 0) + totalEleve;
+    }
+    return totals;
+  }
+
   double getYearTotalCollected() {
     return months.fold(0.0, (sum, m) => sum + currentData.eleves.fold(0.0, (s, e) => s + (e.paid[m] ?? 0)));
   }
 
-  // ==================== FONCTIONS POUR RAPPORTS PDF ====================
   List<Eleve> getPaidStudentsToday() {
     String today = DateTime.now().toString().split(' ')[0];
     return currentData.eleves.where((eleve) =>
@@ -70,7 +109,7 @@ class FraisScolaires {
     eleve.paid.containsKey(currentMonthName) && eleve.paid[currentMonthName]! > 0).toList();
   }
 
-  // ==================== GÉNÉRATION PDF (Mobile + Desktop) ====================
+  // ==================== GÉNÉRATION PDF ====================
   Future<void> generatePdf(String filename, String reportType) async {
     final pdf = pw.Document();
     List<Eleve> students = [];
@@ -102,12 +141,12 @@ class FraisScolaires {
           pw.Text("Total Collecté : ${total.toStringAsFixed(0)} FC",
               style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
           pw.SizedBox(height: 20),
-
           pw.Text("LISTE DES ÉLÈVES AYANT PAYÉ", style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
           pw.SizedBox(height: 10),
           pw.Table.fromTextArray(
-            headers: ['Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)'],
+            headers: ['ID', 'Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)'],
             data: students.map((e) => [
+              e.id.isNotEmpty ? e.id : "N/A",
               "${e.nom} ${e.postNom} ${e.prenom}",
               e.section,
               e.classe,
@@ -120,14 +159,12 @@ class FraisScolaires {
 
     try {
       final bytes = await pdf.save();
-
       final directory = await getDownloadsDirectory();
       if (directory != null) {
         final fileName = '${filename}_${reportType}_$currentYear.pdf';
         final file = File('${directory.path}/$fileName');
         await file.writeAsBytes(bytes);
         await OpenFile.open(file.path);
-        print("✅ PDF sauvegardé dans Téléchargements : ${file.path}");
       } else {
         final saveLocation = await getSaveLocation(
           suggestedName: '${filename}_${reportType}_$currentYear.pdf',
@@ -144,7 +181,7 @@ class FraisScolaires {
     }
   }
 
-  // ==================== GESTION DES DONNÉES ====================
+  // ==================== GESTION DES DONNÉES LOCALES ====================
   Future<void> loadData() async {
     final dir = await getApplicationDocumentsDirectory();
     _dataFilePath = '${dir.path}/school_fees_data.json';
@@ -173,6 +210,7 @@ class FraisScolaires {
           history[currentYear] = currentData;
         }
       } catch (e) {
+        print("Erreur de chargement des données : $e");
         _initDefaultData();
       }
     } else {

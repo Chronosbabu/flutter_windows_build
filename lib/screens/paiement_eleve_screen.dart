@@ -26,13 +26,16 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   }
 
   void _filterEleves() {
-    final query = searchController.text.toLowerCase();
+    final query = searchController.text.toLowerCase().trim();
+
     setState(() {
       filtered = widget.fraisScolaires.currentData.eleves.where((e) {
+        final idMatch = e.id.toLowerCase().contains(query);
         final nameMatch = '${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase().contains(query);
         final classMatch = selectedClassFilter == null || e.classe == selectedClassFilter;
         final sectionMatch = selectedSectionFilter == null || e.section == selectedSectionFilter;
-        return nameMatch && classMatch && sectionMatch;
+
+        return (idMatch || nameMatch) && classMatch && sectionMatch;
       }).toList();
     });
   }
@@ -42,6 +45,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     widget.fraisScolaires.lastSelectedClassFilter = selectedClassFilter;
     widget.fraisScolaires.lastSelectedSectionFilter = selectedSectionFilter;
     widget.fraisScolaires.saveData();
+    searchController.dispose();
     super.dispose();
   }
 
@@ -60,6 +64,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Text("ID: ${eleve.id}", style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
               TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
               TextField(controller: postNomController, decoration: const InputDecoration(labelText: "Post-nom")),
               TextField(controller: prenomController, decoration: const InputDecoration(labelText: "Prénom")),
@@ -88,10 +94,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () async {
-              if (nomController.text.isNotEmpty &&
-                  postNomController.text.isNotEmpty &&
-                  selectedClasseEdit != null &&
-                  selectedSectionEdit != null) {
+              if (nomController.text.isNotEmpty && postNomController.text.isNotEmpty &&
+                  selectedClasseEdit != null && selectedSectionEdit != null) {
                 eleve.nom = nomController.text.trim();
                 eleve.postNom = postNomController.text.trim();
                 eleve.prenom = prenomController.text.trim();
@@ -125,8 +129,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 TextField(
                   controller: searchController,
                   decoration: const InputDecoration(
-                    labelText: "Rechercher un élève",
+                    labelText: "Rechercher par ID ou Nom",
                     prefixIcon: Icon(Icons.search),
+                    hintText: "Ex: BB26B10 ou BARAKA",
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -182,10 +187,14 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: ListTile(
+                    leading: CircleAvatar(
+                      child: Text(eleve.id.substring(0, 2)),
+                    ),
                     title: Text('${eleve.nom} ${eleve.postNom} ${eleve.prenom}'),
                     subtitle: Text(
-                        'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
-                            'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC'
+                      'ID: ${eleve.id}\n'
+                          'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
+                          'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC',
                     ),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -194,7 +203,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                           icon: const Icon(Icons.edit, color: Colors.blue),
                           onPressed: () => _showEditStudentDialog(eleve),
                         ),
-                        const Icon(Icons.arrow_forward),
+                        const Icon(Icons.arrow_forward_ios),
                       ],
                     ),
                     onTap: () => _showMonthsDialog(context, eleve),
@@ -223,7 +232,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               final required = widget.fraisScolaires.getRequiredForMonth(mois, eleve.section);
               final paid = eleve.paid[mois] ?? 0;
               final isFullyPaid = paid >= required;
-
               return ListTile(
                 title: Text(mois),
                 subtitle: Text('Requis: $required FC | Payé: $paid FC'),
@@ -264,12 +272,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               if (amount != null && amount > 0) {
                 widget.fraisScolaires.handlePayment(eleve, mois, amount);
                 await widget.fraisScolaires.saveData();
-
-                Navigator.pop(ctx); // Ferme la boîte de dialogue de paiement
-
-                // Mise à jour immédiate de la liste
+                Navigator.pop(ctx);
                 if (mounted) {
-                  _filterEleves(); // Rafraîchit directement l'affichage
+                  _filterEleves(); // Rafraîchissement immédiat
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text("Paiement enregistré avec succès")),
                   );

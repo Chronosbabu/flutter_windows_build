@@ -12,21 +12,23 @@ class RecoveryScreen extends StatefulWidget {
 }
 
 class _RecoveryScreenState extends State<RecoveryScreen> {
-  bool isRecoverMode = true; // true = J'ai déjà un compte | false = Nouvelle école
-
-  final idController = TextEditingController();        // ID École fourni par admin
+  bool isRecoverMode = true; // true = Récupérer | false = Nouvelle école
+  final codeController = TextEditingController();
   final passwordController = TextEditingController();
   bool isLoading = false;
   String? errorMessage;
+
+  // Code secret pour créer une nouvelle école sans internet
+  final String secretNewSchoolCode = "babu12@@12##chronos";
 
   Future<void> _handleAction() async {
     final appState = Provider.of<AppState>(context, listen: false);
     final fraisScolaires = FraisScolaires();
 
-    String schoolId = idController.text.trim();
+    String code = codeController.text.trim();
     String password = passwordController.text.trim();
 
-    if (schoolId.isEmpty || password.isEmpty) {
+    if (code.isEmpty || password.isEmpty) {
       setState(() => errorMessage = "Veuillez remplir les deux champs");
       return;
     }
@@ -36,36 +38,47 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       errorMessage = null;
     });
 
-    print("🔄 Tentative - ID: $schoolId | Mode: ${isRecoverMode ? 'Récupération' : 'Nouvelle école'}");
+    print("🔄 Tentative de ${isRecoverMode ? 'RÉCUPÉRATION' : 'CRÉATION NOUVELLE ÉCOLE'}");
+    print("Code entré: $code");
 
     if (isRecoverMode) {
-      // RÉCUPÉRATION (déjà inscrit)
-      bool success = await fraisScolaires.restoreFromServer(schoolId, password);
+      // === MODE RÉCUPÉRATION (nécessite internet) ===
+      print("🌐 Mode Récupération - Contact du serveur...");
+      bool success = await fraisScolaires.restoreFromServer(code, password);
+
+      print("📡 Résultat restoreFromServer : $success");
 
       if (success) {
-        await appState.setSchoolCode(schoolId);
+        await appState.setSchoolCode(code);
         await appState.setBackupPassword(password);
-        print("✅ Récupération réussie");
+        print("✅ Récupération réussie !");
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("✅ Connexion réussie !"), backgroundColor: Colors.green),
+            const SnackBar(content: Text("✅ Données récupérées avec succès !"), backgroundColor: Colors.green),
           );
           Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const SchoolHomeScreen()));
         }
       } else {
-        setState(() => errorMessage = "ID ou mot de passe incorrect.\nVérifiez vos informations.");
+        setState(() => errorMessage = "Échec de récupération.\nVérifiez le code et le mot de passe.\n\nAssurez-vous d'avoir fait une sauvegarde avant.");
+        print("❌ Échec de restoreFromServer");
       }
     } else {
-      // NOUVELLE ÉCOLE (première inscription)
-      await appState.setSchoolCode(schoolId);
-      await appState.setBackupPassword(password);
-      await fraisScolaires.loadData();
+      // === MODE NOUVELLE ÉCOLE ===
+      if (code != secretNewSchoolCode) {
+        setState(() => errorMessage = "Code secret incorrect.\nLe code administrateur est requis pour créer une nouvelle école.");
+        print("❌ Code secret incorrect pour nouvelle école");
+      } else {
+        await appState.setSchoolCode(code);
+        await appState.setBackupPassword(password);
+        await fraisScolaires.loadData();
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("✅ École enregistrée avec succès !"), backgroundColor: Colors.green),
-        );
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const SchoolHomeScreen()));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("✅ Nouvelle école créée avec succès"), backgroundColor: Colors.green),
+          );
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const SchoolHomeScreen()));
+        }
       }
     }
 
@@ -92,26 +105,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 children: [
                   const Icon(Icons.school, size: 90, color: Colors.white),
                   const SizedBox(height: 20),
-
                   Text(
-                    isRecoverMode ? "Connexion à mon École" : "Première Inscription",
-                    style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white),
-                  ),
-                  const SizedBox(height: 10),
-
-                  Text(
-                    isRecoverMode
-                        ? "Entrez l'ID de votre école et votre mot de passe"
-                        : "Entrez l'ID fourni par l'administrateur",
-                    style: const TextStyle(fontSize: 16, color: Colors.white70),
-                    textAlign: TextAlign.center,
+                    isRecoverMode ? "Récupérer mes Données" : "Nouvelle École",
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
                   const SizedBox(height: 40),
 
                   SegmentedButton<bool>(
                     segments: const [
-                      ButtonSegment(value: true, label: Text("J'ai déjà un compte")),
-                      ButtonSegment(value: false, label: Text("Nouvelle école")),
+                      ButtonSegment(value: true, label: Text("Récupérer")),
+                      ButtonSegment(value: false, label: Text("Nouvelle École")),
                     ],
                     selected: {isRecoverMode},
                     onSelectionChanged: (set) {
@@ -119,16 +122,19 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                       errorMessage = null;
                     },
                   ),
-
                   const SizedBox(height: 30),
 
+                  // Champ Code (masqué en mode Nouvelle École)
                   TextField(
-                    controller: idController,
+                    controller: codeController,
+                    obscureText: !isRecoverMode,   // Masqué seulement en mode Nouvelle École
                     style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(
-                      labelText: "ID de l'École",
-                      hintText: "Ex: MAPENDO-7A3K9X2P",
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: isRecoverMode ? "Code de l'École" : "Code Secret Administrateur",
+                      hintText: isRecoverMode ? "Ex: MAPENDO2026" : "••••••••••••••••",
+                      border: const OutlineInputBorder(),
+                      labelStyle: const TextStyle(color: Colors.white),
+                      hintStyle: const TextStyle(color: Colors.white70),
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -138,14 +144,15 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     obscureText: true,
                     style: const TextStyle(color: Colors.white),
                     decoration: const InputDecoration(
-                      labelText: "Mot de Passe",
+                      labelText: "Mot de Passe de Sauvegarde",
                       border: OutlineInputBorder(),
+                      labelStyle: TextStyle(color: Colors.white),
                     ),
                   ),
 
                   if (errorMessage != null) ...[
                     const SizedBox(height: 20),
-                    Text(errorMessage!, style: const TextStyle(color: Colors.redAccent), textAlign: TextAlign.center),
+                    Text(errorMessage!, style: const TextStyle(color: Colors.redAccent, fontSize: 15), textAlign: TextAlign.center),
                   ],
 
                   const SizedBox(height: 40),
@@ -158,10 +165,11 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.white,
                         foregroundColor: Colors.indigo,
+                        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                       ),
                       child: isLoading
-                          ? const CircularProgressIndicator(color: Colors.indigo)
-                          : Text(isRecoverMode ? "SE CONNECTER" : "ENREGISTRER L'ÉCOLE"),
+                          ? const CircularProgressIndicator()
+                          : Text(isRecoverMode ? "RÉCUPÉRER MES DONNÉES" : "CRÉER LA NOUVELLE ÉCOLE"),
                     ),
                   ),
                 ],

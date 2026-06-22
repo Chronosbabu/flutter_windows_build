@@ -1,4 +1,5 @@
 class Eleve {
+  String id;                    // Nouvel ID unique
   String nom;
   String postNom;
   String prenom;
@@ -8,6 +9,7 @@ class Eleve {
   List<Map<String, dynamic>> transactions = [];
 
   Eleve({
+    required this.id,
     required this.nom,
     required this.postNom,
     required this.prenom,
@@ -16,6 +18,7 @@ class Eleve {
   });
 
   Map<String, dynamic> toJson() => {
+    'id': id,
     'nom': nom,
     'postNom': postNom,
     'prenom': prenom,
@@ -27,11 +30,12 @@ class Eleve {
 
   factory Eleve.fromJson(Map<String, dynamic> json) {
     return Eleve(
+      id: json['id'] ?? '',
       nom: json['nom'] ?? '',
       postNom: json['postNom'] ?? '',
       prenom: json['prenom'] ?? '',
       classe: json['classe'] ?? '',
-      section: json['section'] ?? 'Secondaire',
+      section: json['section'] ?? 'Primaire',
     )
       ..paid = Map<String, double>.from(json['paid'] ?? {})
       ..transactions = (json['transactions'] as List? ?? [])
@@ -61,45 +65,43 @@ class Administration {
 
 class SchoolConfig {
   String schoolName;
-  Map<String, double> feesBySection;
-  Map<String, Map<String, double>> monthlyExceptionsBySection;
-  List<String> sections;
+  double defaultMonthlyFee;
+  List<String> sections = ['Primaire', 'Secondaire'];
+  Map<String, double> feesBySection = {};
+  Map<String, Map<String, double>> monthlyExceptionsBySection = {};
   List<Administration> administrations = [];
 
   SchoolConfig({
     required this.schoolName,
+    this.defaultMonthlyFee = 35000,
+    List<String>? sections,
     Map<String, double>? feesBySection,
     Map<String, Map<String, double>>? monthlyExceptionsBySection,
-    List<String>? sections,
     List<Administration>? administrations,
-  })  : feesBySection = feesBySection ?? {
-    'Maternelle': 25000,
-    'Primaire': 30000,
-    'Secondaire': 35000,
-  },
-        monthlyExceptionsBySection = monthlyExceptionsBySection ?? {},
-        sections = sections ?? ['Maternelle', 'Primaire', 'Secondaire'],
-        administrations = administrations ?? [
-          Administration(nom: "Enseignants", pourcentage: 60.0),
-          Administration(nom: "Autres", pourcentage: 40.0),
-        ];
+  }) {
+    this.sections = sections ?? ['Primaire', 'Secondaire'];
+    this.feesBySection = feesBySection ?? {};
+    this.monthlyExceptionsBySection = monthlyExceptionsBySection ?? {};
+    this.administrations = administrations ?? [];
+  }
 
   Map<String, dynamic> toJson() => {
     'schoolName': schoolName,
+    'defaultMonthlyFee': defaultMonthlyFee,
+    'sections': sections,
     'feesBySection': feesBySection,
     'monthlyExceptionsBySection': monthlyExceptionsBySection,
-    'sections': sections,
     'administrations': administrations.map((a) => a.toJson()).toList(),
   };
 
   factory SchoolConfig.fromJson(Map<String, dynamic> json) {
     return SchoolConfig(
-      schoolName: json['schoolName'] ?? 'Etablissement Scolaire',
+      schoolName: json['schoolName'] ?? "MAPENDO TCC",
+      sections: List<String>.from(json['sections'] ?? ['Primaire', 'Secondaire']),
       feesBySection: Map<String, double>.from(json['feesBySection'] ?? {}),
       monthlyExceptionsBySection: (json['monthlyExceptionsBySection'] as Map? ?? {}).map(
             (key, value) => MapEntry(key, Map<String, double>.from(value)),
       ),
-      sections: List<String>.from(json['sections'] ?? ['Maternelle', 'Primaire', 'Secondaire']),
       administrations: (json['administrations'] as List? ?? [])
           .map((a) => Administration.fromJson(a))
           .toList(),
