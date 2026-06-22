@@ -45,7 +45,6 @@ class FraisScolaires {
     }
 
     String baseId = "$namePrefix$yearShort$schoolLetter";
-
     int counter = 1;
     String candidateId = "$baseId$counter";
 
@@ -53,7 +52,6 @@ class FraisScolaires {
       counter++;
       candidateId = "$baseId$counter";
     }
-
     return candidateId;
   }
 
@@ -66,6 +64,7 @@ class FraisScolaires {
     return false;
   }
 
+  // ==================== CALCULS ====================
   double getRequiredForMonth(String mois, String section) {
     final exceptions = config.monthlyExceptionsBySection[section];
     if (exceptions != null && exceptions.containsKey(mois)) {
@@ -100,13 +99,15 @@ class FraisScolaires {
   List<Eleve> getPaidStudentsToday() {
     String today = DateTime.now().toString().split(' ')[0];
     return currentData.eleves.where((eleve) =>
-        eleve.transactions.any((t) => t['date'] == today)).toList();
+        eleve.transactions.any((t) => t['date'] == today)
+    ).toList();
   }
 
   List<Eleve> getPaidStudentsThisMonth() {
     String currentMonthName = months[DateTime.now().month - 1];
     return currentData.eleves.where((eleve) =>
-    eleve.paid.containsKey(currentMonthName) && eleve.paid[currentMonthName]! > 0).toList();
+    eleve.paid.containsKey(currentMonthName) && eleve.paid[currentMonthName]! > 0
+    ).toList();
   }
 
   // ==================== GÉNÉRATION PDF ====================
@@ -141,7 +142,8 @@ class FraisScolaires {
           pw.Text("Total Collecté : ${total.toStringAsFixed(0)} FC",
               style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
           pw.SizedBox(height: 20),
-          pw.Text("LISTE DES ÉLÈVES AYANT PAYÉ", style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+          pw.Text("LISTE DES ÉLÈVES AYANT PAYÉ",
+              style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
           pw.SizedBox(height: 10),
           pw.Table.fromTextArray(
             headers: ['ID', 'Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)'],
@@ -160,6 +162,7 @@ class FraisScolaires {
     try {
       final bytes = await pdf.save();
       final directory = await getDownloadsDirectory();
+
       if (directory != null) {
         final fileName = '${filename}_${reportType}_$currentYear.pdf';
         final file = File('${directory.path}/$fileName');
@@ -209,12 +212,26 @@ class FraisScolaires {
           currentData = SchoolYearData(eleves: []);
           history[currentYear] = currentData;
         }
+
+        // ✅ CORRECTION IMPORTANTE : Assigner un ID aux anciens élèves
+        _assignMissingIds();
+
       } catch (e) {
         print("Erreur de chargement des données : $e");
         _initDefaultData();
       }
     } else {
       _initDefaultData();
+    }
+  }
+
+  void _assignMissingIds() {
+    for (var yearData in history.values) {
+      for (var eleve in yearData.eleves) {
+        if (eleve.id.isEmpty || eleve.id == "N/A") {
+          eleve.id = generateUniqueStudentId(eleve.nom, config.schoolName);
+        }
+      }
     }
   }
 
@@ -228,7 +245,6 @@ class FraisScolaires {
       final dir = await getApplicationDocumentsDirectory();
       _dataFilePath = '${dir.path}/school_fees_data.json';
     }
-
     history[currentYear] = currentData;
 
     final file = File(_dataFilePath!);
@@ -239,7 +255,6 @@ class FraisScolaires {
       'lastSelectedSectionFilter': lastSelectedSectionFilter,
       'history': history.map((key, value) => MapEntry(key, value.toJson())),
     };
-
     await file.writeAsString(json.encode(data));
   }
 
@@ -284,10 +299,12 @@ class FraisScolaires {
     }
   }
 
-  double getStudentTotalPaid(Eleve eleve) => eleve.paid.values.fold(0.0, (sum, p) => sum + p);
+  double getStudentTotalPaid(Eleve eleve) =>
+      eleve.paid.values.fold(0.0, (sum, p) => sum + p);
 
   double getStudentPending(Eleve eleve) {
-    return months.fold(0.0, (sum, m) => sum + (getRequiredForMonth(m, eleve.section) - (eleve.paid[m] ?? 0)));
+    return months.fold(0.0, (sum, m) =>
+    sum + (getRequiredForMonth(m, eleve.section) - (eleve.paid[m] ?? 0)));
   }
 
   // ==================== BACKUP & RESTORE ====================
@@ -301,13 +318,11 @@ class FraisScolaires {
         'history': history.map((key, value) => MapEntry(key, value.toJson())),
         'backup_password': password,
       };
-
       final response = await http.post(
         Uri.parse('$serverUrl/backup'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({'school_code': schoolCode, 'data': data}),
       );
-
       return response.statusCode == 200;
     } catch (e) {
       print("❌ ERREUR BACKUP: $e");
@@ -365,5 +380,6 @@ class FraisScolaires {
     if (history.containsKey(currentYear)) {
       currentData = history[currentYear]!;
     }
+    _assignMissingIds(); // ✅ Assurer que tous les élèves ont un ID après restauration
   }
 }
