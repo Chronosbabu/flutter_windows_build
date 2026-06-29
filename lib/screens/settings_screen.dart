@@ -4,6 +4,7 @@ import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
 import 'recovery_screen.dart';
+import 'aide.dart';
 
 class SettingsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -17,9 +18,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final nameController = TextEditingController();
   final feeController = TextEditingController();
   String? selectedYear;
+
+  // ---- Frais mensuel par section / classe ----
   String? selectedSectionForFee;
+  // null = "Toutes les classes" (comportement section entière, comme avant)
+  String? selectedClasseScopeForFee;
+
+  // ---- Exceptions par mois, par section / classe ----
   String? selectedSectionForException;
   String? selectedMonthForException;
+  // null = "Toutes les classes"
+  String? selectedClasseScopeForException;
+
+  // ---- Ajout manuel de numéro de classe (sections personnalisées) ----
+  final TextEditingController newClasseController = TextEditingController();
 
   @override
   void initState() {
@@ -29,6 +41,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     selectedSectionForFee = widget.fraisScolaires.config.sections.isNotEmpty
         ? widget.fraisScolaires.config.sections.first
         : null;
+  }
+
+  // ==================== ÉCRAN D'AIDE ====================
+  void _openAide() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AideScreen()),
+    );
   }
 
   // ==================== VÉRIFICATION MOT DE PASSE ====================
@@ -85,11 +105,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (!await _verifyBackupPassword()) return;
 
-    // Mise à jour dans FraisScolaires
     widget.fraisScolaires.config.schoolName = nameController.text.trim();
     await widget.fraisScolaires.saveData();
 
-    // Mise à jour dans AppState (IMPORTANT pour que toutes les pages voient le changement)
     final appState = Provider.of<AppState>(context, listen: false);
     await appState.updateSchoolName(nameController.text.trim());
 
@@ -205,13 +223,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
+
+    final classesForFeeSection = selectedSectionForFee != null
+        ? widget.fraisScolaires.getClassesForSection(selectedSectionForFee!)
+        : <String>[];
+
+    final classesForExceptionSection = selectedSectionForException != null
+        ? widget.fraisScolaires.getClassesForSection(selectedSectionForException!)
+        : <String>[];
+
+    final classFeesForSection = selectedSectionForFee != null
+        ? widget.fraisScolaires.config.feesByClasse.entries
+        .where((e) => e.key.startsWith("${selectedSectionForFee!}|"))
+        .toList()
+        : <MapEntry<String, double>>[];
+
     return Scaffold(
-      appBar: AppBar(title: const Text("Paramètres")),
+      appBar: AppBar(
+        title: const Text("Paramètres"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            tooltip: "Aide : à quoi sert chaque bouton ?",
+            onPressed: _openAide,
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            // Nom de l'établissement avec bouton Enregistrer
             Row(
               children: [
                 Expanded(
@@ -247,44 +288,173 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            const Text("Frais Mensuel par Section", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text("Frais Mensuel par Section ou par Classe", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              "Choisissez \"Toutes les classes\" pour fixer le frais de toute la section, "
+                  "ou une classe précise (ex: 1ère, 6ème...) si elle paie un montant différent.",
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
             DropdownButton<String>(
               value: selectedSectionForFee,
               isExpanded: true,
               items: widget.fraisScolaires.config.sections.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
-              onChanged: (value) => setState(() => selectedSectionForFee = value),
+              onChanged: (value) => setState(() {
+                selectedSectionForFee = value;
+                selectedClasseScopeForFee = null;
+              }),
+            ),
+            const SizedBox(height: 10),
+
+            if (selectedSectionForFee != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: newClasseController,
+                        decoration: InputDecoration(
+                          labelText: "Ajouter une classe à \"$selectedSectionForFee\"",
+                          hintText: "Ex: 1ère, 2ème, Niveau 1...",
+                          helperText: classesForFeeSection.isEmpty
+                              ? "Aucune classe pour cette section : ajoutez-en une ici"
+                              : null,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton(
+                      onPressed: () async {
+                        final value = newClasseController.text.trim();
+                        if (value.isEmpty) return;
+                        if (!await _verifyBackupPassword()) return;
+                        await widget.fraisScolaires.addClasseNumero(selectedSectionForFee!, value);
+                        newClasseController.clear();
+                        if (mounted) {
+                          setState(() {
+                            selectedClasseScopeForFee = value;
+                          });
+                        }
+                      },
+                      child: const Text("Ajouter"),
+                    ),
+                  ],
+                ),
+              ),
+
+            DropdownButton<String>(
+              value: selectedClasseScopeForFee,
+              isExpanded: true,
+              hint: const Text("Toutes les classes"),
+              items: [
+                const DropdownMenuItem<String>(value: null, child: Text("Toutes les classes")),
+                ...classesForFeeSection.map((c) => DropdownMenuItem(value: c, child: Text(c))),
+              ],
+              onChanged: (value) => setState(() => selectedClasseScopeForFee = value),
             ),
             const SizedBox(height: 10),
             TextField(
               controller: feeController,
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
-                labelText: selectedSectionForFee != null ? "Frais mensuel pour ${selectedSectionForFee}" : "Frais mensuel",
+                labelText: selectedClasseScopeForFee != null
+                    ? "Frais mensuel pour ${selectedSectionForFee ?? ''} - ${selectedClasseScopeForFee}"
+                    : "Frais mensuel pour toute la section ${selectedSectionForFee ?? ''}",
               ),
             ),
+            const SizedBox(height: 10),
             ElevatedButton(
               onPressed: () async {
                 if (selectedSectionForFee == null) return;
                 if (await _verifyBackupPassword()) {
                   double? amount = double.tryParse(feeController.text);
                   if (amount != null) {
-                    widget.fraisScolaires.config.feesBySection[selectedSectionForFee!] = amount;
+                    if (selectedClasseScopeForFee == null) {
+                      widget.fraisScolaires.config.feesBySection[selectedSectionForFee!] = amount;
+                    } else {
+                      final key = "${selectedSectionForFee!}|${selectedClasseScopeForFee!}";
+                      widget.fraisScolaires.config.feesByClasse[key] = amount;
+                    }
                     await widget.fraisScolaires.saveData();
-                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Frais mis à jour")));
+                    if (mounted) {
+                      setState(() {});
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Frais mis à jour")));
+                    }
                   }
                 }
               },
-              child: const Text("Enregistrer Frais pour cette Section"),
+              child: Text(
+                selectedClasseScopeForFee == null
+                    ? "Enregistrer pour Toute la Section"
+                    : "Enregistrer pour $selectedClasseScopeForFee Uniquement",
+              ),
             ),
+            if (selectedClasseScopeForFee != null &&
+                widget.fraisScolaires.config.feesByClasse
+                    .containsKey("${selectedSectionForFee}|${selectedClasseScopeForFee}"))
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: TextButton.icon(
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  label: Text(
+                    "Retirer l'exception pour $selectedClasseScopeForFee (revient au frais de la section)",
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                  onPressed: () async {
+                    if (!await _verifyBackupPassword()) return;
+                    widget.fraisScolaires.config.feesByClasse
+                        .remove("${selectedSectionForFee}|${selectedClasseScopeForFee}");
+                    await widget.fraisScolaires.saveData();
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ),
+            if (classFeesForSection.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              const Text("Frais spécifiques déjà définis pour cette section :", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              ...classFeesForSection.map((entry) {
+                final classeNumero = entry.key.split('|')[1];
+                return ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(classeNumero),
+                  trailing: Text("${entry.value.toStringAsFixed(0)} FC"),
+                );
+              }),
+            ],
             const Divider(),
 
-            const Text("Exceptions par Mois et par Section", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text("Exceptions par Mois, par Section ou par Classe", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              "Choisissez \"Toutes les classes\" pour appliquer l'exception à toute la section "
+                  "ce mois-là, ou une classe précise pour ne l'appliquer qu'à elle. "
+                  "(Les classes ajoutées plus haut, dans \"Frais Mensuel\", apparaissent aussi ici.)",
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
             DropdownButton<String>(
               value: selectedSectionForException,
               hint: const Text("Choisir une section"),
               isExpanded: true,
               items: widget.fraisScolaires.config.sections.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
-              onChanged: (value) => setState(() => selectedSectionForException = value),
+              onChanged: (value) => setState(() {
+                selectedSectionForException = value;
+                selectedClasseScopeForException = null;
+              }),
+            ),
+            const SizedBox(height: 10),
+            DropdownButton<String>(
+              value: selectedClasseScopeForException,
+              hint: const Text("Toutes les classes"),
+              isExpanded: true,
+              items: [
+                const DropdownMenuItem<String>(value: null, child: Text("Toutes les classes")),
+                ...classesForExceptionSection.map((c) => DropdownMenuItem(value: c, child: Text(c))),
+              ],
+              onChanged: (value) => setState(() => selectedClasseScopeForException = value),
             ),
             const SizedBox(height: 10),
             DropdownButton<String>(
@@ -294,6 +464,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               items: widget.fraisScolaires.months.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
               onChanged: (value) => setState(() => selectedMonthForException = value),
             ),
+            const SizedBox(height: 10),
             ElevatedButton(
               onPressed: () => _editExceptionForSection(),
               child: const Text("Ajouter / Modifier Exception"),
@@ -488,10 +659,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       widget.fraisScolaires.config.sections.remove(section);
       widget.fraisScolaires.config.feesBySection.remove(section);
       widget.fraisScolaires.config.monthlyExceptionsBySection.remove(section);
+      widget.fraisScolaires.config.feesByClasse.removeWhere((key, _) => key.startsWith("$section|"));
+      widget.fraisScolaires.config.monthlyExceptionsByClasse.removeWhere((key, _) => key.startsWith("$section|"));
+      widget.fraisScolaires.config.classesBySection.remove(section);
     });
     await widget.fraisScolaires.saveData();
   }
 
+  // ==================== EXCEPTION PAR SECTION OU PAR CLASSE ====================
   void _editExceptionForSection() async {
     if (selectedSectionForException == null || selectedMonthForException == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Veuillez choisir une section et un mois")));
@@ -500,27 +675,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!await _verifyBackupPassword()) return;
 
     final controller = TextEditingController();
+    final String scopeLabel = selectedClasseScopeForException ?? "Toutes les classes";
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text("Exception - $selectedMonthForException (${selectedSectionForException})"),
+        title: Text("Exception - $selectedMonthForException ($selectedSectionForException - $scopeLabel)"),
         content: TextField(
           controller: controller,
           keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: "Montant (FC)"),
+          decoration: const InputDecoration(
+            labelText: "Montant (FC)",
+            helperText: "Laisser vide pour supprimer l'exception existante",
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               final amount = double.tryParse(controller.text);
-              if (amount != null) {
-                widget.fraisScolaires.config.monthlyExceptionsBySection
-                    .putIfAbsent(selectedSectionForException!, () => {})
-                [selectedMonthForException!] = amount;
+
+              if (selectedClasseScopeForException == null) {
+                if (amount != null) {
+                  widget.fraisScolaires.config.monthlyExceptionsBySection
+                      .putIfAbsent(selectedSectionForException!, () => {})
+                  [selectedMonthForException!] = amount;
+                } else {
+                  widget.fraisScolaires.config.monthlyExceptionsBySection[selectedSectionForException!]
+                      ?.remove(selectedMonthForException);
+                }
               } else {
-                widget.fraisScolaires.config.monthlyExceptionsBySection[selectedSectionForException!]?.remove(selectedMonthForException);
+                final key = "${selectedSectionForException!}|${selectedClasseScopeForException!}";
+                if (amount != null) {
+                  widget.fraisScolaires.config.monthlyExceptionsByClasse
+                      .putIfAbsent(key, () => {})
+                  [selectedMonthForException!] = amount;
+                } else {
+                  widget.fraisScolaires.config.monthlyExceptionsByClasse[key]
+                      ?.remove(selectedMonthForException);
+                }
               }
+
               widget.fraisScolaires.saveData();
               if (mounted) setState(() {});
               Navigator.pop(ctx);

@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-
 import '../frais_scolaires.dart';
 import '../app_state.dart';
-
 import 'enregistrer_eleve_screen.dart';
 import 'paiement_eleve_screen.dart';
 import 'repartition_screen.dart';
 import 'settings_screen.dart';
+import 'student_list_screen.dart';
+import 'admin_dashboard_screen.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -27,6 +27,11 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   }
 
   Future<void> _loadData() async {
+    // IMPORTANT : on renseigne le schoolCode AVANT loadData(), pour que
+    // _assignMissingIds() puisse contacter le serveur si besoin.
+    final appState = Provider.of<AppState>(context, listen: false);
+    fraisScolaires.schoolCode = appState.schoolCode;
+
     await fraisScolaires.loadData();
     if (mounted) setState(() {});
   }
@@ -34,6 +39,10 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
+
+    // Garde le schoolCode synchronisé si l'admin le change depuis les Paramètres.
+    fraisScolaires.schoolCode = appState.schoolCode;
+
     return Scaffold(
       appBar: AppBar(
         title: Text("${appState.schoolName} - ${fraisScolaires.currentYear}"),
@@ -61,12 +70,13 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                         style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 12),
                     Text('Élèves : ${fraisScolaires.currentData.eleves.length}'),
-                    Text('Total Collecte : ${fraisScolaires.getYearTotalCollected().toStringAsFixed(0)} FC'),
+                    Text('Total Collecté : ${fraisScolaires.getYearTotalCollected().toStringAsFixed(0)} FC'),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 20),
+
             GridView.count(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
@@ -81,11 +91,17 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                 _buildCard(Icons.payment, "Paiements",
                         () => Navigator.push(context, MaterialPageRoute(builder: (_) => PaiementEleveScreen(fraisScolaires: fraisScolaires)))),
 
+                _buildCard(Icons.list_alt, "Registre des Élèves",
+                        () => Navigator.push(context, MaterialPageRoute(builder: (_) => StudentListScreen(fraisScolaires: fraisScolaires)))),
+
                 _buildCard(Icons.picture_as_pdf, "Rapport PDF",
                         () => _showReportDialog(context)),
 
                 _buildCard(Icons.share, "Répartition",
                         () => Navigator.push(context, MaterialPageRoute(builder: (_) => RepartitionScreen(fraisScolaires: fraisScolaires)))),
+
+                _buildCard(Icons.admin_panel_settings, "Admin Dashboard",
+                        () => Navigator.push(context, MaterialPageRoute(builder: (_) => AdminDashboardScreen(fraisScolaires: fraisScolaires)))),
               ],
             ),
           ],
@@ -105,72 +121,100 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
           children: [
             Icon(icon, size: 50, color: Colors.indigo),
             const SizedBox(height: 12),
-            Text(label, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Text(label,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
           ],
         ),
       ),
     );
   }
 
-  // ==================== NOUVELLE BOÎTE DE DIALOGUE POUR CHOISIR LE TYPE DE RAPPORT ====================
+  // ==================== DIALOGUE RAPPORT PDF ====================
   void _showReportDialog(BuildContext context) {
+    String? selectedSection;
+    String? selectedClass;
+    String reportType = "annual";
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Type de Rapport PDF"),
-        content: const Text("Choisissez le type de rapport à générer :"),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _generateSpecificReport("daily");
-            },
-            child: const Text("Journalier"),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _generateSpecificReport("monthly");
-            },
-            child: const Text("Mensuel"),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _generateSpecificReport("annual");
-            },
-            child: const Text("Annuel"),
-          ),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text("Générer Rapport PDF"),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text("Type de Rapport"),
+                  DropdownButton<String>(
+                    value: reportType,
+                    isExpanded: true,
+                    items: const [
+                      DropdownMenuItem(value: "daily", child: Text("Journalier")),
+                      DropdownMenuItem(value: "monthly", child: Text("Mensuel")),
+                      DropdownMenuItem(value: "annual", child: Text("Annuel")),
+                    ],
+                    onChanged: (val) => setDialogState(() => reportType = val!),
+                  ),
+                  const SizedBox(height: 16),
+
+                  const Text("Filtrer par Section (optionnel)"),
+                  DropdownButton<String>(
+                    value: selectedSection,
+                    hint: const Text("Toutes les sections"),
+                    isExpanded: true,
+                    items: [
+                      const DropdownMenuItem(value: null, child: Text("Toutes les sections")),
+                      ...fraisScolaires.config.sections.map((s) => DropdownMenuItem(value: s, child: Text(s))),
+                    ],
+                    onChanged: (val) => setDialogState(() => selectedSection = val),
+                  ),
+                  const SizedBox(height: 12),
+
+                  const Text("Filtrer par Classe (optionnel)"),
+                  DropdownButton<String>(
+                    value: selectedClass,
+                    hint: const Text("Toutes les classes"),
+                    isExpanded: true,
+                    items: [
+                      const DropdownMenuItem(value: null, child: Text("Toutes les classes")),
+                      ...fraisScolaires.currentData.eleves
+                          .map((e) => e.classe)
+                          .toSet()
+                          .map((c) => DropdownMenuItem(value: c, child: Text(c))),
+                    ],
+                    onChanged: (val) => setDialogState(() => selectedClass = val),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+              ElevatedButton(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  final filename = "Rapport_${reportType}_${DateTime.now().toString().split(' ')[0]}";
+
+                  await fraisScolaires.generatePdf(
+                    filename: filename,
+                    reportType: reportType,
+                    sectionFilter: selectedSection,
+                    classFilter: selectedClass,
+                  );
+
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("✅ Rapport PDF généré avec succès")),
+                    );
+                  }
+                },
+                child: const Text("Générer PDF"),
+              ),
+            ],
+          );
+        },
       ),
     );
-  }
-
-  Future<void> _generateSpecificReport(String type) async {
-    String reportName = "";
-    if (type == "daily") reportName = "Journalier";
-    else if (type == "monthly") reportName = "Mensuel";
-    else reportName = "Annuel";
-
-    final filename = "Rapport_${reportName}_${DateTime.now().toString().split(' ')[0]}";
-
-    try {
-      await fraisScolaires.generatePdf(filename, type);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("✅ Rapport $reportName généré avec succès")),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("❌ Erreur lors de la génération : $e")),
-        );
-      }
-    }
   }
 }
