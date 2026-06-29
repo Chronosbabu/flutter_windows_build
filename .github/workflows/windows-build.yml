@@ -30,7 +30,7 @@ jobs:
       - name: Rename exe
         shell: powershell
         run: |
-          Rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "PayScol.exe"
+          Rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "payscolclient.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -44,5 +44,5 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: PayScol-Setup
-          path: PayScol.exe
+          name: payscolclient-Setup
+          path: payscolclient.exe

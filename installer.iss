@@ -1,10 +1,10 @@
 [Setup]
-AppName=PayScol
+AppName=payscolclient
 AppVersion=1.0
-DefaultDirName={commonpf}\PayScol
-DefaultGroupName=PayScol
+DefaultDirName={commonpf}\payscolclient
+DefaultGroupName=payscolclient
 OutputDir=.
-OutputBaseFilename=PayScol
+OutputBaseFilename=payscolclient
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
@@ -16,8 +16,8 @@ Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesu
 Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: ignoreversion
 
 [Icons]
-Name: "{commondesktop}\PayScol"; Filename: "{app}\PayScol.exe"; IconFilename: "{app}\babu.ico"
-Name: "{group}\PayScol"; Filename: "{app}\PayScol.exe"; IconFilename: "{app}\babu.ico"
+Name: "{commondesktop}\payscolclient"; Filename: "{app}\payscolclient.exe"; IconFilename: "{app}\babu.ico"
+Name: "{group}\payscolclient"; Filename: "{app}\payscolclient.exe"; IconFilename: "{app}\babu.ico"
 
 [Run]
-Filename: "{app}\PayScol.exe"; Description: "Lancer PayScol"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\payscolclient.exe"; Description: "Lancer payscolclient"; Flags: nowait postinstall skipifsilent
