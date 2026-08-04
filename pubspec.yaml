@@ -17,6 +17,9 @@ dependencies:
   file_selector: ^1.0.3
   cupertino_icons: ^1.0.8
   printing: ^5.14.0
+  http: ^1.2.0
+  esc_pos_utils_plus: ^2.0.4
+  serial_port_win32: ^2.3.0
 
 dev_dependencies:
   flutter_test:
@@ -37,5 +40,3 @@ flutter:
     - assets/icons/baba.png
     - assets/secondaire.json
     - assets/fonts/Roboto-Regular.ttf
-
-
