@@ -18,6 +18,12 @@ class FraisScolaires {
   String? _dataFilePath;
   String? lastSelectedClassFilter;
   String? lastSelectedSectionFilter;
+
+  // ⚡ CORRIGÉ : le school_code est maintenant persisté dans le JSON local
+  // (saveData/loadData), ce qui évite qu'il redevienne "null" après un
+  // redémarrage de l'application tant qu'aucun backup/restore n'a été
+  // relancé dans la session en cours. C'était la cause principale du bug
+  // "ID invalide" côté parent après un build/transfert sur un autre PC.
   String? schoolCode;
 
   // ⚡ Compteur local pour la génération d'IDs hors-ligne.
@@ -34,13 +40,6 @@ class FraisScolaires {
   // ====================================================================
   // GÉNÉRATION D'ID LOCALE (sans connexion internet)
   // ====================================================================
-  // L'ID est généré directement sur l'appareil, en incrémentant un
-  // compteur local. Format : {PREFIX_NOM}{ANNEE_COURTE}{LETTRE_ECOLE}{N}
-  // Ex: BA26M1, BA26M2, JO26M3...
-  //
-  // Lors du backup serveur, le serveur vérifie les conflits entre écoles
-  // et retourne un dictionnaire de corrections. Le client applique ensuite
-  // ces corrections localement.
   String generateLocalStudentId(String nom) {
     final yearShort = currentYear.length >= 2
         ? currentYear.substring(currentYear.length - 2)
@@ -53,7 +52,6 @@ class FraisScolaires {
         ? nameRaw.substring(0, 2)
         : nameRaw.padRight(2, 'X');
 
-    // Collecter tous les IDs déjà utilisés (toutes années confondues)
     final allIds = history.values
         .expand((yd) => yd.eleves)
         .map((e) => e.id)
@@ -63,7 +61,6 @@ class FraisScolaires {
     _localIdCounter++;
     String candidate = '$namePrefix$yearShort$schoolLetter$_localIdCounter';
 
-    // S'assurer de l'unicité locale
     while (allIds.contains(candidate)) {
       _localIdCounter++;
       candidate = '$namePrefix$yearShort$schoolLetter$_localIdCounter';
@@ -72,8 +69,6 @@ class FraisScolaires {
     return candidate;
   }
 
-  // Compatibilité avec le code existant (enregistrer_eleve_screen etc.)
-  // L'ID est maintenant généré localement ; plus besoin d'internet.
   Future<String> generateUniqueStudentId(
       String nom, String schoolCodeForServer) async {
     if (nom.trim().isEmpty) {
@@ -83,12 +78,6 @@ class FraisScolaires {
     return generateLocalStudentId(nom);
   }
 
-  // ====================================================================
-  // APPLIQUER LES CORRECTIONS D'IDs REÇUES DU SERVEUR
-  // ====================================================================
-  // Après un backup, le serveur peut signaler des conflits d'IDs entre
-  // écoles et fournir un mapping {ancien_id: nouvel_id}. On met à jour
-  // tous les enregistrements locaux en conséquence.
   void _applyIdCorrections(Map<String, dynamic> corrections) {
     if (corrections.isEmpty) return;
     for (var yearData in history.values) {
@@ -651,6 +640,9 @@ class FraisScolaires {
         lastSelectedClassFilter = data['lastSelectedClassFilter'];
         lastSelectedSectionFilter = data['lastSelectedSectionFilter'];
 
+        // ⚡ CORRIGÉ : on relit le school_code persisté localement
+        schoolCode = data['schoolCode'] as String?;
+
         if (data['history'] != null) {
           history = (data['history'] as Map<String, dynamic>).map(
                 (key, value) =>
@@ -665,11 +657,9 @@ class FraisScolaires {
           history[currentYear] = currentData;
         }
 
-        // ⚡ Charger le compteur d'IDs local
         if (data['localIdCounter'] != null) {
           _localIdCounter = data['localIdCounter'] as int;
         } else {
-          // Initialiser depuis les IDs existants pour éviter les doublons
           _localIdCounter = _inferCounterFromExistingIds();
         }
 
@@ -682,9 +672,6 @@ class FraisScolaires {
     }
   }
 
-  /// Déduit la valeur de départ du compteur en trouvant le plus grand
-  /// numéro de fin dans les IDs existants. Utilisé à la migration
-  /// (première fois qu'on charge des données avec des IDs déjà créés).
   int _inferCounterFromExistingIds() {
     int maxCounter = 0;
     final regex = RegExp(r'(\d+)$');
@@ -701,7 +688,6 @@ class FraisScolaires {
   }
 
   Future<void> _assignMissingIds() async {
-    // Les IDs manquants sont maintenant générés localement, sans serveur.
     bool changed = false;
     for (var yearData in history.values) {
       for (var eleve in yearData.eleves) {
@@ -733,6 +719,8 @@ class FraisScolaires {
       'localIdCounter': _localIdCounter,
       'lastSelectedClassFilter': lastSelectedClassFilter,
       'lastSelectedSectionFilter': lastSelectedSectionFilter,
+      // ⚡ CORRIGÉ : on persiste maintenant le school_code localement
+      'schoolCode': schoolCode,
       'history': history.map((key, value) => MapEntry(key, value.toJson())),
     };
     await file.writeAsString(json.encode(data));
@@ -794,9 +782,18 @@ class FraisScolaires {
   }
 
   // ==================== BACKUP & RESTORE ====================
-  Future<bool> backupToServer(String schoolCode, String password) async {
+  // ⚡ CORRIGÉ : ces deux méthodes renvoient maintenant un Map contenant
+  // 'success' (bool) et, en cas d'échec, 'error' (String) avec le vrai
+  // message d'erreur (timeout, pas de réseau, mauvais mot de passe,
+  // statut HTTP...). Avant, un simple "return false" cachait la cause
+  // réelle, ce qui rendait le bug impossible à diagnostiquer sur le PC.
+  Future<Map<String, dynamic>> backupToServer(
+      String schoolCodeParam, String password) async {
+    final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
-      this.schoolCode = schoolCode;
+      schoolCode = normalizedCode;
+      await saveData(); // persiste immédiatement le code localement
+
       final data = {
         'config': config.toJson(),
         'currentYear': currentYear,
@@ -807,49 +804,115 @@ class FraisScolaires {
         'backup_password': password,
       };
 
-      final response = await http.post(
+      final response = await http
+          .post(
         Uri.parse('$serverUrl/backup'),
         headers: {'Content-Type': 'application/json'},
-        body: json.encode({'school_code': schoolCode, 'data': data}),
-      );
+        body: json.encode({'school_code': normalizedCode, 'data': data}),
+      )
+          .timeout(const Duration(seconds: 20));
 
       if (response.statusCode == 200) {
         final responseData = json.decode(response.body);
-
-        // ⚡ Appliquer les corrections d'IDs si le serveur en a trouvé
         final corrections =
             responseData['corrections'] as Map<String, dynamic>? ?? {};
         if (corrections.isNotEmpty) {
           _applyIdCorrections(corrections);
           await saveData();
         }
-
-        return true;
+        return {'success': true};
       }
-      return false;
+      return {
+        'success': false,
+        'error':
+        'Le serveur a répondu avec le statut ${response.statusCode} : '
+            '${response.body}',
+      };
+    } on SocketException catch (e) {
+      return {
+        'success': false,
+        'error': 'Aucune connexion réseau (vérifiez internet / pare-feu) : $e',
+      };
+    } on HttpException catch (e) {
+      return {'success': false, 'error': 'Erreur HTTP : $e'};
+    } on HandshakeException catch (e) {
+      return {
+        'success': false,
+        'error': 'Erreur de certificat TLS/SSL sur ce PC : $e',
+      };
     } catch (e) {
-      return false;
+      return {'success': false, 'error': 'Erreur inattendue : $e'};
     }
   }
 
-  Future<bool> restoreFromServer(String schoolCode, String password) async {
+  Future<Map<String, dynamic>> restoreFromServer(
+      String schoolCodeParam, String password) async {
+    final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
       final response = await http
-          .get(Uri.parse('$serverUrl/restore?school_code=$schoolCode'));
+          .get(Uri.parse('$serverUrl/restore?school_code=$normalizedCode'))
+          .timeout(const Duration(seconds: 20));
+
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['backup_password'] != null &&
             data['backup_password'] != password) {
-          return false;
+          return {'success': false, 'error': 'Mot de passe incorrect'};
         }
-        this.schoolCode = schoolCode;
+        schoolCode = normalizedCode;
         await _mergeRestoredData(data);
         await saveData();
-        return true;
+        return {'success': true};
       }
-      return false;
+      if (response.statusCode == 404) {
+        return {
+          'success': false,
+          'error':
+          'Aucune sauvegarde trouvée pour le code "$normalizedCode". '
+              'Vérifiez que ce code est exactement celui utilisé lors '
+              'du dernier "Sauvegarder sur le Serveur".',
+        };
+      }
+      return {
+        'success': false,
+        'error':
+        'Le serveur a répondu avec le statut ${response.statusCode} : '
+            '${response.body}',
+      };
+    } on SocketException catch (e) {
+      return {
+        'success': false,
+        'error': 'Aucune connexion réseau (vérifiez internet / pare-feu) : $e',
+      };
     } catch (e) {
-      return false;
+      return {'success': false, 'error': 'Erreur inattendue : $e'};
+    }
+  }
+
+  /// ⚡ NOUVEAU : permet de vérifier qu'un code école existe bien côté
+  /// serveur AVANT de l'enregistrer localement, pour éviter toute
+  /// divergence entre le code utilisé sur le Mac et celui tapé sur le PC.
+  Future<Map<String, dynamic>> checkSchoolCodeExists(
+      String schoolCodeParam) async {
+    final normalizedCode = schoolCodeParam.trim().toUpperCase();
+    try {
+      final response = await http
+          .get(Uri.parse('$serverUrl/restore?school_code=$normalizedCode'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final name = (data['config']?['schoolName'] ?? '') as String;
+        return {'exists': true, 'schoolName': name};
+      }
+      if (response.statusCode == 404) {
+        return {'exists': false, 'error': 'Aucune école trouvée avec ce code.'};
+      }
+      return {
+        'exists': false,
+        'error': 'Statut HTTP ${response.statusCode} : ${response.body}',
+      };
+    } catch (e) {
+      return {'exists': false, 'error': 'Erreur réseau : $e'};
     }
   }
 

@@ -21,23 +21,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final feeController = TextEditingController();
   String? selectedYear;
 
-  // ---- Frais mensuel par section / classe ----
   String? selectedSectionForFee;
   String? selectedClasseScopeForFee;
 
-  // ---- Exceptions par mois, par section / classe ----
   String? selectedSectionForException;
   String? selectedMonthForException;
   String? selectedClasseScopeForException;
 
-  // ---- Ajout manuel de numéro de classe ----
   final TextEditingController newClasseController = TextEditingController();
 
-  // ---- Imprimante Bluetooth ----
   List<String> _availablePorts = [];
   String? _selectedPort;
   bool _loadingPorts = false;
   bool _testingPrint = false;
+
+  // ⚡ NOUVEAU : indique si une opération réseau (backup/restore/vérif) est en cours
+  bool _syncing = false;
 
   @override
   void initState() {
@@ -51,7 +50,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _loadPrinterConfig();
   }
 
-  // Charge le port COM sauvegardé précédemment
   Future<void> _loadPrinterConfig() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString('printer_com_port');
@@ -60,7 +58,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ==================== ÉCRAN D'AIDE ====================
   void _openAide() {
     Navigator.push(
       context,
@@ -68,7 +65,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==================== VÉRIFICATION MOT DE PASSE ====================
   Future<bool> _verifyBackupPassword() async {
     final appState = Provider.of<AppState>(context, listen: false);
     if (appState.backupPassword == null) {
@@ -124,7 +120,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return isCorrect ?? false;
   }
 
-  // ==================== ENREGISTRER NOM DE L'ÉCOLE ====================
   void _saveSchoolName() async {
     if (nameController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -146,7 +141,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ==================== CHANGEMENT MOT DE PASSE ====================
   void _changeBackupPassword(BuildContext context, AppState appState) async {
     if (appState.backupPassword == null) {
       _setBackupPassword(context, appState);
@@ -266,7 +260,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==================== DÉCONNEXION ====================
   void _deconnexion() {
     Navigator.pushReplacement(
       context,
@@ -274,7 +267,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==================== IMPRIMANTE : DÉTECTER LES PORTS ====================
   Future<void> _detectPorts() async {
     setState(() => _loadingPorts = true);
     final ports = await Future(
@@ -283,8 +275,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _availablePorts = ports;
       _loadingPorts = false;
-      // Si le port sauvegardé n'est plus disponible, on le conserve quand
-      // même dans la liste pour ne pas casser la sélection existante.
       if (_selectedPort != null && !_availablePorts.contains(_selectedPort)) {
         _availablePorts.insert(0, _selectedPort!);
       }
@@ -303,7 +293,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ==================== IMPRIMANTE : SAUVEGARDER LE PORT ====================
   Future<void> _saveSelectedPort(String port) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('printer_com_port', port);
@@ -315,7 +304,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ==================== IMPRIMANTE : PAGE DE TEST ====================
   Future<void> _testPrint() async {
     if (_selectedPort == null) return;
     setState(() => _testingPrint = true);
@@ -357,6 +345,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  // ⚡ NOUVEAU : affiche un message d'erreur détaillé et persistant,
+  // au lieu d'un simple "❌ Erreur" générique.
+  void _showResultSnackBar(bool success, String successMsg, String? error) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(success ? successMsg : "❌ $error"),
+        backgroundColor: success ? Colors.green : Colors.red,
+        duration: Duration(seconds: success ? 3 : 8),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -393,7 +394,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            // ==================== NOM DE L'ÉCOLE ====================
             Row(
               children: [
                 Expanded(
@@ -413,7 +413,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(height: 20),
 
-            // ==================== SECTIONS ====================
             const Text(
               "Gestion des Sections",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -439,7 +438,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            // ==================== FRAIS MENSUEL ====================
             const Text(
               "Frais Mensuel par Section ou par Classe",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -597,7 +595,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
             const Divider(),
 
-            // ==================== EXCEPTIONS ====================
             const Text(
               "Exceptions par Mois, par Section ou par Classe",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -655,7 +652,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            // ==================== ADMINISTRATIONS ====================
             const Text(
               "Administrations & Répartition (%)",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -679,7 +675,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            // ==================== ANNÉE SCOLAIRE ====================
             const Text(
               "Année Scolaire",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -750,6 +745,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
               "Synchronisation Serveur",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
+            const SizedBox(height: 6),
+            // ⚡ NOUVEAU : rappel visuel pour éviter la divergence de code
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.shade200),
+              ),
+              child: const Text(
+                "⚠️ Le code école doit être EXACTEMENT identique sur tous "
+                    "les appareils de cette école (Mac, PC, etc.). "
+                    "Un code différent d'un seul caractère crée une "
+                    "sauvegarde totalement séparée sur le serveur, et les "
+                    "parents ne retrouveront pas les élèves.",
+                style: TextStyle(fontSize: 12, color: Colors.brown),
+              ),
+            ),
+            const SizedBox(height: 10),
             if (appState.schoolCode == null)
               ElevatedButton.icon(
                 icon: const Icon(Icons.lock),
@@ -760,9 +774,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ListTile(
                 title: const Text("Code de l'école"),
                 subtitle: Text(appState.schoolCode!),
-                trailing: IconButton(
-                  icon: const Icon(Icons.edit),
-                  onPressed: () => _setSchoolCode(context, appState),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.wifi_find),
+                      tooltip: "Vérifier ce code sur le serveur",
+                      onPressed: _syncing
+                          ? null
+                          : () => _checkSchoolCode(appState.schoolCode!),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.edit),
+                      onPressed: () => _setSchoolCode(context, appState),
+                    ),
+                  ],
                 ),
               ),
             const SizedBox(height: 10),
@@ -784,70 +810,87 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             const SizedBox(height: 15),
             ElevatedButton.icon(
-              icon: const Icon(Icons.cloud_upload),
-              label: const Text("Sauvegarder sur le Serveur"),
-              onPressed: () async {
+              icon: _syncing
+                  ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white),
+              )
+                  : const Icon(Icons.cloud_upload),
+              label: Text(_syncing
+                  ? "Sauvegarde en cours..."
+                  : "Sauvegarder sur le Serveur"),
+              onPressed: _syncing
+                  ? null
+                  : () async {
                 if (appState.schoolCode == null ||
                     appState.backupPassword == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content: Text("Définissez le code et le mot de passe"),
+                      content:
+                      Text("Définissez le code et le mot de passe"),
                     ),
                   );
                   return;
                 }
-                final success = await widget.fraisScolaires.backupToServer(
+                setState(() => _syncing = true);
+                final result = await widget.fraisScolaires.backupToServer(
                   appState.schoolCode!,
                   appState.backupPassword!,
                 );
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      success ? "✅ Sauvegarde réussie" : "❌ Erreur de sauvegarde",
-                    ),
-                  ),
+                setState(() => _syncing = false);
+                _showResultSnackBar(
+                  result['success'] == true,
+                  "✅ Sauvegarde réussie (code : ${appState.schoolCode})",
+                  result['error'] as String?,
                 );
               },
             ),
             const SizedBox(height: 10),
             ElevatedButton.icon(
-              icon: const Icon(Icons.cloud_download),
-              label: const Text("Récupérer depuis le Serveur"),
-              onPressed: () async {
+              icon: _syncing
+                  ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+                  : const Icon(Icons.cloud_download),
+              label: Text(_syncing
+                  ? "Récupération en cours..."
+                  : "Récupérer depuis le Serveur"),
+              onPressed: _syncing
+                  ? null
+                  : () async {
                 if (appState.schoolCode == null ||
                     appState.backupPassword == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content: Text("Définissez le code et le mot de passe"),
+                      content:
+                      Text("Définissez le code et le mot de passe"),
                     ),
                   );
                   return;
                 }
-                final success = await widget.fraisScolaires.restoreFromServer(
+                setState(() => _syncing = true);
+                final result =
+                await widget.fraisScolaires.restoreFromServer(
                   appState.schoolCode!,
                   appState.backupPassword!,
                 );
-                if (success && mounted) {
+                setState(() => _syncing = false);
+                if (result['success'] == true && mounted) {
                   setState(() {});
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text("✅ Données récupérées et fusionnées"),
-                    ),
-                  );
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        "❌ Échec (mot de passe incorrect ou aucune donnée)",
-                      ),
-                    ),
-                  );
                 }
+                _showResultSnackBar(
+                  result['success'] == true,
+                  "✅ Données récupérées et fusionnées",
+                  result['error'] as String?,
+                );
               },
             ),
             const Divider(),
 
-            // ==================== IMPRIMANTE BLUETOOTH ====================
             const Text(
               "Imprimante Bluetooth",
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -930,7 +973,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            // ==================== MODE SOMBRE ====================
             SwitchListTile(
               title: const Text("Mode Sombre"),
               value: appState.isDarkMode,
@@ -938,7 +980,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            // ==================== DÉCONNEXION ====================
             ElevatedButton.icon(
               icon: const Icon(Icons.logout, color: Colors.white),
               label: const Text(
@@ -958,7 +999,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==================== GESTION DES SECTIONS ====================
+  // ⚡ NOUVEAU : vérifie l'existence du code école côté serveur
+  Future<void> _checkSchoolCode(String code) async {
+    setState(() => _syncing = true);
+    final result = await widget.fraisScolaires.checkSchoolCodeExists(code);
+    setState(() => _syncing = false);
+    if (!mounted) return;
+    if (result['exists'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "✅ Code valide sur le serveur — école : \"${result['schoolName']}\"",
+          ),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "❌ ${result['error']}\n"
+                "Ce code n'existe PAS encore sur le serveur : faites d'abord "
+                "\"Sauvegarder sur le Serveur\" ou vérifiez le code exact "
+                "utilisé sur les autres appareils de l'école.",
+          ),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 8),
+        ),
+      );
+    }
+  }
+
   void _addNewSection() async {
     if (!await _verifyBackupPassword()) return;
     final controller = TextEditingController();
@@ -1020,7 +1092,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await widget.fraisScolaires.saveData();
   }
 
-  // ==================== EXCEPTION ====================
   void _editExceptionForSection() async {
     if (selectedSectionForException == null ||
         selectedMonthForException == null) {
@@ -1185,15 +1256,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ⚡ CORRIGÉ : le champ précise clairement l'importance de saisir le
+  // code IDENTIQUE à celui déjà utilisé sur les autres appareils, et le
+  // code est normalisé automatiquement par AppState.setSchoolCode()
+  // (trim + majuscules + suppression des espaces).
   void _setSchoolCode(BuildContext context, AppState appState) {
-    final codeController = TextEditingController();
+    final codeController =
+    TextEditingController(text: appState.schoolCode ?? '');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Code de Récupération"),
-        content: TextField(
-          controller: codeController,
-          decoration: const InputDecoration(labelText: "Code unique"),
+        title: const Text("Code de l'école"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "⚠️ Ce code doit être EXACTEMENT le même que celui utilisé sur "
+                  "les autres appareils de cette école (Mac, autre PC...). "
+                  "Un espace ou une lettre en trop créera une sauvegarde "
+                  "séparée et les parents ne retrouveront pas les élèves.",
+              style: TextStyle(fontSize: 12, color: Colors.red),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: codeController,
+              textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(labelText: "Code unique"),
+            ),
+          ],
         ),
         actions: [
           TextButton(

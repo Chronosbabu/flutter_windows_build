@@ -20,6 +20,10 @@ class SchoolHomeScreen extends StatefulWidget {
 class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   late FraisScolaires fraisScolaires;
 
+  // ⚡ NOUVEAU : évite de ré-écraser schoolCode à chaque frame/build tant
+  // que le chargement initial n'est pas terminé.
+  bool _initialLoadDone = false;
+
   @override
   void initState() {
     super.initState();
@@ -27,17 +31,75 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     _loadData();
   }
 
+  // ====================================================================
+  // ⚡ CORRIGÉ — Réconciliation propre entre AppState.schoolCode
+  // (source de vérité, définie via RecoveryScreen / SettingsScreen et
+  // stockée dans SharedPreferences) et FraisScolaires.schoolCode
+  // (chargé depuis le fichier JSON local school_fees_data.json).
+  //
+  // AVANT : on assignait fraisScolaires.schoolCode = appState.schoolCode
+  // PUIS on appelait loadData(), qui écrasait immédiatement cette valeur
+  // avec ce qu'il y avait dans le JSON local (potentiellement null si le
+  // fichier vient d'un ancien build, ou différent si le JSON a été
+  // transféré depuis un autre appareil). Rien n'était jamais réconcilié
+  // ni réécrit sur disque, donc le mobile-money badge (qui lit
+  // fraisScolaires.schoolCode) et le backup serveur (qui lit
+  // appState.schoolCode) pouvaient diverger silencieusement d'une
+  // session à l'autre — un scénario plausible après un transfert de
+  // fichiers Mac → clé USB → PC.
+  //
+  // MAINTENANT : on charge d'abord le JSON local, PUIS on applique une
+  // règle claire :
+  //   - Si AppState a un code (cas normal : l'utilisateur s'est déjà
+  //     connecté/activé via RecoveryScreen sur CET appareil), c'est LUI
+  //     qui fait autorité, et on le réécrit dans le JSON local pour que
+  //     tout reste synchronisé la prochaine fois.
+  //   - Sinon, si le JSON local avait un code (ancien install, ou
+  //     restauration manuelle), on le remonte vers AppState pour que le
+  //     prochain backup/restore utilise le bon code.
+  // ====================================================================
   Future<void> _loadData() async {
     final appState = Provider.of<AppState>(context, listen: false);
-    fraisScolaires.schoolCode = appState.schoolCode;
+
+    // 1. Charger d'abord les données locales telles quelles (sans rien
+    //    imposer avant), pour connaître le school_code réellement
+    //    présent dans le fichier JSON de CET appareil.
     await fraisScolaires.loadData();
+
+    final localCode = fraisScolaires.schoolCode;
+    final stateCode = appState.schoolCode;
+
+    if (stateCode != null && stateCode.isNotEmpty) {
+      // AppState fait autorité (cas normal).
+      if (localCode != stateCode) {
+        fraisScolaires.schoolCode = stateCode;
+        await fraisScolaires.saveData(); // ⚡ on persiste la correction
+      }
+    } else if (localCode != null && localCode.isNotEmpty) {
+      // Cas de secours : le JSON local avait un code mais AppState non
+      // (ex: ancien install, ou fichier restauré manuellement).
+      await appState.setSchoolCode(localCode);
+    }
+
+    _initialLoadDone = true;
     if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
-    fraisScolaires.schoolCode = appState.schoolCode;
+
+    // ⚡ On ne réaffecte plus schoolCode à chaque build sans persister :
+    // seulement une fois le chargement initial terminé, et seulement si
+    // AppState a effectivement une valeur (source de vérité). On
+    // persiste aussi le changement pour éviter toute divergence future.
+    if (_initialLoadDone &&
+        appState.schoolCode != null &&
+        appState.schoolCode!.isNotEmpty &&
+        fraisScolaires.schoolCode != appState.schoolCode) {
+      fraisScolaires.schoolCode = appState.schoolCode;
+      fraisScolaires.saveData();
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -158,7 +220,7 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                     ),
                   ),
                 ),
-                // ⚡ NOUVEAU BOUTON : Historique des Reçus
+                // ⚡ Historique des Reçus
                 _buildCard(
                   Icons.receipt_long,
                   "Historique Reçus",

@@ -27,7 +27,6 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Méthode importante pour mettre à jour le nom de l'école partout
   Future<void> updateSchoolName(String newName) async {
     schoolName = newName.trim();
     final prefs = await SharedPreferences.getInstance();
@@ -35,8 +34,16 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ⚡ CORRIGÉ : le code est normalisé (trim + majuscules + suppression des
+  // espaces internes) pour qu'il soit STRICTEMENT identique quel que soit
+  // le PC/Mac sur lequel il est saisi. C'était la source la plus probable
+  // du "ID invalide" : un code légèrement différent entre le Mac (utilisé
+  // pour le premier backup) et le PC (retapé manuellement, avec une
+  // majuscule/espace en moins ou en plus) pointe vers un fichier
+  // totalement différent côté serveur.
   Future<void> setSchoolCode(String code) async {
-    schoolCode = code.trim();
+    final normalized = code.trim().toUpperCase().replaceAll(RegExp(r'\s+'), '');
+    schoolCode = normalized;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('schoolCode', schoolCode!);
     notifyListeners();

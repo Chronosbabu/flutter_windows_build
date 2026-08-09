@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'dart:convert';
+import 'dart:io';
 import '../app_state.dart';
 import 'school_home_screen.dart';
 
@@ -32,10 +33,38 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   String? _director;
 
   // ====================================================================
+  // ⚡ NOUVEAU — Nettoyage robuste de l'ID saisi/collé.
+  //
+  // Sur Windows, un copier-coller depuis WhatsApp, un PDF, Word ou un
+  // email peut insérer des espaces insécables (U+00A0), des retours à
+  // la ligne, des tabulations ou des espaces au milieu du texte — invi-
+  // sibles à l'œil. Sur Mac, le comportement du presse-papier est
+  // souvent plus "propre", ce qui peut donner l'impression que "ça
+  // marche sur Mac mais pas sur PC" alors que la vraie cause est un ID
+  // mal collé. On retire donc TOUS les espaces/caractères invisibles,
+  // pas seulement ceux en début/fin.
+  // ====================================================================
+  String _sanitizeId(String raw) {
+    return raw
+        .trim()
+        .toUpperCase()
+        .replaceAll('\u00A0', '')      // espace insécable
+        .replaceAll(RegExp(r'\s+'), ''); // tout espace/tab/retour ligne
+  }
+
+  String _sanitizeCode(String raw) {
+    return raw
+        .trim()
+        .toUpperCase()
+        .replaceAll('\u00A0', '')
+        .replaceAll(RegExp(r'\s+'), '');
+  }
+
+  // ====================================================================
   // ÉTAPE 1 — Vérification de l'ID
   // ====================================================================
   Future<void> _verifyId() async {
-    final id = _idController.text.trim().toUpperCase();
+    final id = _sanitizeId(_idController.text);
     if (id.isEmpty) {
       setState(() => _errorMsg = "Veuillez entrer votre ID de connexion.");
       return;
@@ -68,18 +97,30 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           });
         } else if (data['already_used'] == true) {
           // ✅ École déjà activée → login normal
-          // ⚡ CORRECTIF : on récupère le VRAI school_code depuis le serveur
-          // au lieu d'utiliser l'ID de registration comme school_code.
+          // ⚡ On récupère le VRAI school_code depuis le serveur au lieu
+          // d'utiliser l'ID de registration comme school_code.
           await _fetchRealSchoolCode(id, data);
         } else {
           setState(() => _errorMsg = data['error'] ?? 'ID invalide.');
         }
       } else {
-        setState(() => _errorMsg = "Erreur serveur. Réessayez.");
+        // ⚡ CORRIGÉ : on affiche le vrai statut/contenu au lieu d'un
+        // message générique, pour pouvoir diagnostiquer sur le PC.
+        setState(() => _errorMsg =
+        "Erreur serveur (statut ${response.statusCode}).\n${response.body}");
       }
+    } on SocketException catch (e) {
+      setState(() => _errorMsg =
+      "Aucune connexion réseau détectée sur cet appareil.\n"
+          "Vérifiez votre connexion internet et le pare-feu Windows.\n"
+          "Détail technique : $e");
+    } on HandshakeException catch (e) {
+      setState(() => _errorMsg =
+      "Erreur de certificat de sécurité (TLS) sur cet appareil.\n"
+          "Détail technique : $e");
     } catch (e) {
       setState(() =>
-      _errorMsg = "Connexion impossible. Vérifiez votre internet.");
+      _errorMsg = "Connexion impossible. Détail technique : $e");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -107,7 +148,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         if (data['found'] == true) {
           if (mounted) {
             setState(() {
-              _schoolCode = data['school_code']; // ← VRAI school_code
+              // ⚡ Normalisation systématique pour éviter toute
+              // divergence de casse/espaces entre appareils.
+              _schoolCode = _sanitizeCode(data['school_code'] as String);
               _schoolName = data['school_name'];
               _step       = 'login';
               _errorMsg   = null;
@@ -118,20 +161,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       }
     } catch (_) {
       // Si le réseau échoue, on essaie avec les données déjà reçues
+      // (voir fallback ci-dessous).
     }
 
     // Fallback : utiliser les données du verify_registration_id si disponibles
     if (verifyData['school_code'] != null) {
       setState(() {
-        _schoolCode = verifyData['school_code'];
+        _schoolCode = _sanitizeCode(verifyData['school_code'] as String);
         _schoolName = verifyData['school_name'] ?? "Votre école";
         _step       = 'login';
         _errorMsg   = null;
       });
     } else {
       setState(() => _errorMsg =
-      "Impossible de récupérer les infos de l'école. "
-          "Vérifiez votre connexion.");
+      "Impossible de récupérer les infos de l'école.\n"
+          "Vérifiez votre connexion internet sur cet appareil.");
     }
   }
 
@@ -162,7 +206,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         Uri.parse('$_serverUrl/school/activate'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'registration_id': _idController.text.trim().toUpperCase(),
+          'registration_id': _sanitizeId(_idController.text),
           'password':        password,
           'school_name':     _schoolName,
         }),
@@ -172,19 +216,30 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         final data = jsonDecode(response.body);
         if (mounted) {
           final appState = Provider.of<AppState>(context, listen: false);
-          // ⚡ On sauvegarde le VRAI school_code retourné par le serveur
-          await appState.setSchoolCode(data['school_code']);
+          // ⚡ On sauvegarde le VRAI school_code retourné par le serveur,
+          // normalisé pour rester identique sur tous les appareils.
+          final realCode = _sanitizeCode(data['school_code'] as String);
+          await appState.setSchoolCode(realCode);
           await appState.updateSchoolName(data['school_name']);
-          appState.setBackupPassword(password);
+          await appState.setBackupPassword(password);
           await _showWelcomeDialog(data['school_name']);
         }
       } else {
-        final err = jsonDecode(response.body)['error'] ?? 'Erreur serveur';
-        setState(() => _errorMsg = err);
+        String err = 'Erreur serveur';
+        try {
+          err = jsonDecode(response.body)['error'] ?? err;
+        } catch (_) {}
+        // ⚡ CORRIGÉ : on ajoute le statut HTTP pour le diagnostic.
+        setState(() => _errorMsg = "$err (statut ${response.statusCode})");
       }
-    } catch (e) {
+    } on SocketException catch (e) {
       setState(() => _errorMsg =
-      "Connexion impossible. Vérifiez votre internet.");
+      "Aucune connexion réseau détectée sur cet appareil.\n"
+          "Vérifiez votre connexion internet et le pare-feu Windows.\n"
+          "Détail technique : $e");
+    } catch (e) {
+      setState(() =>
+      _errorMsg = "Connexion impossible. Détail technique : $e");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -228,7 +283,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             final appState =
             Provider.of<AppState>(context, listen: false);
             await appState.setSchoolCode(_schoolCode!);
-            appState.setBackupPassword(password);
+            await appState.setBackupPassword(password);
 
             // Récupérer le nom officiel de l'école
             try {
@@ -254,14 +309,27 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         } else {
           setState(() => _errorMsg = "Mot de passe incorrect.");
         }
+      } else if (verifyResponse.statusCode == 404) {
+        // ⚡ CORRIGÉ : message précis + statut, c'est exactement le cas
+        // où le backup n'a jamais atteint le serveur pour ce school_code.
+        setState(() => _errorMsg =
+        "Aucune sauvegarde trouvée sur le serveur pour le code "
+            "\"$_schoolCode\".\n"
+            "Assurez-vous d'avoir fait \"Sauvegarder sur le Serveur\" "
+            "au moins une fois depuis un appareil connecté à internet.");
       } else {
         setState(() => _errorMsg =
-        "Identifiant introuvable sur le serveur.\n"
-            "Assurez-vous d'avoir sauvegardé vos données au moins une fois.");
+        "Erreur serveur (statut ${verifyResponse.statusCode}).\n"
+            "${verifyResponse.body}");
       }
-    } catch (e) {
+    } on SocketException catch (e) {
       setState(() => _errorMsg =
-      "Connexion impossible. Vérifiez votre internet.");
+      "Aucune connexion réseau détectée sur cet appareil.\n"
+          "Vérifiez votre connexion internet et le pare-feu Windows.\n"
+          "Détail technique : $e");
+    } catch (e) {
+      setState(() =>
+      _errorMsg = "Connexion impossible. Détail technique : $e");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
