@@ -121,10 +121,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     setState(() => isRefreshing = true);
 
     try {
-      bool success = await widget.fraisScolaires.restoreFromServer(
+      // ⚡ CORRIGÉ : restoreFromServer renvoie désormais un
+      // Map<String, dynamic> contenant 'success' (bool) et, en cas
+      // d'échec, 'error' (String) avec le vrai message d'erreur.
+      final Map<String, dynamic> restoreResult =
+      await widget.fraisScolaires.restoreFromServer(
         appState.schoolCode!,
         appState.backupPassword!,
       );
+      final bool success = restoreResult['success'] == true;
 
       List<Map<String, dynamic>> fetchedPending = [];
       try {
@@ -165,11 +170,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ),
           );
         } else {
+          final String errorMsg =
+              restoreResult['error']?.toString() ?? "Erreur inconnue";
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
-                "⚠️ Impossible de recharger les données générales "
-                    "(mot de passe ou code école ?)",
+                "⚠️ Impossible de recharger les données générales : $errorMsg",
               ),
               backgroundColor: Colors.orange,
             ),
@@ -269,10 +275,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
-        bool success = await widget.fraisScolaires.restoreFromServer(
+        // ⚡ CORRIGÉ : restoreFromServer renvoie désormais un
+        // Map<String, dynamic> contenant 'success' (bool) et, en cas
+        // d'échec, 'error' (String) avec le vrai message d'erreur.
+        final Map<String, dynamic> restoreResult =
+        await widget.fraisScolaires.restoreFromServer(
           appState.schoolCode!,
           appState.backupPassword!,
         );
+        final bool success = restoreResult['success'] == true;
 
         if (success && mounted) {
           await widget.fraisScolaires.saveData();
@@ -292,6 +303,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
           await widget.fraisScolaires.loadData();
           if (mounted) setState(() {});
+        } else if (mounted) {
+          final String errorMsg =
+              restoreResult['error']?.toString() ?? "Erreur inconnue";
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                "⚠️ Paiements validés côté serveur mais impossible de "
+                    "recharger les données locales : $errorMsg",
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
         }
       } else {
         if (mounted) {
