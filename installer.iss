@@ -1,16 +1,19 @@
-```ini
 [Setup]
 AppName=EDUPAY-DRC
-AppVersion=1.0
-DefaultDirName={commonpf}\EDUPAY-DRC
+AppVersion=1.0.0
+AppPublisher=EDUPAY-DRC
+DefaultDirName={autopf}\EDUPAY-DRC
 DefaultGroupName=EDUPAY-DRC
 OutputDir=.
-OutputBaseFilename=EDUPAY-DRC
+OutputBaseFilename=EDUPAY-DRC-Setup
 Compression=lzma
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
-SetupIconFile=assets\icons\babu.ico
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=admin
 WizardStyle=modern
+SetupIconFile=assets\icons\babu.ico
+UninstallDisplayIcon={app}\babu.ico
 
 [Files]
 Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -22,4 +25,3 @@ Name: "{group}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{ap
 
 [Run]
 Filename: "{app}\EDUPAY-DRC.exe"; Description: "Lancer EDUPAY-DRC"; Flags: nowait postinstall skipifsilent
-```
