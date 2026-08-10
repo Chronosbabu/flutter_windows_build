@@ -125,23 +125,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ====================================================================
   // NOM DE L'ÉCOLE
   // ====================================================================
+  // ⚡ CORRIGÉ — AVANT, cette fonction appelait `_verifyBackupPassword()`
+  // en tout premier, et si aucun mot de passe de sauvegarde n'avait
+  // encore été défini (cas très courant pour une école qui n'a jamais
+  // configuré la synchronisation serveur), la fonction retournait `false`
+  // et la sauvegarde du nom était SILENCIEUSEMENT annulée : seul un
+  // SnackBar discret apparaissait, `config.schoolName` ne changeait
+  // jamais, et le nom par défaut "EduPay School RDC" continuait donc
+  // d'apparaître sur tous les PDF et reçus générés — même après avoir
+  // "enregistré" un nouveau nom dans les Paramètres.
+  //
+  // MAINTENANT : le nom de l'école est une information locale, pas une
+  // action sensible liée à la synchronisation serveur — elle n'exige
+  // donc plus de mot de passe pour être enregistrée. Elle met à jour à
+  // la fois `fraisScolaires.config.schoolName` (source utilisée pour les
+  // PDF et les reçus imprimés) ET `appState.schoolName` (utilisé pour
+  // les titres d'écran), pour que les deux restent toujours synchronisés.
   void _saveSchoolName() async {
-    if (nameController.text.trim().isEmpty) {
+    final newName = nameController.text.trim();
+    if (newName.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Le nom ne peut pas être vide")),
       );
       return;
     }
-    if (!await _verifyBackupPassword()) return;
-    widget.fraisScolaires.config.schoolName =
-        nameController.text.trim();
+    widget.fraisScolaires.config.schoolName = newName;
     await widget.fraisScolaires.saveData();
     final appState = Provider.of<AppState>(context, listen: false);
-    await appState.updateSchoolName(nameController.text.trim());
+    await appState.updateSchoolName(newName);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text("✅ Nom de l'école enregistré avec succès")),
+            content: Text(
+                "✅ Nom de l'école enregistré — il sera utilisé sur les "
+                    "prochains PDF et reçus imprimés")),
       );
     }
   }
@@ -571,6 +588,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: const Text("Enregistrer"),
                 ),
               ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              "Ce nom apparaît sur les PDF générés et sur les reçus "
+                  "imprimés.",
+              style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
             const SizedBox(height: 8),
 
@@ -1029,6 +1052,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   setState(() {
                     selectedYear =
                         widget.fraisScolaires.currentYear;
+                    nameController.text =
+                        widget.fraisScolaires.config.schoolName;
                   });
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
