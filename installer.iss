@@ -1,10 +1,11 @@
+```ini
 [Setup]
-AppName=EDUPAY-DRC Accès
+AppName=EDUPAY-DRC
 AppVersion=1.0
-DefaultDirName={commonpf}\EDUPAY-DRC Accès
-DefaultGroupName=EDUPAY-DRC Accès
+DefaultDirName={commonpf}\EDUPAY-DRC
+DefaultGroupName=EDUPAY-DRC
 OutputDir=.
-OutputBaseFilename=EDUPAY-DRC-Acces
+OutputBaseFilename=EDUPAY-DRC
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
@@ -16,8 +17,9 @@ Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesu
 Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: ignoreversion
 
 [Icons]
-Name: "{commondesktop}\EDUPAY-DRC Accès"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFilename: "{app}\babu.ico"
-Name: "{group}\EDUPAY-DRC Accès"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFilename: "{app}\babu.ico"
+Name: "{commondesktop}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{app}\babu.ico"
+Name: "{group}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{app}\babu.ico"
 
 [Run]
-Filename: "{app}\EDUPAY-DRC-Acces.exe"; Description: "Lancer EDUPAY-DRC Accès"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\EDUPAY-DRC.exe"; Description: "Lancer EDUPAY-DRC"; Flags: nowait postinstall skipifsilent
+```

@@ -1,47 +1,50 @@
-name: Windows Build Only
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+  ```yaml
+  name: Windows Build Only
 
-jobs:
-  build:
-    runs-on: windows-latest
+  on:
+    push:
+      branches: [ main ]
+    workflow_dispatch:
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  jobs:
+    build:
+      runs-on: windows-latest
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.38.4'
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
 
-      - name: Enable Windows
-        run: flutter config --enable-windows-desktop
+        - name: Setup Flutter
+          uses: subosito/flutter-action@v2
+          with:
+            flutter-version: '3.38.4'
 
-      - name: Get dependencies
-        run: flutter pub get
+        - name: Enable Windows
+          run: flutter config --enable-windows-desktop
 
-      - name: Build Windows
-        run: flutter build windows --release
+        - name: Get dependencies
+          run: flutter pub get
 
-      - name: Rename exe
-        shell: powershell
-        run: |
-          Rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "EDUPAY-DRC-Acces.exe"
+        - name: Build Windows
+          run: flutter build windows --release
 
-      - name: Install Inno Setup
-        run: choco install innosetup -y
+        - name: Rename exe
+          shell: powershell
+          run: |
+            Rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "EDUPAY-DRC.exe"
 
-      - name: Compile installer
-        shell: powershell
-        run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & "$iscc" "installer.iss"
+        - name: Install Inno Setup
+          run: choco install innosetup -y
 
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: EDUPAY-DRC-Acces-Setup
-          path: EDUPAY-DRC-Acces.exe
+        - name: Compile installer
+          shell: powershell
+          run: |
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            & "$iscc" "installer.iss"
+
+        - name: Upload installer
+          uses: actions/upload-artifact@v4
+          with:
+            name: EDUPAY-DRC-Setup
+            path: EDUPAY-DRC.exe
+    ```
