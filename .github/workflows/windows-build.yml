@@ -1,4 +1,4 @@
-  ```yaml
+
   name: Windows Build Only
 
   on:
@@ -47,4 +47,4 @@
           with:
             name: EDUPAY-DRC-Setup
             path: EDUPAY-DRC.exe
-    ```
+  
