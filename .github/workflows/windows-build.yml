@@ -1,48 +1,37 @@
 name: Windows Build Only
-
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.38.4'
-
       - name: Enable Windows
         run: flutter config --enable-windows-desktop
-
       - name: Get dependencies
         run: flutter pub get
-
       - name: Build Windows
         run: flutter build windows --release
-
       - name: Rename exe
         shell: powershell
         run: |
-          Rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "payscolclient.exe"
-
+          rename-Item "build\windows\x64\runner\Release\c_schollapp.exe" "EDUPAY-DRC.exe"
       - name: Install Inno Setup
         run: choco install innosetup -y
-
       - name: Compile installer
         shell: powershell
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           & "$iscc" "installer.iss"
-
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: payscolclient-Setup
-          path: payscolclient.exe
+          name: EDUPAY-DRC-Setup
+          path: EDUPAY-DRC.exe

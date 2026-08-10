@@ -68,12 +68,26 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   // l'historique) pour garantir qu'il est toujours unique, même hors ligne.
   // La synchronisation avec le serveur se fait plus tard, uniquement quand
   // l'utilisateur appuie sur "Sauvegarder sur le Serveur" dans les Paramètres.
+  //
+  // ⚡ CORRIGÉ : les initiales de l'école sont désormais extraites
+  // uniquement à partir des caractères alphanumériques (lettres et
+  // chiffres) du nom de l'école. Avant, un nom d'école commençant par
+  // un symbole (ex: "####") produisait un ID contenant ce symbole
+  // (ex: "BB27#1"). Certains symboles comme '#' sont des caractères
+  // RÉSERVÉS dans une URL : '#' marque le début d'un "fragment" et tout
+  // ce qui le suit est tronqué silencieusement par Uri.parse() côté
+  // client, avant même que la requête n'atteigne le serveur. Résultat :
+  // le parent tape l'ID exact donné par l'école, le serveur ne reçoit
+  // que la partie avant le '#', et répond "élève introuvable" alors que
+  // les données existent bel et bien côté serveur.
   String _generateLocalStudentId() {
     final config = widget.fraisScolaires.config;
 
     String schoolInitials = config.schoolName
         .trim()
         .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .map((w) => w.replaceAll(RegExp(r'[^A-Za-z0-9]'), ''))
         .where((w) => w.isNotEmpty)
         .map((w) => w[0])
         .join()

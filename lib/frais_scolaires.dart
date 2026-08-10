@@ -19,15 +19,13 @@ class FraisScolaires {
   String? lastSelectedClassFilter;
   String? lastSelectedSectionFilter;
 
-  // ⚡ CORRIGÉ : le school_code est maintenant persisté dans le JSON local
-  // (saveData/loadData), ce qui évite qu'il redevienne "null" après un
-  // redémarrage de l'application tant qu'aucun backup/restore n'a été
-  // relancé dans la session en cours. C'était la cause principale du bug
-  // "ID invalide" côté parent après un build/transfert sur un autre PC.
+  // ⚡ CORRIGÉ : le school_code est maintenant persisté dans le JSON
+  // local (saveData/loadData) — voir plus bas. Avant, ce champ n'était
+  // rempli qu'en mémoire pendant la session en cours, et redevenait
+  // "null" après chaque redémarrage tant qu'aucun backup/restore
+  // n'avait été relancé manuellement.
   String? schoolCode;
 
-  // ⚡ Compteur local pour la génération d'IDs hors-ligne.
-  // Sauvegardé dans le fichier JSON et incrémenté à chaque nouvel élève.
   int _localIdCounter = 0;
 
   final List<String> months = [
@@ -35,10 +33,10 @@ class FraisScolaires {
     'Janvier', 'Fevrier', 'Mars', 'Avril', 'Mai', 'Juin'
   ];
 
-  FraisScolaires() : config = SchoolConfig(schoolName: "MAPENDO TCC");
+  FraisScolaires() : config = SchoolConfig(schoolName: "EduPay School RDC");
 
   // ====================================================================
-  // GÉNÉRATION D'ID LOCALE (sans connexion internet)
+  // GÉNÉRATION D'ID LOCALE
   // ====================================================================
   String generateLocalStudentId(String nom) {
     final yearShort = currentYear.length >= 2
@@ -47,7 +45,7 @@ class FraisScolaires {
     final schoolLetter = config.schoolName.isNotEmpty
         ? config.schoolName[0].toUpperCase()
         : 'B';
-    final nameRaw = nom.trim().toUpperCase();
+    final nameRaw    = nom.trim().toUpperCase();
     final namePrefix = nameRaw.length >= 2
         ? nameRaw.substring(0, 2)
         : nameRaw.padRight(2, 'X');
@@ -65,15 +63,13 @@ class FraisScolaires {
       _localIdCounter++;
       candidate = '$namePrefix$yearShort$schoolLetter$_localIdCounter';
     }
-
     return candidate;
   }
 
   Future<String> generateUniqueStudentId(
       String nom, String schoolCodeForServer) async {
     if (nom.trim().isEmpty) {
-      throw Exception(
-          "Le nom de l'élève est requis pour générer un identifiant.");
+      throw Exception("Le nom est requis pour générer un identifiant.");
     }
     return generateLocalStudentId(nom);
   }
@@ -89,7 +85,9 @@ class FraisScolaires {
     }
   }
 
-  // ==================== GESTION DES CLASSES & SOUS-CLASSES ====================
+  // ====================================================================
+  // GESTION DES CLASSES & SOUS-CLASSES
+  // ====================================================================
   String _classeKey(String section, String classeNumero) =>
       "$section|$classeNumero";
 
@@ -123,7 +121,7 @@ class FraisScolaires {
       String section, String classeNumero, String subClasse) async {
     final trimmed = subClasse.trim();
     if (trimmed.isEmpty) return;
-    final key = _classeKey(section, classeNumero);
+    final key  = _classeKey(section, classeNumero);
     final list = config.subClassesByClasse.putIfAbsent(key, () => []);
     if (!list.contains(trimmed)) {
       list.add(trimmed);
@@ -181,17 +179,19 @@ class FraisScolaires {
     return result.toList();
   }
 
-  // ==================== PASSATION VERS LA CLASSE / ANNÉE SUPÉRIEURE ====================
+  // ====================================================================
+  // PASSATION VERS LA CLASSE/ANNÉE SUPÉRIEURE
+  // ====================================================================
   String? getNextClasseNumero(String section, String classeNumero) {
     final list = getClassesForSection(section);
-    final idx = list.indexOf(classeNumero);
+    final idx  = list.indexOf(classeNumero);
     if (idx == -1 || idx == list.length - 1) return null;
     return list[idx + 1];
   }
 
   String computePromotedClasse(Eleve eleve) {
-    final numero = classeNumeroFromFullClasse(eleve.classe);
-    final subClasse = subClasseFromFullClasse(eleve.classe);
+    final numero     = classeNumeroFromFullClasse(eleve.classe);
+    final subClasse  = subClasseFromFullClasse(eleve.classe);
     final nextNumero = getNextClasseNumero(eleve.section, numero);
     if (nextNumero == null) return eleve.classe;
     return buildFullClasseName(nextNumero, subClasse);
@@ -203,14 +203,14 @@ class FraisScolaires {
     required Map<String, bool> monterClasse,
     required String targetYear,
   }) async {
-    int promoted = 0;
-    int abandoned = 0;
+    int promoted    = 0;
+    int abandoned   = 0;
     int redoublants = 0;
 
     if (!history.containsKey(targetYear)) {
       history[targetYear] = SchoolYearData(eleves: []);
     }
-    final targetData = history[targetYear]!;
+    final targetData  = history[targetYear]!;
     final existingIds = targetData.eleves.map((e) => e.id).toSet();
 
     for (var eleve in studentsToProcess) {
@@ -233,15 +233,15 @@ class FraisScolaires {
       if (existingIds.contains(eleve.id)) {
         final existing =
         targetData.eleves.firstWhere((e) => e.id == eleve.id);
-        existing.classe = newClasse;
+        existing.classe  = newClasse;
         existing.section = eleve.section;
       } else {
         targetData.eleves.add(Eleve(
-          id: eleve.id,
-          nom: eleve.nom,
+          id:      eleve.id,
+          nom:     eleve.nom,
           postNom: eleve.postNom,
-          prenom: eleve.prenom,
-          classe: newClasse,
+          prenom:  eleve.prenom,
+          classe:  newClasse,
           section: eleve.section,
         ));
         existingIds.add(eleve.id);
@@ -251,108 +251,111 @@ class FraisScolaires {
 
     await saveData();
     return {
-      'promoted': promoted,
-      'abandoned': abandoned,
+      'promoted':    promoted,
+      'abandoned':   abandoned,
       'redoublants': redoublants,
     };
   }
 
-  // ==================== FILTRES ====================
+  // ====================================================================
+  // FILTRES
+  // ====================================================================
   List<Eleve> getStudentsBySection(String section) =>
       currentData.eleves.where((e) => e.section == section).toList();
 
   List<Eleve> getStudentsByClass(String classe) =>
       currentData.eleves.where((e) => e.classe == classe).toList();
 
-  List<Eleve> getStudentsBySectionAndClass(String? section, String? classe) {
+  List<Eleve> getStudentsBySectionAndClass(
+      String? section, String? classe) {
     return currentData.eleves.where((e) {
       final matchSection = section == null || e.section == section;
-      final matchClass = classe == null || e.classe == classe;
+      final matchClass   = classe  == null || e.classe  == classe;
       return matchSection && matchClass;
     }).toList();
   }
 
-  // ==================== CALCULS ====================
-  double getRequiredForMonth(String mois, String section, [String? classe]) {
+  // ====================================================================
+  // CALCULS FINANCIERS
+  // ====================================================================
+  double getRequiredForMonth(String mois, String section,
+      [String? classe]) {
     if (classe != null && classe.trim().isNotEmpty) {
       final classeNumero = classeNumeroFromFullClasse(classe);
-      final key = _classeKey(section, classeNumero);
-      final classExceptions = config.monthlyExceptionsByClasse[key];
-      if (classExceptions != null && classExceptions.containsKey(mois)) {
-        return classExceptions[mois]!;
+      final key          = _classeKey(section, classeNumero);
+      final classExc     = config.monthlyExceptionsByClasse[key];
+      if (classExc != null && classExc.containsKey(mois)) {
+        return classExc[mois]!;
       }
       if (config.feesByClasse.containsKey(key)) {
         return config.feesByClasse[key]!;
       }
     }
-    final exceptions = config.monthlyExceptionsBySection[section];
-    if (exceptions != null && exceptions.containsKey(mois)) {
-      return exceptions[mois]!;
-    }
+    final exc = config.monthlyExceptionsBySection[section];
+    if (exc != null && exc.containsKey(mois)) return exc[mois]!;
     return config.feesBySection[section] ?? 35000;
   }
 
   Map<String, double> getTotalBySection() {
-    Map<String, double> totals = {};
-    for (var eleve in currentData.eleves) {
-      double totalEleve = getStudentTotalPaid(eleve);
-      totals[eleve.section] = (totals[eleve.section] ?? 0) + totalEleve;
+    final totals = <String, double>{};
+    for (var e in currentData.eleves) {
+      totals[e.section] = (totals[e.section] ?? 0) + getStudentTotalPaid(e);
     }
     return totals;
   }
 
   Map<String, double> getTotalByClass() {
-    Map<String, double> totals = {};
-    for (var eleve in currentData.eleves) {
-      double totalEleve = getStudentTotalPaid(eleve);
-      String key = "${eleve.section} - ${eleve.classe}";
-      totals[key] = (totals[key] ?? 0) + totalEleve;
+    final totals = <String, double>{};
+    for (var e in currentData.eleves) {
+      final key = "${e.section} - ${e.classe}";
+      totals[key] = (totals[key] ?? 0) + getStudentTotalPaid(e);
     }
     return totals;
   }
 
-  double getYearTotalCollected() {
-    return months.fold(
-        0.0,
-            (sum, m) =>
-        sum +
-            currentData.eleves
-                .fold(0.0, (s, e) => s + (e.paid[m] ?? 0)));
-  }
+  double getYearTotalCollected() =>
+      months.fold(
+          0.0,
+              (sum, m) =>
+          sum +
+              currentData.eleves.fold(
+                  0.0, (s, e) => s + (e.paid[m] ?? 0)));
 
   double getCurrentMonthTotalCollected() {
     final now = DateTime.now();
     if (now.month - 1 < 0 || now.month - 1 >= months.length) return 0.0;
-    final currentMonthName = months[now.month - 1];
+    final moisCourant = months[now.month - 1];
     return currentData.eleves
-        .fold(0.0, (sum, e) => sum + (e.paid[currentMonthName] ?? 0));
+        .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0));
   }
 
   List<Eleve> getPaidStudentsToday() {
-    String today = DateTime.now().toString().split(' ')[0];
+    final today = DateTime.now().toString().split(' ')[0];
     return currentData.eleves
-        .where((eleve) => eleve.transactions.any((t) => t['date'] == today))
+        .where((e) => e.transactions.any((t) => t['date'] == today))
         .toList();
   }
 
   List<Eleve> getPaidStudentsThisMonth() {
-    String currentMonthName = months[DateTime.now().month - 1];
+    final moisCourant = months[DateTime.now().month - 1];
     return currentData.eleves
-        .where((eleve) =>
-    eleve.paid.containsKey(currentMonthName) &&
-        eleve.paid[currentMonthName]! > 0)
+        .where((e) =>
+    e.paid.containsKey(moisCourant) &&
+        e.paid[moisCourant]! > 0)
         .toList();
   }
 
   Map<String, double> calculateAdminDistribution(double totalAmount) {
-    Map<String, double> distribution = {};
+    final distribution = <String, double>{};
     for (var admin in config.administrations) {
       distribution[admin.nom] = totalAmount * (admin.pourcentage / 100);
     }
     return distribution;
   }
 
-  // ==================== GÉNÉRATION PDF ====================
+  // ====================================================================
+  // GÉNÉRATION PDF
+  // ====================================================================
   Future<void> generatePdf({
     required String filename,
     required String reportType,
@@ -361,70 +364,70 @@ class FraisScolaires {
   }) async {
     if (reportType == "student_list") {
       await _generateStudentListPdf(
-        filename: filename,
+        filename:      filename,
         sectionFilter: sectionFilter,
-        classFilter: classFilter,
+        classFilter:   classFilter,
       );
       return;
     }
 
-    final pdf = pw.Document();
-    List<Eleve> students = [];
-    String title = "";
+    final pdf     = pw.Document();
+    List<Eleve> students;
+    String title;
 
     if (reportType == "daily") {
       students = getPaidStudentsToday();
-      title = "RAPPORT JOURNALIER";
+      title    = "RAPPORT JOURNALIER";
     } else if (reportType == "monthly") {
       students = getPaidStudentsThisMonth();
-      title = "RAPPORT MENSUEL";
+      title    = "RAPPORT MENSUEL";
     } else {
       students = currentData.eleves;
-      title = "RAPPORT ANNUEL";
+      title    = "RAPPORT ANNUEL";
     }
 
     if (sectionFilter != null) {
-      students = students.where((e) => e.section == sectionFilter).toList();
+      students = students
+          .where((e) => e.section == sectionFilter)
+          .toList();
       title += " - $sectionFilter";
     }
     if (classFilter != null) {
-      students = students.where((e) => e.classe == classFilter).toList();
+      students = students
+          .where((e) => e.classe == classFilter)
+          .toList();
       title += " - $classFilter";
     }
 
-    double total =
-    students.fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
-    final adminDistribution = calculateAdminDistribution(total);
-    final double totalMoisEcole = getCurrentMonthTotalCollected();
-    final double totalAnneeEcole = getYearTotalCollected();
-    final String currentMonthName =
+    final double total              = students.fold(
+        0.0, (sum, e) => sum + getStudentTotalPaid(e));
+    final adminDistribution         = calculateAdminDistribution(total);
+    final double totalMoisEcole     = getCurrentMonthTotalCollected();
+    final double totalAnneeEcole    = getYearTotalCollected();
+    final String currentMonthName   =
     (DateTime.now().month - 1 >= 0 &&
         DateTime.now().month - 1 < months.length)
         ? months[DateTime.now().month - 1]
         : "Mois en cours";
 
-    final List<String> headers = [
-      'ID',
-      'Nom Complet',
-      'Section',
-      'Classe',
-      'Montant Payé (FC)',
-      ...config.administrations
-          .map((a) => '${a.nom} (${a.pourcentage.toStringAsFixed(0)}%)'),
+    final headers = [
+      'ID', 'Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)',
+      ...config.administrations.map(
+              (a) => '${a.nom} (${a.pourcentage.toStringAsFixed(0)}%)'),
     ];
 
-    final List<List<String>> rows = students.map((e) {
-      final double montantEleve = getStudentTotalPaid(e);
-      final List<String> row = [
+    final rows = students.map((e) {
+      final montant = getStudentTotalPaid(e);
+      final row = [
         e.id.isNotEmpty ? e.id : "N/A",
         "${e.nom} ${e.postNom} ${e.prenom}",
         e.section,
         e.classe,
-        montantEleve.toStringAsFixed(0),
+        montant.toStringAsFixed(0),
       ];
       for (var admin in config.administrations) {
-        final double partAdmin = montantEleve * (admin.pourcentage / 100);
-        row.add(partAdmin.toStringAsFixed(0));
+        row.add(
+            (montant * (admin.pourcentage / 100)).toStringAsFixed(0));
       }
       return row;
     }).toList();
@@ -447,12 +450,12 @@ class FraisScolaires {
           ),
           pw.SizedBox(height: 6),
           pw.Text(
-            "Total Collecté ce Mois ($currentMonthName, toute l'école) : "
+            "Total ce Mois ($currentMonthName) : "
                 "${totalMoisEcole.toStringAsFixed(0)} FC",
             style: const pw.TextStyle(fontSize: 12),
           ),
           pw.Text(
-            "Total Collecté cette Année ($currentYear, toute l'école) : "
+            "Total cette Année ($currentYear) : "
                 "${totalAnneeEcole.toStringAsFixed(0)} FC",
             style: const pw.TextStyle(fontSize: 12),
           ),
@@ -460,17 +463,10 @@ class FraisScolaires {
           pw.Text("LISTE DES ÉLÈVES",
               style: pw.TextStyle(
                   fontSize: 16, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 4),
-          pw.Text(
-            "Pour chaque élève, le montant déjà payé est réparti par "
-                "administration selon son pourcentage.",
-            style: const pw.TextStyle(
-                fontSize: 9, color: PdfColors.grey700),
-          ),
           pw.SizedBox(height: 10),
           pw.TableHelper.fromTextArray(
-            headers: headers,
-            data: rows,
+            headers:   headers,
+            data:      rows,
             headerStyle: pw.TextStyle(
                 fontSize: 9, fontWeight: pw.FontWeight.bold),
             cellStyle: const pw.TextStyle(fontSize: 9),
@@ -478,7 +474,7 @@ class FraisScolaires {
           ),
           pw.SizedBox(height: 30),
           pw.Text(
-            "RÉPARTITION GLOBALE PAR ADMINISTRATION (CE RAPPORT)",
+            "RÉPARTITION GLOBALE PAR ADMINISTRATION",
             style: pw.TextStyle(
                 fontSize: 16, fontWeight: pw.FontWeight.bold),
           ),
@@ -486,8 +482,7 @@ class FraisScolaires {
           ...adminDistribution.entries.map(
                 (entry) => pw.Text(
               "${entry.key} : ${entry.value.toStringAsFixed(0)} FC "
-                  "(${config.administrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}% "
-                  "du total de ${total.toStringAsFixed(0)} FC)",
+                  "(${config.administrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}%)",
             ),
           ),
         ],
@@ -504,22 +499,24 @@ class FraisScolaires {
   }) async {
     List<Eleve> students = currentData.eleves;
     if (sectionFilter != null) {
-      students = students.where((e) => e.section == sectionFilter).toList();
+      students =
+          students.where((e) => e.section == sectionFilter).toList();
     }
     if (classFilter != null) {
-      students = students.where((e) => e.classe == classFilter).toList();
+      students =
+          students.where((e) => e.classe == classFilter).toList();
     }
     students.sort((a, b) {
-      final classeComp = a.classe.compareTo(b.classe);
-      if (classeComp != 0) return classeComp;
+      final c = a.classe.compareTo(b.classe);
+      if (c != 0) return c;
       return a.nom.compareTo(b.nom);
     });
 
-    final String sectionLabel = sectionFilter ?? "Toutes les sections";
-    final String classeLabel = classFilter ?? "Toutes les classes";
-    final String dateStr = DateTime.now().toString().split(' ')[0];
+    final sectionLabel = sectionFilter ?? "Toutes les sections";
+    final classeLabel  = classFilter   ?? "Toutes les classes";
+    final dateStr      = DateTime.now().toString().split(' ')[0];
 
-    final List<List<String>> rows = [];
+    final rows = <List<String>>[];
     for (int i = 0; i < students.length; i++) {
       final e = students[i];
       rows.add(['${i + 1}', e.nom, e.postNom, e.prenom, e.classe]);
@@ -541,7 +538,7 @@ class FraisScolaires {
           pw.SizedBox(height: 4),
           pw.Center(
             child: pw.Text(
-              "REGISTRE DES ÉLÈVES  —  Année $currentYear",
+              "REGISTRE DES ÉLÈVES — Année $currentYear",
               style: pw.TextStyle(
                   fontSize: 13, fontWeight: pw.FontWeight.bold),
             ),
@@ -549,14 +546,14 @@ class FraisScolaires {
           pw.SizedBox(height: 4),
           pw.Center(
             child: pw.Text(
-              "Section : $sectionLabel     |     Classe : $classeLabel",
+              "Section : $sectionLabel | Classe : $classeLabel",
               style: const pw.TextStyle(fontSize: 11),
             ),
           ),
           pw.SizedBox(height: 2),
           pw.Center(
             child: pw.Text(
-              "Imprimé le : $dateStr     |     Total : ${students.length} élève(s)",
+              "Imprimé le : $dateStr | Total : ${students.length} élève(s)",
               style: const pw.TextStyle(
                   fontSize: 10, color: PdfColors.grey700),
             ),
@@ -566,7 +563,7 @@ class FraisScolaires {
           pw.SizedBox(height: 10),
           pw.TableHelper.fromTextArray(
             headers: ['N°', 'Nom', 'Post-nom', 'Prénom', 'Classe'],
-            data: rows,
+            data:    rows,
             headerStyle: pw.TextStyle(
               fontSize: 10,
               fontWeight: pw.FontWeight.bold,
@@ -574,8 +571,8 @@ class FraisScolaires {
             ),
             headerDecoration:
             const pw.BoxDecoration(color: PdfColors.indigo),
-            cellStyle: const pw.TextStyle(fontSize: 10),
-            cellHeight: 22,
+            cellStyle:   const pw.TextStyle(fontSize: 10),
+            cellHeight:  22,
             cellAlignments: {
               0: pw.Alignment.center,
               1: pw.Alignment.centerLeft,
@@ -583,8 +580,6 @@ class FraisScolaires {
               3: pw.Alignment.centerLeft,
               4: pw.Alignment.center,
             },
-            rowDecoration:
-            const pw.BoxDecoration(color: PdfColors.white),
             oddRowDecoration:
             const pw.BoxDecoration(color: PdfColors.indigo50),
           ),
@@ -598,7 +593,7 @@ class FraisScolaires {
   Future<void> _savePdf(
       pw.Document pdf, String filename, String reportType) async {
     try {
-      final bytes = await pdf.save();
+      final bytes     = await pdf.save();
       final directory = await getDownloadsDirectory();
       if (directory != null) {
         final fileName =
@@ -608,7 +603,7 @@ class FraisScolaires {
         await OpenFile.open(file.path);
       } else {
         final saveLocation = await getSaveLocation(
-          suggestedName: '${filename}_${reportType}.pdf',
+          suggestedName: '${filename}_$reportType.pdf',
           acceptedTypeGroups: [
             XTypeGroup(label: 'PDF', extensions: ['pdf'])
           ],
@@ -619,28 +614,28 @@ class FraisScolaires {
           await OpenFile.open(file.path);
         }
       }
-    } catch (e) {
-      // Erreur PDF silencieuse
-    }
+    } catch (_) {}
   }
 
-  // ==================== GESTION DES DONNÉES LOCALES ====================
+  // ====================================================================
+  // GESTION DES DONNÉES LOCALES
+  // ====================================================================
   Future<void> loadData() async {
-    final dir = await getApplicationDocumentsDirectory();
-    _dataFilePath = '${dir.path}/school_fees_data.json';
-    final file = File(_dataFilePath!);
+    final dir       = await getApplicationDocumentsDirectory();
+    _dataFilePath   = '${dir.path}/school_fees_data.json';
+    final file      = File(_dataFilePath!);
 
     if (await file.exists()) {
       try {
         final jsonStr = await file.readAsString();
-        final data = json.decode(jsonStr) as Map<String, dynamic>;
+        final data    = json.decode(jsonStr) as Map<String, dynamic>;
 
-        config = SchoolConfig.fromJson(data['config'] ?? {});
-        currentYear = data['currentYear'] ?? '2025-2026';
-        lastSelectedClassFilter = data['lastSelectedClassFilter'];
+        config       = SchoolConfig.fromJson(data['config'] ?? {});
+        currentYear  = data['currentYear'] ?? '2025-2026';
+        lastSelectedClassFilter   = data['lastSelectedClassFilter'];
         lastSelectedSectionFilter = data['lastSelectedSectionFilter'];
 
-        // ⚡ CORRIGÉ : on relit le school_code persisté localement
+        // ⚡ CORRIGÉ : on relit le school_code persisté localement.
         schoolCode = data['schoolCode'] as String?;
 
         if (data['history'] != null) {
@@ -653,7 +648,7 @@ class FraisScolaires {
         if (history.containsKey(currentYear)) {
           currentData = history[currentYear]!;
         } else {
-          currentData = SchoolYearData(eleves: []);
+          currentData          = SchoolYearData(eleves: []);
           history[currentYear] = currentData;
         }
 
@@ -664,7 +659,7 @@ class FraisScolaires {
         }
 
         await _assignMissingIds();
-      } catch (e) {
+      } catch (_) {
         _initDefaultData();
       }
     } else {
@@ -674,7 +669,7 @@ class FraisScolaires {
 
   int _inferCounterFromExistingIds() {
     int maxCounter = 0;
-    final regex = RegExp(r'(\d+)$');
+    final regex    = RegExp(r'(\d+)$');
     for (var yearData in history.values) {
       for (var eleve in yearData.eleves) {
         final match = regex.firstMatch(eleve.id);
@@ -693,7 +688,7 @@ class FraisScolaires {
       for (var eleve in yearData.eleves) {
         if (eleve.id.isEmpty || eleve.id == "N/A") {
           eleve.id = generateLocalStudentId(eleve.nom);
-          changed = true;
+          changed  = true;
         }
       }
     }
@@ -701,29 +696,52 @@ class FraisScolaires {
   }
 
   void _initDefaultData() {
-    currentData = SchoolYearData(eleves: []);
+    currentData          = SchoolYearData(eleves: []);
     history[currentYear] = currentData;
-    _localIdCounter = 0;
+    _localIdCounter      = 0;
   }
 
   Future<void> saveData() async {
     if (_dataFilePath == null) {
-      final dir = await getApplicationDocumentsDirectory();
+      final dir     = await getApplicationDocumentsDirectory();
       _dataFilePath = '${dir.path}/school_fees_data.json';
     }
     history[currentYear] = currentData;
     final file = File(_dataFilePath!);
     final data = {
-      'config': config.toJson(),
-      'currentYear': currentYear,
-      'localIdCounter': _localIdCounter,
+      'config':                  config.toJson(),
+      'currentYear':             currentYear,
+      'localIdCounter':          _localIdCounter,
       'lastSelectedClassFilter': lastSelectedClassFilter,
       'lastSelectedSectionFilter': lastSelectedSectionFilter,
-      // ⚡ CORRIGÉ : on persiste maintenant le school_code localement
-      'schoolCode': schoolCode,
-      'history': history.map((key, value) => MapEntry(key, value.toJson())),
+      // ⚡ CORRIGÉ : on persiste maintenant le school_code localement.
+      'schoolCode':              schoolCode,
+      'history':                 history.map(
+              (key, value) => MapEntry(key, value.toJson())),
     };
     await file.writeAsString(json.encode(data));
+  }
+
+  // ====================================================================
+  // SUPPRESSION DES DONNÉES LOCALES (déconnexion)
+  // ====================================================================
+  Future<void> clearLocalData() async {
+    if (_dataFilePath == null) {
+      final dir     = await getApplicationDocumentsDirectory();
+      _dataFilePath = '${dir.path}/school_fees_data.json';
+    }
+    final file = File(_dataFilePath!);
+    if (await file.exists()) {
+      await file.delete();
+    }
+    config      = SchoolConfig(schoolName: "EduPay School RDC");
+    currentData = SchoolYearData(eleves: []);
+    currentYear = '2025-2026';
+    history     = {};
+    _localIdCounter = 0;
+    lastSelectedClassFilter   = null;
+    lastSelectedSectionFilter = null;
+    schoolCode  = null;
   }
 
   Future<void> changeYear(String newYear) async {
@@ -733,32 +751,32 @@ class FraisScolaires {
     if (history.containsKey(newYear)) {
       currentData = history[newYear]!;
     } else {
-      currentData = SchoolYearData(eleves: []);
-      history[newYear] = currentData;
+      currentData          = SchoolYearData(eleves: []);
+      history[newYear]     = currentData;
     }
     await saveData();
   }
 
   void handlePayment(Eleve eleve, String mois, double payment) {
-    int index = months.indexOf(mois);
+    int    index     = months.indexOf(mois);
     if (index == -1) return;
 
-    String today = DateTime.now().toString().split(' ')[0];
-    double remaining = payment;
-    String currentMonth = mois;
+    final String today     = DateTime.now().toString().split(' ')[0];
+    double       remaining = payment;
+    String       currentMonth = mois;
 
     while (remaining > 0 && index < months.length) {
-      double required =
+      double required    =
       getRequiredForMonth(currentMonth, eleve.section, eleve.classe);
       double alreadyPaid = eleve.paid[currentMonth] ?? 0;
-      double needed = required - alreadyPaid;
+      double needed      = required - alreadyPaid;
 
       if (needed > 0) {
         double toAdd = remaining > needed ? needed : remaining;
         eleve.paid[currentMonth] = alreadyPaid + toAdd;
         eleve.transactions.add({
-          'date': today,
-          'mois': currentMonth,
+          'date':   today,
+          'mois':   currentMonth,
           'amount': toAdd,
         });
         remaining -= toAdd;
@@ -781,26 +799,32 @@ class FraisScolaires {
                 (eleve.paid[m] ?? 0)));
   }
 
-  // ==================== BACKUP & RESTORE ====================
-  // ⚡ CORRIGÉ : ces deux méthodes renvoient maintenant un Map contenant
-  // 'success' (bool) et, en cas d'échec, 'error' (String) avec le vrai
-  // message d'erreur (timeout, pas de réseau, mauvais mot de passe,
-  // statut HTTP...). Avant, un simple "return false" cachait la cause
-  // réelle, ce qui rendait le bug impossible à diagnostiquer sur le PC.
+  // ====================================================================
+  // BACKUP & RESTORE
+  // ⚡ CORRIGÉ — Ces deux méthodes renvoient maintenant un
+  // Map<String, dynamic> avec 'success' (bool) et, en cas d'échec,
+  // 'error' (String) contenant le vrai message d'erreur. AVANT, elles
+  // renvoyaient un simple bool, ce qui provoquait une ERREUR DE
+  // COMPILATION dans admin_dashboard_screen.dart, qui accède déjà à
+  // restoreResult['success'] et restoreResult['error'] en s'attendant à
+  // un Map. C'était une incompatibilité de type qui empêchait purement
+  // et simplement le projet de compiler.
+  // ====================================================================
   Future<Map<String, dynamic>> backupToServer(
       String schoolCodeParam, String password) async {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
       schoolCode = normalizedCode;
-      await saveData(); // persiste immédiatement le code localement
+      await saveData();
 
       final data = {
-        'config': config.toJson(),
-        'currentYear': currentYear,
-        'localIdCounter': _localIdCounter,
-        'lastSelectedClassFilter': lastSelectedClassFilter,
+        'config':          config.toJson(),
+        'currentYear':     currentYear,
+        'localIdCounter':  _localIdCounter,
+        'lastSelectedClassFilter':   lastSelectedClassFilter,
         'lastSelectedSectionFilter': lastSelectedSectionFilter,
-        'history': history.map((key, value) => MapEntry(key, value.toJson())),
+        'history':         history.map(
+                (key, value) => MapEntry(key, value.toJson())),
         'backup_password': password,
       };
 
@@ -814,7 +838,7 @@ class FraisScolaires {
 
       if (response.statusCode == 200) {
         final responseData = json.decode(response.body);
-        final corrections =
+        final corrections  =
             responseData['corrections'] as Map<String, dynamic>? ?? {};
         if (corrections.isNotEmpty) {
           _applyIdCorrections(corrections);
@@ -833,12 +857,10 @@ class FraisScolaires {
         'success': false,
         'error': 'Aucune connexion réseau (vérifiez internet / pare-feu) : $e',
       };
-    } on HttpException catch (e) {
-      return {'success': false, 'error': 'Erreur HTTP : $e'};
     } on HandshakeException catch (e) {
       return {
         'success': false,
-        'error': 'Erreur de certificat TLS/SSL sur ce PC : $e',
+        'error': 'Erreur de certificat TLS/SSL sur cet appareil : $e',
       };
     } catch (e) {
       return {'success': false, 'error': 'Erreur inattendue : $e'};
@@ -860,7 +882,7 @@ class FraisScolaires {
           return {'success': false, 'error': 'Mot de passe incorrect'};
         }
         schoolCode = normalizedCode;
-        await _mergeRestoredData(data);
+        await mergeRestoredData(data);
         await saveData();
         return {'success': true};
       }
@@ -889,9 +911,6 @@ class FraisScolaires {
     }
   }
 
-  /// ⚡ NOUVEAU : permet de vérifier qu'un code école existe bien côté
-  /// serveur AVANT de l'enregistrer localement, pour éviter toute
-  /// divergence entre le code utilisé sur le Mac et celui tapé sur le PC.
   Future<Map<String, dynamic>> checkSchoolCodeExists(
       String schoolCodeParam) async {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
@@ -916,7 +935,16 @@ class FraisScolaires {
     }
   }
 
-  Future<void> _mergeRestoredData(Map<String, dynamic> serverData) async {
+  // ⚡ CORRIGÉ — RENOMMÉE en publique (sans underscore).
+  // AVANT : `_mergeRestoredData` (privée) était appelée depuis
+  // recovery_screen.dart (`fraisScolaires._mergeRestoredData(data)`),
+  // ce qui est une ERREUR DE COMPILATION en Dart : un membre préfixé
+  // par "_" n'est visible que dans le fichier où il est déclaré.
+  // MAINTENANT : la méthode est publique et peut être appelée depuis
+  // n'importe quel autre fichier du projet, comme le fait
+  // recovery_screen.dart pour fusionner les données après une
+  // reconnexion "code école + mot de passe" sur un nouvel appareil.
+  Future<void> mergeRestoredData(Map<String, dynamic> serverData) async {
     config = SchoolConfig.fromJson(serverData['config'] ?? {});
 
     if (serverData['localIdCounter'] != null) {
@@ -929,15 +957,16 @@ class FraisScolaires {
     if (serverData['history'] != null) {
       final serverHistory =
       (serverData['history'] as Map<String, dynamic>).map(
-            (key, value) => MapEntry(key, SchoolYearData.fromJson(value)),
+            (key, value) =>
+            MapEntry(key, SchoolYearData.fromJson(value)),
       );
 
       for (var entry in serverHistory.entries) {
-        final year = entry.key;
+        final year           = entry.key;
         final serverYearData = entry.value;
 
         if (history.containsKey(year)) {
-          final localEleves = history[year]!.eleves;
+          final localEleves  = history[year]!.eleves;
           final existingByKey = <String, Eleve>{};
           for (var e in localEleves) {
             final key =
@@ -951,11 +980,11 @@ class FraisScolaires {
 
             if (existingByKey.containsKey(key)) {
               final localEleve = existingByKey[key]!;
-              localEleve.id = serverEleve.id.isNotEmpty
+              localEleve.id    = serverEleve.id.isNotEmpty
                   ? serverEleve.id
                   : localEleve.id;
-              localEleve.classe = serverEleve.classe;
-              localEleve.section = serverEleve.section;
+              localEleve.classe   = serverEleve.classe;
+              localEleve.section  = serverEleve.section;
               localEleve.paid
                 ..clear()
                 ..addAll(serverEleve.paid);
@@ -975,6 +1004,9 @@ class FraisScolaires {
     currentYear = serverData['currentYear'] ?? currentYear;
     if (history.containsKey(currentYear)) {
       currentData = history[currentYear]!;
+    } else {
+      currentData          = SchoolYearData(eleves: []);
+      history[currentYear] = currentData;
     }
 
     await _assignMissingIds();

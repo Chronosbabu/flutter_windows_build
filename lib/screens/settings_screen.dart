@@ -17,32 +17,30 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final nameController = TextEditingController();
-  final feeController = TextEditingController();
+  final nameController  = TextEditingController();
+  final feeController   = TextEditingController();
   String? selectedYear;
 
   String? selectedSectionForFee;
   String? selectedClasseScopeForFee;
-
   String? selectedSectionForException;
   String? selectedMonthForException;
   String? selectedClasseScopeForException;
-
   final TextEditingController newClasseController = TextEditingController();
 
+  // Imprimante Bluetooth
   List<String> _availablePorts = [];
-  String? _selectedPort;
-  bool _loadingPorts = false;
-  bool _testingPrint = false;
+  String?      _selectedPort;
+  bool         _loadingPorts  = false;
+  bool         _testingPrint  = false;
 
-  // ⚡ NOUVEAU : indique si une opération réseau (backup/restore/vérif) est en cours
-  bool _syncing = false;
+  bool _showBackupReminder = true;
 
   @override
   void initState() {
     super.initState();
     nameController.text = widget.fraisScolaires.config.schoolName;
-    selectedYear = widget.fraisScolaires.currentYear;
+    selectedYear        = widget.fraisScolaires.currentYear;
     selectedSectionForFee =
     widget.fraisScolaires.config.sections.isNotEmpty
         ? widget.fraisScolaires.config.sections.first
@@ -59,21 +57,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _openAide() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const AideScreen()),
-    );
+    Navigator.push(context,
+        MaterialPageRoute(builder: (_) => const AideScreen()));
   }
 
+  // ====================================================================
+  // VÉRIFICATION MOT DE PASSE
+  // ====================================================================
   Future<bool> _verifyBackupPassword() async {
     final appState = Provider.of<AppState>(context, listen: false);
     if (appState.backupPassword == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            "Veuillez d'abord définir un mot de passe de sauvegarde",
-          ),
-        ),
+            content: Text(
+                "Veuillez d'abord définir un mot de passe de sauvegarde")),
       );
       return false;
     }
@@ -87,28 +84,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              "Entrez votre mot de passe de sauvegarde pour continuer",
-            ),
+                "Entrez votre mot de passe de sauvegarde pour continuer"),
             const SizedBox(height: 15),
             TextField(
               controller: passController,
               obscureText: true,
-              decoration: const InputDecoration(labelText: "Mot de passe"),
+              decoration: const InputDecoration(
+                  labelText: "Mot de passe"),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              if (passController.text.trim() == appState.backupPassword) {
+              if (passController.text.trim() ==
+                  appState.backupPassword) {
                 Navigator.pop(ctx, true);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Mot de passe incorrect")),
+                  const SnackBar(
+                      content: Text("Mot de passe incorrect")),
                 );
               }
             },
@@ -120,6 +118,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return isCorrect ?? false;
   }
 
+  // ====================================================================
+  // NOM DE L'ÉCOLE
+  // ====================================================================
   void _saveSchoolName() async {
     if (nameController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -128,19 +129,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     if (!await _verifyBackupPassword()) return;
-    widget.fraisScolaires.config.schoolName = nameController.text.trim();
+    widget.fraisScolaires.config.schoolName =
+        nameController.text.trim();
     await widget.fraisScolaires.saveData();
     final appState = Provider.of<AppState>(context, listen: false);
     await appState.updateSchoolName(nameController.text.trim());
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("✅ Nom de l'école enregistré avec succès"),
-        ),
+            content: Text("✅ Nom de l'école enregistré avec succès")),
       );
     }
   }
 
+  // ====================================================================
+  // MOT DE PASSE
+  // ====================================================================
   void _changeBackupPassword(BuildContext context, AppState appState) async {
     if (appState.backupPassword == null) {
       _setBackupPassword(context, appState);
@@ -160,25 +164,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField(
               controller: oldPassController,
               obscureText: true,
-              decoration:
-              const InputDecoration(labelText: "Ancien mot de passe"),
+              decoration: const InputDecoration(
+                  labelText: "Ancien mot de passe"),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              if (oldPassController.text.trim() == appState.backupPassword) {
+              if (oldPassController.text.trim() ==
+                  appState.backupPassword) {
                 Navigator.pop(ctx, true);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                    content: Text("Ancien mot de passe incorrect"),
-                  ),
+                      content: Text("Ancien mot de passe incorrect")),
                 );
               }
             },
@@ -190,7 +193,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (oldCorrect != true) return;
 
-    final newPassController = TextEditingController();
+    final newPassController    = TextEditingController();
     final confirmPassController = TextEditingController();
     await showDialog(
       context: context,
@@ -203,45 +206,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
               controller: newPassController,
               obscureText: true,
               decoration: const InputDecoration(
-                labelText: "Nouveau mot de passe (min 6 caractères)",
-              ),
+                  labelText: "Nouveau mot de passe (min 6 caractères)"),
             ),
             const SizedBox(height: 10),
             TextField(
               controller: confirmPassController,
               obscureText: true,
               decoration: const InputDecoration(
-                labelText: "Confirmer le nouveau mot de passe",
-              ),
+                  labelText: "Confirmer le nouveau mot de passe"),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final newPass = newPassController.text.trim();
+              final newPass     = newPassController.text.trim();
               final confirmPass = confirmPassController.text.trim();
               if (newPass.length < 6) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                    content: Text(
-                      "Le mot de passe doit contenir au moins 6 caractères",
-                    ),
-                  ),
+                      content: Text(
+                          "Le mot de passe doit contenir au moins 6 caractères")),
                 );
                 return;
               }
               if (newPass != confirmPass) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                    content: Text(
-                      "Les deux mots de passe ne correspondent pas",
-                    ),
-                  ),
+                      content: Text(
+                          "Les deux mots de passe ne correspondent pas")),
                 );
                 return;
               }
@@ -249,8 +245,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text("✅ Mot de passe changé avec succès"),
-                ),
+                    content: Text("✅ Mot de passe changé avec succès")),
               );
             },
             child: const Text("Enregistrer"),
@@ -260,22 +255,168 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _deconnexion() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const RecoveryScreen()),
+  // ====================================================================
+  // DÉCONNEXION — AVEC AVERTISSEMENT ET SAUVEGARDE OBLIGATOIRE
+  // ====================================================================
+  void _deconnexion() async {
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded,
+                color: Colors.orange, size: 28),
+            SizedBox(width: 8),
+            Text("Déconnexion"),
+          ],
+        ),
+        content: const Text(
+          "⚠️ ATTENTION — La déconnexion va supprimer TOUTES les données "
+              "locales de votre PC (élèves, paiements, configuration).\n\n"
+              "Pour ne pas perdre vos données, vous devez absolument les "
+              "sauvegarder sur le serveur avant de vous déconnecter.\n\n"
+              "Que voulez-vous faire ?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.cloud_upload),
+            label: const Text("Sauvegarder puis déconnecter"),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.indigo,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, 'save_then_logout'),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.logout),
+            label: const Text("Déconnecter sans sauvegarder"),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, 'logout_only'),
+          ),
+        ],
+      ),
     );
+
+    if (action == null || action == 'cancel') return;
+
+    if (action == 'save_then_logout') {
+      final appState =
+      Provider.of<AppState>(context, listen: false);
+      if (appState.schoolCode == null ||
+          appState.backupPassword == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text(
+                    "Impossible de sauvegarder : code école ou mot de passe manquant")),
+          );
+        }
+        return;
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text("⏳ Sauvegarde en cours..."),
+              duration: Duration(seconds: 2)),
+        );
+      }
+
+      // ⚡ CORRIGÉ — backupToServer renvoie désormais un
+      // Map<String, dynamic> ({'success': bool, 'error': String?}) et
+      // non plus un simple bool. AVANT : "final success = await
+      // ...backupToServer(...)" typait implicitement `success` comme
+      // Map, puis "if (!success)" provoquait l'erreur de compilation
+      // "A negation operand must have a static type of 'bool'".
+      final backupResult = await widget.fraisScolaires.backupToServer(
+        appState.schoolCode!,
+        appState.backupPassword!,
+      );
+      final bool backupSuccess = backupResult['success'] == true;
+
+      if (!backupSuccess) {
+        if (mounted) {
+          final String errMsg =
+              backupResult['error']?.toString() ?? "Erreur inconnue";
+          final forceLogout = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text("Échec de la sauvegarde"),
+              content: Text(
+                "La sauvegarde sur le serveur a échoué :\n$errMsg\n\n"
+                    "Voulez-vous quand même vous déconnecter ?\n"
+                    "(Vos données locales seront perdues)",
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text("Annuler")),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text("Déconnecter quand même"),
+                ),
+              ],
+            ),
+          );
+          if (forceLogout != true) return;
+        } else {
+          return;
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("✅ Sauvegarde réussie !"),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+
+    await widget.fraisScolaires.clearLocalData();
+
+    if (mounted) {
+      final appState = Provider.of<AppState>(context, listen: false);
+      // ⚡ CORRIGÉ — appState.logout() était appelé mais n'existait pas
+      // dans app_state.dart ("The method 'logout' isn't defined for
+      // the type 'AppState'"). La méthode a été ajoutée dans
+      // app_state.dart.
+      await appState.logout();
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const RecoveryScreen()),
+            (route) => false,
+      );
+    }
   }
 
+  // ====================================================================
+  // IMPRIMANTE
+  // ====================================================================
   Future<void> _detectPorts() async {
     setState(() => _loadingPorts = true);
     final ports = await Future(
-          () => BluetoothPrinterService.getAvailablePorts(),
-    );
+            () => BluetoothPrinterService.getAvailablePorts());
     setState(() {
       _availablePorts = ports;
-      _loadingPorts = false;
-      if (_selectedPort != null && !_availablePorts.contains(_selectedPort)) {
+      _loadingPorts   = false;
+      if (_selectedPort != null &&
+          !_availablePorts.contains(_selectedPort)) {
         _availablePorts.insert(0, _selectedPort!);
       }
     });
@@ -283,9 +424,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            "Aucun port COM détecté. Couplez d'abord l'imprimante "
-                "via Bluetooth dans les paramètres Windows.",
-          ),
+              "Aucun port COM détecté. Couplez d'abord l'imprimante via Bluetooth dans les paramètres Windows."),
           backgroundColor: Colors.orange,
           duration: Duration(seconds: 4),
         ),
@@ -308,36 +447,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_selectedPort == null) return;
     setState(() => _testingPrint = true);
     final ok = await BluetoothPrinterService.printReceipt(
-      portName: _selectedPort!,
-      schoolName: widget.fraisScolaires.config.schoolName,
-      currentYear: widget.fraisScolaires.currentYear,
-      studentName: 'TEST ELEVE',
-      studentId: 'TEST-001',
-      classe: '7eme A',
-      section: 'Secondaire',
-      moisPaye: 'Septembre',
-      montantPaye: 35000,
+      portName:     _selectedPort!,
+      schoolName:   widget.fraisScolaires.config.schoolName,
+      currentYear:  widget.fraisScolaires.currentYear,
+      studentName:  'TEST ELEVE',
+      studentId:    'TEST-001',
+      classe:       '7eme A',
+      section:      'Secondaire',
+      moisPaye:     'Septembre',
+      montantPaye:  35000,
       montantRequis: 35000,
       resteAPayerMois: 0,
       totalDejaPayeAnnee: 35000,
-      totalRequis: 350000,
+      totalRequis:  350000,
       historiqueTransactions: [
         {
-          'date': DateTime.now().toString().split(' ')[0],
-          'mois': 'Septembre',
+          'date':   DateTime.now().toString().split(' ')[0],
+          'mois':   'Septembre',
           'amount': 35000,
-        },
+        }
       ],
     );
     setState(() => _testingPrint = false);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            ok
-                ? "✅ Page de test imprimée avec succès"
-                : "❌ Échec — vérifiez que l'imprimante est allumée et couplée sur $_selectedPort",
-          ),
+          content: Text(ok
+              ? "✅ Page de test imprimée avec succès"
+              : "❌ Échec — vérifiez que l'imprimante est allumée et couplée sur $_selectedPort"),
           backgroundColor: ok ? Colors.green : Colors.red,
           duration: const Duration(seconds: 4),
         ),
@@ -345,37 +482,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ⚡ NOUVEAU : affiche un message d'erreur détaillé et persistant,
-  // au lieu d'un simple "❌ Erreur" générique.
-  void _showResultSnackBar(bool success, String successMsg, String? error) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(success ? successMsg : "❌ $error"),
-        backgroundColor: success ? Colors.green : Colors.red,
-        duration: Duration(seconds: success ? 3 : 8),
-      ),
-    );
-  }
-
+  // ====================================================================
+  // BUILD
+  // ====================================================================
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
 
     final classesForFeeSection = selectedSectionForFee != null
-        ? widget.fraisScolaires.getClassesForSection(selectedSectionForFee!)
+        ? widget.fraisScolaires
+        .getClassesForSection(selectedSectionForFee!)
         : <String>[];
 
-    final classesForExceptionSection = selectedSectionForException != null
+    final classesForExceptionSection =
+    selectedSectionForException != null
         ? widget.fraisScolaires
         .getClassesForSection(selectedSectionForException!)
         : <String>[];
 
     final classFeesForSection = selectedSectionForFee != null
         ? widget.fraisScolaires.config.feesByClasse.entries
-        .where(
-          (e) => e.key.startsWith("${selectedSectionForFee!}|"),
-    )
+        .where((e) =>
+        e.key.startsWith("${selectedSectionForFee!}|"))
         .toList()
         : <MapEntry<String, double>>[];
 
@@ -385,7 +513,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.help_outline),
-            tooltip: "Aide : à quoi sert chaque bouton ?",
+            tooltip: "Aide",
             onPressed: _openAide,
           ),
         ],
@@ -394,14 +522,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
+
+            if (_showBackupReminder)
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.orange.shade300),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.cloud_upload,
+                        color: Colors.orange),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        "💡 Pensez à sauvegarder régulièrement sur le serveur "
+                            "pour permettre aux parents de retrouver leurs enfants "
+                            "et pour sécuriser vos données.",
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.orange),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close,
+                          size: 18, color: Colors.orange),
+                      onPressed: () =>
+                          setState(() => _showBackupReminder = false),
+                    ),
+                  ],
+                ),
+              ),
+
+            // ==================== NOM DE L'ÉCOLE ====================
             Row(
               children: [
                 Expanded(
                   child: TextField(
                     controller: nameController,
                     decoration: const InputDecoration(
-                      labelText: "Nom de l'établissement",
-                    ),
+                        labelText: "Nom de l'établissement"),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -411,12 +573,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+
+            if (appState.schoolCode != null)
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.indigo.withAlpha(15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline,
+                        size: 16, color: Colors.indigo),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Code école : ${appState.schoolCode}",
+                      style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.indigo),
+                    ),
+                    const SizedBox(width: 4),
+                    const Text(
+                      "(à retenir pour la reconnexion)",
+                      style: TextStyle(
+                          fontSize: 11, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
             const SizedBox(height: 20),
 
-            const Text(
-              "Gestion des Sections",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            // ==================== SECTIONS ====================
+            const Text("Gestion des Sections",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
             ElevatedButton.icon(
               icon: const Icon(Icons.add),
@@ -438,10 +630,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            const Text(
-              "Frais Mensuel par Section ou par Classe",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            // ==================== FRAIS MENSUEL ====================
+            const Text("Frais Mensuel par Section ou par Classe",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
               "Choisissez \"Toutes les classes\" pour fixer le frais de toute "
@@ -453,13 +645,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               value: selectedSectionForFee,
               isExpanded: true,
               items: widget.fraisScolaires.config.sections
-                  .map(
-                    (s) => DropdownMenuItem(value: s, child: Text(s)),
-              )
+                  .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                   .toList(),
               onChanged: (value) => setState(() {
-                selectedSectionForFee = value;
-                selectedClasseScopeForFee = null;
+                selectedSectionForFee        = value;
+                selectedClasseScopeForFee    = null;
               }),
             ),
             const SizedBox(height: 10),
@@ -475,9 +665,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           labelText:
                           "Ajouter une classe à \"$selectedSectionForFee\"",
                           hintText: "Ex: 1ère, 2ème, Niveau 1...",
-                          helperText: classesForFeeSection.isEmpty
-                              ? "Aucune classe pour cette section : ajoutez-en une ici"
-                              : null,
                         ),
                       ),
                     ),
@@ -487,11 +674,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         final value = newClasseController.text.trim();
                         if (value.isEmpty) return;
                         if (!await _verifyBackupPassword()) return;
-                        await widget.fraisScolaires
-                            .addClasseNumero(selectedSectionForFee!, value);
+                        await widget.fraisScolaires.addClasseNumero(
+                            selectedSectionForFee!, value);
                         newClasseController.clear();
                         if (mounted) {
-                          setState(() => selectedClasseScopeForFee = value);
+                          setState(() =>
+                          selectedClasseScopeForFee = value);
                         }
                       },
                       child: const Text("Ajouter"),
@@ -505,11 +693,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               hint: const Text("Toutes les classes"),
               items: [
                 const DropdownMenuItem<String>(
-                  value: null,
-                  child: Text("Toutes les classes"),
-                ),
-                ...classesForFeeSection
-                    .map((c) => DropdownMenuItem(value: c, child: Text(c))),
+                    value: null, child: Text("Toutes les classes")),
+                ...classesForFeeSection.map(
+                        (c) => DropdownMenuItem(value: c, child: Text(c))),
               ],
               onChanged: (value) =>
                   setState(() => selectedClasseScopeForFee = value),
@@ -533,17 +719,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   if (amount != null) {
                     if (selectedClasseScopeForFee == null) {
                       widget.fraisScolaires.config
-                          .feesBySection[selectedSectionForFee!] = amount;
+                          .feesBySection[selectedSectionForFee!] =
+                          amount;
                     } else {
                       final key =
                           "${selectedSectionForFee!}|${selectedClasseScopeForFee!}";
-                      widget.fraisScolaires.config.feesByClasse[key] = amount;
+                      widget.fraisScolaires.config
+                          .feesByClasse[key] = amount;
                     }
                     await widget.fraisScolaires.saveData();
                     if (mounted) {
                       setState(() {});
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Frais mis à jour")),
+                        const SnackBar(
+                            content: Text("Frais mis à jour")),
                       );
                     }
                   }
@@ -556,32 +745,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             if (selectedClasseScopeForFee != null &&
-                widget.fraisScolaires.config.feesByClasse.containsKey(
-                  "${selectedSectionForFee}|${selectedClasseScopeForFee}",
-                ))
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: TextButton.icon(
-                  icon: const Icon(Icons.delete_outline, color: Colors.red),
-                  label: Text(
-                    "Retirer l'exception pour $selectedClasseScopeForFee",
-                    style: const TextStyle(color: Colors.red),
-                  ),
-                  onPressed: () async {
-                    if (!await _verifyBackupPassword()) return;
-                    widget.fraisScolaires.config.feesByClasse.remove(
-                      "${selectedSectionForFee}|${selectedClasseScopeForFee}",
-                    );
-                    await widget.fraisScolaires.saveData();
-                    if (mounted) setState(() {});
-                  },
+                widget.fraisScolaires.config.feesByClasse
+                    .containsKey(
+                    "${selectedSectionForFee}|${selectedClasseScopeForFee}"))
+              TextButton.icon(
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+                label: Text(
+                  "Retirer l'exception pour $selectedClasseScopeForFee",
+                  style: const TextStyle(color: Colors.red),
                 ),
+                onPressed: () async {
+                  if (!await _verifyBackupPassword()) return;
+                  widget.fraisScolaires.config.feesByClasse
+                      .remove(
+                      "${selectedSectionForFee}|${selectedClasseScopeForFee}");
+                  await widget.fraisScolaires.saveData();
+                  if (mounted) setState(() {});
+                },
               ),
             if (classFeesForSection.isNotEmpty) ...[
               const SizedBox(height: 10),
               const Text(
                 "Frais spécifiques déjà définis pour cette section :",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, fontSize: 13),
               ),
               ...classFeesForSection.map((entry) {
                 final classeNumero = entry.key.split('|')[1];
@@ -589,22 +776,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   dense: true,
                   contentPadding: EdgeInsets.zero,
                   title: Text(classeNumero),
-                  trailing: Text("${entry.value.toStringAsFixed(0)} FC"),
+                  trailing:
+                  Text("${entry.value.toStringAsFixed(0)} FC"),
                 );
               }),
             ],
             const Divider(),
 
-            const Text(
-              "Exceptions par Mois, par Section ou par Classe",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              "Choisissez \"Toutes les classes\" pour appliquer l'exception à "
-                  "toute la section ce mois-là, ou une classe précise.",
-              style: TextStyle(color: Colors.grey, fontSize: 12),
-            ),
+            // ==================== EXCEPTIONS ====================
+            const Text("Exceptions par Mois, par Section ou par Classe",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
             DropdownButton<String>(
               value: selectedSectionForException,
@@ -614,8 +796,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                   .toList(),
               onChanged: (value) => setState(() {
-                selectedSectionForException = value;
-                selectedClasseScopeForException = null;
+                selectedSectionForException      = value;
+                selectedClasseScopeForException  = null;
               }),
             ),
             const SizedBox(height: 10),
@@ -625,14 +807,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               isExpanded: true,
               items: [
                 const DropdownMenuItem<String>(
-                  value: null,
-                  child: Text("Toutes les classes"),
-                ),
-                ...classesForExceptionSection
-                    .map((c) => DropdownMenuItem(value: c, child: Text(c))),
+                    value: null, child: Text("Toutes les classes")),
+                ...classesForExceptionSection.map(
+                        (c) => DropdownMenuItem(value: c, child: Text(c))),
               ],
-              onChanged: (value) =>
-                  setState(() => selectedClasseScopeForException = value),
+              onChanged: (value) => setState(
+                      () => selectedClasseScopeForException = value),
             ),
             const SizedBox(height: 10),
             DropdownButton<String>(
@@ -640,7 +820,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               hint: const Text("Choisir un mois"),
               isExpanded: true,
               items: widget.fraisScolaires.months
-                  .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                  .map((m) =>
+                  DropdownMenuItem(value: m, child: Text(m)))
                   .toList(),
               onChanged: (value) =>
                   setState(() => selectedMonthForException = value),
@@ -652,10 +833,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            const Text(
-              "Administrations & Répartition (%)",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            // ==================== ADMINISTRATIONS ====================
+            const Text("Administrations & Répartition (%)",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             ...widget.fraisScolaires.config.administrations
                 .map(
                   (admin) => ListTile(
@@ -675,21 +856,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
-            const Text(
-              "Année Scolaire",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            // ==================== ANNÉE SCOLAIRE ====================
+            const Text("Année Scolaire",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             DropdownButton<String>(
               value: selectedYear,
               isExpanded: true,
               items: [
                 ...widget.fraisScolaires.history.keys.map(
-                      (year) => DropdownMenuItem(value: year, child: Text(year)),
-                ),
+                        (year) => DropdownMenuItem(
+                        value: year, child: Text(year))),
                 const DropdownMenuItem(
-                  value: "Nouvelle Annee",
-                  child: Text("Créer nouvelle année"),
-                ),
+                    value: "Nouvelle Annee",
+                    child: Text("Créer nouvelle année")),
               ],
               onChanged: (value) async {
                 if (value == "Nouvelle Annee") {
@@ -701,25 +881,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       content: TextField(
                         controller: controller,
                         decoration: const InputDecoration(
-                          labelText: "Ex: 2026-2027",
-                        ),
+                            labelText: "Ex: 2026-2027"),
                       ),
                       actions: [
                         TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text("Annuler"),
-                        ),
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text("Annuler")),
                         ElevatedButton(
                           onPressed: () async {
                             if (controller.text.isNotEmpty) {
                               if (await _verifyBackupPassword()) {
                                 await widget.fraisScolaires
-                                    .changeYear(controller.text.trim());
+                                    .changeYear(
+                                    controller.text.trim());
                                 if (mounted) {
-                                  setState(
-                                        () => selectedYear =
-                                        controller.text.trim(),
-                                  );
+                                  setState(() => selectedYear =
+                                      controller.text.trim());
                                 }
                               }
                             }
@@ -741,26 +918,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(),
 
             // ==================== SYNCHRONISATION SERVEUR ====================
-            const Text(
-              "Synchronisation Serveur",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            const Text("Synchronisation Serveur",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
-            // ⚡ NOUVEAU : rappel visuel pour éviter la divergence de code
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.amber.shade50,
+                color: Colors.orange.shade50,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.shade200),
+                border: Border.all(color: Colors.orange.shade200),
               ),
               child: const Text(
-                "⚠️ Le code école doit être EXACTEMENT identique sur tous "
-                    "les appareils de cette école (Mac, PC, etc.). "
-                    "Un code différent d'un seul caractère crée une "
-                    "sauvegarde totalement séparée sur le serveur, et les "
-                    "parents ne retrouveront pas les élèves.",
-                style: TextStyle(fontSize: 12, color: Colors.brown),
+                "⚠️ Sauvegardez régulièrement pour que les parents "
+                    "puissent retrouver leurs enfants via l'app parent et "
+                    "pour récupérer vos données depuis n'importe quel PC.",
+                style: TextStyle(fontSize: 12, color: Colors.orange),
               ),
             ),
             const SizedBox(height: 10),
@@ -768,27 +941,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ElevatedButton.icon(
                 icon: const Icon(Icons.lock),
                 label: const Text("Définir Code École"),
-                onPressed: () => _setSchoolCode(context, appState),
+                onPressed: () =>
+                    _setSchoolCode(context, appState),
               )
             else
               ListTile(
                 title: const Text("Code de l'école"),
                 subtitle: Text(appState.schoolCode!),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.wifi_find),
-                      tooltip: "Vérifier ce code sur le serveur",
-                      onPressed: _syncing
-                          ? null
-                          : () => _checkSchoolCode(appState.schoolCode!),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.edit),
-                      onPressed: () => _setSchoolCode(context, appState),
-                    ),
-                  ],
+                trailing: IconButton(
+                  icon: const Icon(Icons.edit),
+                  onPressed: () =>
+                      _setSchoolCode(context, appState),
                 ),
               ),
             const SizedBox(height: 10),
@@ -796,7 +959,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ElevatedButton.icon(
                 icon: const Icon(Icons.password),
                 label: const Text("Définir Mot de Passe Sauvegarde"),
-                onPressed: () => _setBackupPassword(context, appState),
+                onPressed: () =>
+                    _setBackupPassword(context, appState),
               )
             else
               ListTile(
@@ -810,98 +974,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             const SizedBox(height: 15),
             ElevatedButton.icon(
-              icon: _syncing
-                  ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Colors.white),
-              )
-                  : const Icon(Icons.cloud_upload),
-              label: Text(_syncing
-                  ? "Sauvegarde en cours..."
-                  : "Sauvegarder sur le Serveur"),
-              onPressed: _syncing
-                  ? null
-                  : () async {
+              icon: const Icon(Icons.cloud_upload),
+              label: const Text("Sauvegarder sur le Serveur"),
+              onPressed: () async {
                 if (appState.schoolCode == null ||
                     appState.backupPassword == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content:
-                      Text("Définissez le code et le mot de passe"),
-                    ),
+                        content: Text(
+                            "Définissez le code et le mot de passe")),
                   );
                   return;
                 }
-                setState(() => _syncing = true);
-                final result = await widget.fraisScolaires.backupToServer(
+                // ⚡ CORRIGÉ — même correctif que dans _deconnexion() :
+                // backupToServer renvoie un Map<String, dynamic>, on en
+                // extrait le booléen 'success' et, si besoin, le vrai
+                // message d'erreur.
+                final result =
+                await widget.fraisScolaires.backupToServer(
                   appState.schoolCode!,
                   appState.backupPassword!,
                 );
-                setState(() => _syncing = false);
-                _showResultSnackBar(
-                  result['success'] == true,
-                  "✅ Sauvegarde réussie (code : ${appState.schoolCode})",
-                  result['error'] as String?,
-                );
+                final bool success = result['success'] == true;
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(success
+                          ? "✅ Sauvegarde réussie — les parents peuvent maintenant accéder aux données"
+                          : "❌ Erreur de sauvegarde : ${result['error'] ?? 'inconnue'}"),
+                      backgroundColor:
+                      success ? Colors.green : Colors.red,
+                      duration: Duration(seconds: success ? 3 : 6),
+                    ),
+                  );
+                }
               },
             ),
             const SizedBox(height: 10),
             ElevatedButton.icon(
-              icon: _syncing
-                  ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-                  : const Icon(Icons.cloud_download),
-              label: Text(_syncing
-                  ? "Récupération en cours..."
-                  : "Récupérer depuis le Serveur"),
-              onPressed: _syncing
-                  ? null
-                  : () async {
+              icon: const Icon(Icons.cloud_download),
+              label: const Text("Récupérer depuis le Serveur"),
+              onPressed: () async {
                 if (appState.schoolCode == null ||
                     appState.backupPassword == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content:
-                      Text("Définissez le code et le mot de passe"),
-                    ),
+                        content: Text(
+                            "Définissez le code et le mot de passe")),
                   );
                   return;
                 }
-                setState(() => _syncing = true);
+                // ⚡ CORRIGÉ — même correctif : restoreFromServer renvoie
+                // un Map<String, dynamic>, pas un bool.
                 final result =
                 await widget.fraisScolaires.restoreFromServer(
                   appState.schoolCode!,
                   appState.backupPassword!,
                 );
-                setState(() => _syncing = false);
-                if (result['success'] == true && mounted) {
-                  setState(() {});
+                final bool success = result['success'] == true;
+                if (success && mounted) {
+                  setState(() {
+                    selectedYear =
+                        widget.fraisScolaires.currentYear;
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                        content: Text(
+                            "✅ Données récupérées et fusionnées")),
+                  );
+                } else if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                          "❌ Échec : ${result['error'] ?? 'mot de passe incorrect ou aucune donnée'}"),
+                      duration: const Duration(seconds: 6),
+                    ),
+                  );
                 }
-                _showResultSnackBar(
-                  result['success'] == true,
-                  "✅ Données récupérées et fusionnées",
-                  result['error'] as String?,
-                );
               },
             ),
             const Divider(),
 
-            const Text(
-              "Imprimante Bluetooth",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            // ==================== IMPRIMANTE BLUETOOTH ====================
+            const Text("Imprimante Bluetooth",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
               "1. Couplez l'imprimante via Bluetooth dans les paramètres Windows.\n"
                   "2. Cliquez \"Détecter\" pour voir les ports COM disponibles.\n"
-                  "3. Choisissez le port de l'imprimante et cliquez \"Sauvegarder\".\n"
-                  "4. Testez avec \"Imprimer page de test\".\n"
-                  "Après ça, chaque paiement imprimera automatiquement le reçu.",
+                  "3. Choisissez le port et cliquez \"Sauvegarder\".\n"
+                  "4. Testez avec \"Imprimer page de test\".",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 12),
@@ -913,9 +1076,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     hint: const Text("Choisir un port COM"),
                     value: _selectedPort,
                     items: _availablePorts
-                        .map(
-                          (p) => DropdownMenuItem(value: p, child: Text(p)),
-                    )
+                        .map((p) => DropdownMenuItem(
+                        value: p, child: Text(p)))
                         .toList(),
                     onChanged: (val) {
                       if (val != null) _saveSelectedPort(val);
@@ -928,7 +1090,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ? const SizedBox(
                     width: 16,
                     height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2),
                   )
                       : const Icon(Icons.search),
                   label: const Text("Détecter"),
@@ -936,13 +1099,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 10),
             if (_selectedPort != null)
-              Text(
-                "Port actuel : $_selectedPort",
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: Colors.indigo,
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  "Port actuel : $_selectedPort",
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.indigo),
                 ),
               ),
             const SizedBox(height: 10),
@@ -952,34 +1116,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
+                    strokeWidth: 2, color: Colors.white),
               )
                   : const Icon(Icons.print),
-              label: Text(
-                _testingPrint
-                    ? "Impression en cours..."
-                    : "Imprimer page de test",
-              ),
+              label: Text(_testingPrint
+                  ? "Impression en cours..."
+                  : "Imprimer page de test"),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.indigo,
                 foregroundColor: Colors.white,
                 minimumSize: const Size(double.infinity, 48),
               ),
-              onPressed: (_selectedPort == null || _testingPrint)
+              onPressed:
+              (_selectedPort == null || _testingPrint)
                   ? null
                   : _testPrint,
             ),
             const Divider(),
 
+            // ==================== MODE SOMBRE ====================
             SwitchListTile(
               title: const Text("Mode Sombre"),
               value: appState.isDarkMode,
-              onChanged: (v) => appState.toggleTheme(),
+              onChanged: (_) => appState.toggleTheme(),
             ),
             const Divider(),
 
+            // ==================== DÉCONNEXION ====================
+            const SizedBox(height: 8),
             ElevatedButton.icon(
               icon: const Icon(Icons.logout, color: Colors.white),
               label: const Text(
@@ -989,48 +1153,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
+                padding:
+                const EdgeInsets.symmetric(vertical: 14),
+                minimumSize:
+                const Size(double.infinity, 52),
               ),
               onPressed: _deconnexion,
             ),
+            const SizedBox(height: 20),
           ],
         ),
       ),
     );
   }
 
-  // ⚡ NOUVEAU : vérifie l'existence du code école côté serveur
-  Future<void> _checkSchoolCode(String code) async {
-    setState(() => _syncing = true);
-    final result = await widget.fraisScolaires.checkSchoolCodeExists(code);
-    setState(() => _syncing = false);
-    if (!mounted) return;
-    if (result['exists'] == true) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            "✅ Code valide sur le serveur — école : \"${result['schoolName']}\"",
-          ),
-          backgroundColor: Colors.green,
-          duration: const Duration(seconds: 4),
-        ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            "❌ ${result['error']}\n"
-                "Ce code n'existe PAS encore sur le serveur : faites d'abord "
-                "\"Sauvegarder sur le Serveur\" ou vérifiez le code exact "
-                "utilisé sur les autres appareils de l'école.",
-          ),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 8),
-        ),
-      );
-    }
-  }
-
+  // ====================================================================
+  // GESTION DES SECTIONS
+  // ====================================================================
   void _addNewSection() async {
     if (!await _verifyBackupPassword()) return;
     final controller = TextEditingController();
@@ -1040,22 +1179,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text("Nouvelle Section"),
         content: TextField(
           controller: controller,
-          decoration: const InputDecoration(labelText: "Nom de la section"),
+          decoration:
+          const InputDecoration(labelText: "Nom de la section"),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               if (controller.text.trim().isNotEmpty) {
                 final newSection = controller.text.trim();
                 if (!widget.fraisScolaires.config.sections
                     .contains(newSection)) {
-                  widget.fraisScolaires.config.sections.add(newSection);
-                  widget.fraisScolaires.config.feesBySection[newSection] =
-                  35000;
+                  widget.fraisScolaires.config.sections
+                      .add(newSection);
+                  widget.fraisScolaires.config
+                      .feesBySection[newSection] = 35000;
                   widget.fraisScolaires.saveData();
                   if (mounted) setState(() {});
                 }
@@ -1074,77 +1214,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (widget.fraisScolaires.config.sections.length <= 1) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Vous devez garder au moins une section"),
-        ),
+            content:
+            Text("Vous devez garder au moins une section")),
       );
       return;
     }
     setState(() {
       widget.fraisScolaires.config.sections.remove(section);
       widget.fraisScolaires.config.feesBySection.remove(section);
-      widget.fraisScolaires.config.monthlyExceptionsBySection.remove(section);
+      widget.fraisScolaires.config.monthlyExceptionsBySection
+          .remove(section);
       widget.fraisScolaires.config.feesByClasse
           .removeWhere((key, _) => key.startsWith("$section|"));
       widget.fraisScolaires.config.monthlyExceptionsByClasse
           .removeWhere((key, _) => key.startsWith("$section|"));
-      widget.fraisScolaires.config.classesBySection.remove(section);
+      widget.fraisScolaires.config.classesBySection
+          .remove(section);
     });
     await widget.fraisScolaires.saveData();
   }
 
+  // ====================================================================
+  // EXCEPTIONS
+  // ====================================================================
   void _editExceptionForSection() async {
     if (selectedSectionForException == null ||
         selectedMonthForException == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Veuillez choisir une section et un mois"),
-        ),
+            content:
+            Text("Veuillez choisir une section et un mois")),
       );
       return;
     }
     if (!await _verifyBackupPassword()) return;
 
     final controller = TextEditingController();
-    final String scopeLabel =
+    final scopeLabel =
         selectedClasseScopeForException ?? "Toutes les classes";
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(
-          "Exception - $selectedMonthForException ($selectedSectionForException - $scopeLabel)",
-        ),
+            "Exception - $selectedMonthForException ($selectedSectionForException - $scopeLabel)"),
         content: TextField(
           controller: controller,
           keyboardType: TextInputType.number,
           decoration: const InputDecoration(
             labelText: "Montant (FC)",
-            helperText: "Laisser vide pour supprimer l'exception existante",
+            helperText:
+            "Laisser vide pour supprimer l'exception existante",
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final amount = double.tryParse(controller.text);
+              final amount =
+              double.tryParse(controller.text);
               if (selectedClasseScopeForException == null) {
                 if (amount != null) {
-                  widget.fraisScolaires.config.monthlyExceptionsBySection
-                      .putIfAbsent(selectedSectionForException!, () => {})
+                  widget.fraisScolaires.config
+                      .monthlyExceptionsBySection
+                      .putIfAbsent(
+                      selectedSectionForException!, () => {})
                   [selectedMonthForException!] = amount;
                 } else {
                   widget.fraisScolaires.config
-                      .monthlyExceptionsBySection[selectedSectionForException!]
+                      .monthlyExceptionsBySection[
+                  selectedSectionForException!]
                       ?.remove(selectedMonthForException);
                 }
               } else {
                 final key =
                     "${selectedSectionForException!}|${selectedClasseScopeForException!}";
                 if (amount != null) {
-                  widget.fraisScolaires.config.monthlyExceptionsByClasse
+                  widget.fraisScolaires.config
+                      .monthlyExceptionsByClasse
                       .putIfAbsent(key, () => {})
                   [selectedMonthForException!] = amount;
                 } else {
@@ -1166,7 +1315,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _addAdministration() async {
     if (!await _verifyBackupPassword()) return;
-    final nomController = TextEditingController();
+    final nomController     = TextEditingController();
     final percentController = TextEditingController();
     showDialog(
       context: context,
@@ -1176,28 +1325,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
-              controller: nomController,
-              decoration: const InputDecoration(labelText: "Nom"),
-            ),
+                controller: nomController,
+                decoration:
+                const InputDecoration(labelText: "Nom")),
             TextField(
               controller: percentController,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: "Pourcentage (%)"),
+              decoration: const InputDecoration(
+                  labelText: "Pourcentage (%)"),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final percent = double.tryParse(percentController.text);
-              if (nomController.text.isNotEmpty && percent != null) {
-                widget.fraisScolaires.config.administrations.add(
-                  Administration(nom: nomController.text, pourcentage: percent),
-                );
+              final percent =
+              double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty &&
+                  percent != null) {
+                widget.fraisScolaires.config.administrations
+                    .add(Administration(
+                  nom:         nomController.text,
+                  pourcentage: percent,
+                ));
                 widget.fraisScolaires.saveData();
                 if (mounted) setState(() {});
                 Navigator.pop(ctx);
@@ -1212,7 +1365,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _editAdministration(Administration admin) async {
     if (!await _verifyBackupPassword()) return;
-    final nomController = TextEditingController(text: admin.nom);
+    final nomController =
+    TextEditingController(text: admin.nom);
     final percentController =
     TextEditingController(text: admin.pourcentage.toString());
     showDialog(
@@ -1223,26 +1377,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
-              controller: nomController,
-              decoration: const InputDecoration(labelText: "Nom"),
-            ),
+                controller: nomController,
+                decoration:
+                const InputDecoration(labelText: "Nom")),
             TextField(
               controller: percentController,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: "Pourcentage (%)"),
+              decoration: const InputDecoration(
+                  labelText: "Pourcentage (%)"),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final percent = double.tryParse(percentController.text);
-              if (nomController.text.isNotEmpty && percent != null) {
-                admin.nom = nomController.text;
+              final percent =
+              double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty &&
+                  percent != null) {
+                admin.nom         = nomController.text;
                 admin.pourcentage = percent;
                 widget.fraisScolaires.saveData();
                 if (mounted) setState(() {});
@@ -1256,41 +1412,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ⚡ CORRIGÉ : le champ précise clairement l'importance de saisir le
-  // code IDENTIQUE à celui déjà utilisé sur les autres appareils, et le
-  // code est normalisé automatiquement par AppState.setSchoolCode()
-  // (trim + majuscules + suppression des espaces).
   void _setSchoolCode(BuildContext context, AppState appState) {
-    final codeController =
-    TextEditingController(text: appState.schoolCode ?? '');
+    final codeController = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Code de l'école"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "⚠️ Ce code doit être EXACTEMENT le même que celui utilisé sur "
-                  "les autres appareils de cette école (Mac, autre PC...). "
-                  "Un espace ou une lettre en trop créera une sauvegarde "
-                  "séparée et les parents ne retrouveront pas les élèves.",
-              style: TextStyle(fontSize: 12, color: Colors.red),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: codeController,
-              textCapitalization: TextCapitalization.characters,
-              decoration: const InputDecoration(labelText: "Code unique"),
-            ),
-          ],
+        title: const Text("Code de Récupération"),
+        content: TextField(
+          controller: codeController,
+          decoration:
+          const InputDecoration(labelText: "Code unique (ex: MAPENDO)"),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               if (codeController.text.trim().isNotEmpty) {
@@ -1315,21 +1451,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
           controller: passController,
           obscureText: true,
           decoration: const InputDecoration(
-            labelText: "Mot de passe (min 6 caractères)",
-          ),
+              labelText: "Mot de passe (min 6 caractères)"),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               if (passController.text.trim().length >= 6) {
-                appState.setBackupPassword(passController.text.trim());
+                appState.setBackupPassword(
+                    passController.text.trim());
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Mot de passe enregistré")),
+                  const SnackBar(
+                      content: Text("Mot de passe enregistré")),
                 );
               }
             },

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'dart:convert';
 import 'dart:io';
 import '../app_state.dart';
+import '../frais_scolaires.dart';
 import 'school_home_screen.dart';
 
 const String _serverUrl = "https://jsinf.onrender.com";
@@ -16,15 +17,15 @@ class RecoveryScreen extends StatefulWidget {
 }
 
 class _RecoveryScreenState extends State<RecoveryScreen> {
-  // Étape courante : 'enter_id' | 'first_setup' | 'login'
-  String _step = 'enter_id';
+  String _mode = 'select';
 
-  final _idController       = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _confirmController  = TextEditingController();
+  final _idController         = TextEditingController();
+  final _codeController       = TextEditingController();
+  final _passwordController   = TextEditingController();
+  final _confirmController    = TextEditingController();
 
-  bool    _isLoading    = false;
-  bool    _obscure      = true;
+  bool    _isLoading   = false;
+  bool    _obscure     = true;
   String? _errorMsg;
 
   String? _schoolName;
@@ -32,27 +33,41 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   String? _city;
   String? _director;
 
-  // ====================================================================
-  // ⚡ NOUVEAU — Nettoyage robuste de l'ID saisi/collé.
-  //
-  // Sur Windows, un copier-coller depuis WhatsApp, un PDF, Word ou un
-  // email peut insérer des espaces insécables (U+00A0), des retours à
-  // la ligne, des tabulations ou des espaces au milieu du texte — invi-
-  // sibles à l'œil. Sur Mac, le comportement du presse-papier est
-  // souvent plus "propre", ce qui peut donner l'impression que "ça
-  // marche sur Mac mais pas sur PC" alors que la vraie cause est un ID
-  // mal collé. On retire donc TOUS les espaces/caractères invisibles,
-  // pas seulement ceux en début/fin.
-  // ====================================================================
-  String _sanitizeId(String raw) {
-    return raw
-        .trim()
-        .toUpperCase()
-        .replaceAll('\u00A0', '')      // espace insécable
-        .replaceAll(RegExp(r'\s+'), ''); // tout espace/tab/retour ligne
+  @override
+  void dispose() {
+    _idController.dispose();
+    _codeController.dispose();
+    _passwordController.dispose();
+    _confirmController.dispose();
+    super.dispose();
   }
 
-  String _sanitizeCode(String raw) {
+  void _reset() {
+    setState(() {
+      _mode       = 'select';
+      _errorMsg   = null;
+      _schoolName = null;
+      _schoolCode = null;
+      _city       = null;
+      _director   = null;
+      _idController.clear();
+      _codeController.clear();
+      _passwordController.clear();
+      _confirmController.clear();
+    });
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — Nettoyage robuste de l'ID/code saisi ou collé.
+  //
+  // Un copier-coller depuis WhatsApp, Word ou un email peut insérer des
+  // espaces insécables ou des retours à la ligne invisibles au milieu du
+  // texte. .trim() seul ne retire que les espaces en début/fin. Sur
+  // Windows en particulier, ce genre de collage "sale" est fréquent et
+  // peut faire échouer une vérification d'ID qui semble pourtant
+  // identique à l'œil nu.
+  // ====================================================================
+  String _sanitize(String raw) {
     return raw
         .trim()
         .toUpperCase()
@@ -61,10 +76,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   }
 
   // ====================================================================
-  // ÉTAPE 1 — Vérification de l'ID
+  // FLUX 1 — Vérification de l'ID de registration (EDU-XXXX)
   // ====================================================================
-  Future<void> _verifyId() async {
-    final id = _sanitizeId(_idController.text);
+  Future<void> _verifyRegistrationId() async {
+    final id = _sanitize(_idController.text);
     if (id.isEmpty) {
       setState(() => _errorMsg = "Veuillez entrer votre ID de connexion.");
       return;
@@ -86,26 +101,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         final data = jsonDecode(response.body);
 
         if (data['valid'] == true) {
-          // ✅ Première connexion — activation
           setState(() {
             _schoolName = data['school_name'];
             _schoolCode = data['school_code'];
             _city       = data['city'];
             _director   = data['director'];
-            _step       = 'first_setup';
+            _mode       = 'first_setup';
             _errorMsg   = null;
           });
         } else if (data['already_used'] == true) {
-          // ✅ École déjà activée → login normal
-          // ⚡ On récupère le VRAI school_code depuis le serveur au lieu
-          // d'utiliser l'ID de registration comme school_code.
-          await _fetchRealSchoolCode(id, data);
+          await _fetchSchoolCodeThenLogin(id, data);
         } else {
-          setState(() => _errorMsg = data['error'] ?? 'ID invalide.');
+          setState(() => _errorMsg = data['error'] ??
+              "ID invalide. Vérifiez auprès de l'administrateur EduPay.");
         }
       } else {
-        // ⚡ CORRIGÉ : on affiche le vrai statut/contenu au lieu d'un
-        // message générique, pour pouvoir diagnostiquer sur le PC.
         setState(() => _errorMsg =
         "Erreur serveur (statut ${response.statusCode}).\n${response.body}");
       }
@@ -113,10 +123,6 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       setState(() => _errorMsg =
       "Aucune connexion réseau détectée sur cet appareil.\n"
           "Vérifiez votre connexion internet et le pare-feu Windows.\n"
-          "Détail technique : $e");
-    } on HandshakeException catch (e) {
-      setState(() => _errorMsg =
-      "Erreur de certificat de sécurité (TLS) sur cet appareil.\n"
           "Détail technique : $e");
     } catch (e) {
       setState(() =>
@@ -126,15 +132,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     }
   }
 
-  // ====================================================================
-  // ⚡ CORRECTIF PROBLÈME 2
-  // Récupère le vrai school_code (ex: "MAPENDO") à partir de l'ID
-  // de registration (ex: "EDU-A3K9-BZ12-Q7M4").
-  // Sans ça, le school_code était l'ID EDU-XXXX lui-même, ce qui
-  // causait le backup sous le mauvais nom de fichier sur le serveur,
-  // rendant les élèves introuvables depuis l'app parent.
-  // ====================================================================
-  Future<void> _fetchRealSchoolCode(
+  Future<void> _fetchSchoolCodeThenLogin(
       String regId, Map<String, dynamic> verifyData) async {
     try {
       final response = await http.post(
@@ -146,31 +144,27 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['found'] == true) {
-          if (mounted) {
-            setState(() {
-              // ⚡ Normalisation systématique pour éviter toute
-              // divergence de casse/espaces entre appareils.
-              _schoolCode = _sanitizeCode(data['school_code'] as String);
-              _schoolName = data['school_name'];
-              _step       = 'login';
-              _errorMsg   = null;
-            });
-          }
+          setState(() {
+            _schoolCode = _sanitize(data['school_code'] as String);
+            _schoolName = data['school_name'];
+            _codeController.text = _schoolCode ?? '';
+            _mode       = 'login';
+            _errorMsg   = null;
+          });
           return;
         }
       }
     } catch (_) {
-      // Si le réseau échoue, on essaie avec les données déjà reçues
-      // (voir fallback ci-dessous).
+      // On tente le fallback ci-dessous en cas d'échec réseau.
     }
 
-    // Fallback : utiliser les données du verify_registration_id si disponibles
     if (verifyData['school_code'] != null) {
       setState(() {
-        _schoolCode = _sanitizeCode(verifyData['school_code'] as String);
+        _schoolCode = _sanitize(verifyData['school_code'] as String);
         _schoolName = verifyData['school_name'] ?? "Votre école";
-        _step       = 'login';
-        _errorMsg   = null;
+        _codeController.text = _schoolCode ?? '';
+        _mode     = 'login';
+        _errorMsg = null;
       });
     } else {
       setState(() => _errorMsg =
@@ -180,7 +174,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   }
 
   // ====================================================================
-  // ÉTAPE 2 — Première activation
+  // FLUX 1b — Activation (première connexion)
   // ====================================================================
   Future<void> _activateSchool() async {
     final password = _passwordController.text.trim();
@@ -206,7 +200,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         Uri.parse('$_serverUrl/school/activate'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'registration_id': _sanitizeId(_idController.text),
+          'registration_id': _sanitize(_idController.text),
           'password':        password,
           'school_name':     _schoolName,
         }),
@@ -216,9 +210,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         final data = jsonDecode(response.body);
         if (mounted) {
           final appState = Provider.of<AppState>(context, listen: false);
-          // ⚡ On sauvegarde le VRAI school_code retourné par le serveur,
-          // normalisé pour rester identique sur tous les appareils.
-          final realCode = _sanitizeCode(data['school_code'] as String);
+          final realCode = _sanitize(data['school_code'] as String);
           await appState.setSchoolCode(realCode);
           await appState.updateSchoolName(data['school_name']);
           await appState.setBackupPassword(password);
@@ -229,7 +221,6 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         try {
           err = jsonDecode(response.body)['error'] ?? err;
         } catch (_) {}
-        // ⚡ CORRIGÉ : on ajoute le statut HTTP pour le diagnostic.
         setState(() => _errorMsg = "$err (statut ${response.statusCode})");
       }
     } on SocketException catch (e) {
@@ -246,17 +237,18 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   }
 
   // ====================================================================
-  // ÉTAPE 3 — Login normal
+  // FLUX 2 — Connexion avec code école + mot de passe
   // ====================================================================
-  Future<void> _loginWithPassword() async {
+  Future<void> _loginWithCodeAndPassword() async {
+    final code     = _sanitize(_codeController.text);
     final password = _passwordController.text.trim();
-    if (password.isEmpty) {
-      setState(() => _errorMsg = "Veuillez entrer votre mot de passe.");
+
+    if (code.isEmpty) {
+      setState(() => _errorMsg = "Veuillez entrer le code de votre école.");
       return;
     }
-    if (_schoolCode == null) {
-      setState(() => _errorMsg =
-      "Code école introuvable. Recommencez depuis l'étape 1.");
+    if (password.isEmpty) {
+      setState(() => _errorMsg = "Veuillez entrer votre mot de passe.");
       return;
     }
 
@@ -266,12 +258,11 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     });
 
     try {
-      // ⚡ On utilise le VRAI school_code (ex: "MAPENDO"), pas l'ID EDU-XXXX
       final verifyResponse = await http.post(
         Uri.parse('$_serverUrl/verify_password'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'school_code': _schoolCode,
+          'school_code': code,
           'password':    password,
         }),
       ).timeout(const Duration(seconds: 15));
@@ -279,44 +270,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       if (verifyResponse.statusCode == 200) {
         final vData = jsonDecode(verifyResponse.body);
         if (vData['valid'] == true) {
-          if (mounted) {
-            final appState =
-            Provider.of<AppState>(context, listen: false);
-            await appState.setSchoolCode(_schoolCode!);
-            await appState.setBackupPassword(password);
-
-            // Récupérer le nom officiel de l'école
-            try {
-              final restoreResponse = await http.get(
-                Uri.parse('$_serverUrl/restore?school_code=$_schoolCode'),
-              ).timeout(const Duration(seconds: 10));
-              if (restoreResponse.statusCode == 200) {
-                final rData = jsonDecode(restoreResponse.body);
-                final name  = rData['config']?['schoolName'] ?? '';
-                if (name.isNotEmpty) {
-                  await appState.updateSchoolName(name);
-                }
-              }
-            } catch (_) {
-              // Si le restore échoue, on continue quand même
-              if (_schoolName != null) {
-                await appState.updateSchoolName(_schoolName!);
-              }
-            }
-
-            _goToHome();
-          }
+          await _restoreAllData(code, password);
         } else {
           setState(() => _errorMsg = "Mot de passe incorrect.");
         }
       } else if (verifyResponse.statusCode == 404) {
-        // ⚡ CORRIGÉ : message précis + statut, c'est exactement le cas
-        // où le backup n'a jamais atteint le serveur pour ce school_code.
         setState(() => _errorMsg =
-        "Aucune sauvegarde trouvée sur le serveur pour le code "
-            "\"$_schoolCode\".\n"
-            "Assurez-vous d'avoir fait \"Sauvegarder sur le Serveur\" "
-            "au moins une fois depuis un appareil connecté à internet.");
+        "Code école introuvable sur le serveur.\n"
+            "Vérifiez le code (ex: MAPENDO) et assurez-vous d'avoir "
+            "effectué au moins une sauvegarde depuis un appareil "
+            "connecté à internet.");
       } else {
         setState(() => _errorMsg =
         "Erreur serveur (statut ${verifyResponse.statusCode}).\n"
@@ -335,8 +298,55 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     }
   }
 
+  Future<void> _restoreAllData(String code, String password) async {
+    try {
+      final restoreResponse = await http.get(
+        Uri.parse('$_serverUrl/restore?school_code=$code'),
+      ).timeout(const Duration(seconds: 20));
+
+      if (restoreResponse.statusCode == 200) {
+        final data       = jsonDecode(restoreResponse.body);
+        final schoolName = data['config']?['schoolName'] ?? code;
+
+        if (mounted) {
+          final appState = Provider.of<AppState>(context, listen: false);
+          await appState.setSchoolCode(code);
+          await appState.updateSchoolName(schoolName);
+          await appState.setBackupPassword(password);
+
+          final fraisScolaires = FraisScolaires();
+          fraisScolaires.schoolCode = code;
+          await fraisScolaires.loadData();
+          // ⚡ CORRIGÉ — AVANT : fraisScolaires._mergeRestoredData(data)
+          // appelait une méthode PRIVÉE depuis un autre fichier, ce qui
+          // est une ERREUR DE COMPILATION en Dart. La méthode a été
+          // renommée en publique (mergeRestoredData) dans
+          // frais_scolaires.dart, donc cet appel est maintenant valide.
+          await fraisScolaires.mergeRestoredData(data);
+          await fraisScolaires.saveData();
+
+          await _showReconnectedDialog(schoolName);
+        }
+      } else if (restoreResponse.statusCode == 404) {
+        setState(() => _errorMsg =
+        "Aucune sauvegarde trouvée sur le serveur pour ce code.");
+      } else {
+        setState(() => _errorMsg =
+        "Impossible de récupérer les données du serveur "
+            "(statut ${restoreResponse.statusCode}).");
+      }
+    } on SocketException catch (e) {
+      setState(() => _errorMsg =
+      "Aucune connexion réseau détectée sur cet appareil.\n"
+          "Détail technique : $e");
+    } catch (e) {
+      setState(() => _errorMsg =
+      "Erreur lors de la récupération des données : $e");
+    }
+  }
+
   // ====================================================================
-  // DIALOGUE DE BIENVENUE
+  // DIALOGUES
   // ====================================================================
   Future<void> _showWelcomeDialog(String schoolName) async {
     await showDialog(
@@ -352,8 +362,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             const SizedBox(height: 16),
             const Text(
               "Bienvenue sur EduPay !",
-              style: TextStyle(
-                  fontSize: 20, fontWeight: FontWeight.bold),
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
@@ -369,9 +378,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             const SizedBox(height: 12),
             const Text(
               "Votre compte a été activé avec succès.\n"
-                  "Vous pouvez maintenant gérer vos frais scolaires.",
+                  "Pensez à sauvegarder régulièrement vos\n"
+                  "données dans les Paramètres.",
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
           ],
         ),
@@ -390,6 +400,65 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 _goToHome();
               },
               child: const Text("Commencer"),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showReconnectedDialog(String schoolName) async {
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_done,
+                size: 64, color: Colors.green),
+            const SizedBox(height: 16),
+            const Text(
+              "Reconnexion réussie !",
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              schoolName,
+              style: const TextStyle(
+                fontSize: 16,
+                color: Colors.green,
+                fontWeight: FontWeight.w600,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              "Toutes vos données ont été récupérées\n"
+                  "depuis le serveur central EduPay.",
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
+          ],
+        ),
+        actions: [
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+              onPressed: () {
+                Navigator.pop(ctx);
+                _goToHome();
+              },
+              child: const Text("Continuer"),
             ),
           ),
         ],
@@ -432,16 +501,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                _stepSubtitle(),
+                _subtitle(),
                 textAlign: TextAlign.center,
-                style:
-                const TextStyle(color: Colors.grey, fontSize: 14),
+                style: const TextStyle(color: Colors.grey, fontSize: 14),
               ),
               const SizedBox(height: 40),
 
-              if (_step == 'enter_id')   _buildEnterIdStep(),
-              if (_step == 'first_setup') _buildFirstSetupStep(),
-              if (_step == 'login')      _buildLoginStep(),
+              if (_mode == 'select')   _buildSelectMode(),
+              if (_mode == 'new_id')   _buildNewIdStep(),
+              if (_mode == 'first_setup') _buildFirstSetupStep(),
+              if (_mode == 'login')    _buildLoginStep(),
 
               if (_errorMsg != null) ...[
                 const SizedBox(height: 16),
@@ -468,20 +537,106 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     );
   }
 
-  String _stepSubtitle() {
-    switch (_step) {
-      case 'enter_id':
-        return "Entrez l'ID de connexion fourni\npar l'administrateur EduPay";
+  String _subtitle() {
+    switch (_mode) {
+      case 'select':
+        return "Bienvenue — Comment voulez-vous continuer ?";
+      case 'new_id':
+        return "Entrez l'ID fourni par l'administrateur EduPay";
       case 'first_setup':
         return "Première connexion — Définissez votre mot de passe";
       case 'login':
-        return "Reconnectez-vous à votre compte";
+        return "Reconnectez-vous à votre compte existant";
       default:
         return '';
     }
   }
 
-  Widget _buildEnterIdStep() {
+  Widget _buildSelectMode() {
+    return Column(
+      children: [
+        _optionCard(
+          icon: Icons.vpn_key,
+          color: Colors.indigo,
+          title: "Première connexion",
+          subtitle: "J'ai reçu un ID de l'administrateur EduPay\n(format : EDU-XXXX-XXXX-XXXX)",
+          onTap: () => setState(() {
+            _mode     = 'new_id';
+            _errorMsg = null;
+          }),
+        ),
+        const SizedBox(height: 16),
+        _optionCard(
+          icon: Icons.login,
+          color: Colors.green,
+          title: "Se connecter",
+          subtitle: "J'ai déjà un compte — j'entre mon code école\net mon mot de passe pour récupérer mes données",
+          onTap: () => setState(() {
+            _mode     = 'login';
+            _errorMsg = null;
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _optionCard({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: color.withAlpha(15),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: color.withAlpha(60)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: color.withAlpha(30),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: color, size: 28),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: color,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                        fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.arrow_forward_ios, size: 16, color: color),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNewIdStep() {
     return Column(
       children: [
         TextField(
@@ -490,17 +645,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           decoration: InputDecoration(
             labelText: "ID de connexion",
             hintText: "Ex: EDU-A3K9-BZ12-Q7M4",
-            prefixIcon:
-            const Icon(Icons.vpn_key, color: Colors.indigo),
+            prefixIcon: const Icon(Icons.vpn_key, color: Colors.indigo),
             border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12)),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(
-                  color: Colors.indigo, width: 2),
+              borderSide:
+              const BorderSide(color: Colors.indigo, width: 2),
             ),
           ),
-          onSubmitted: (_) => _verifyId(),
+          onSubmitted: (_) => _verifyRegistrationId(),
         ),
         const SizedBox(height: 20),
         SizedBox(
@@ -513,7 +667,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
             ),
-            onPressed: _isLoading ? null : _verifyId,
+            onPressed: _isLoading ? null : _verifyRegistrationId,
             child: _isLoading
                 ? const SizedBox(
               width: 22,
@@ -525,12 +679,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 style: TextStyle(fontSize: 16)),
           ),
         ),
-        const SizedBox(height: 20),
-        const Text(
-          "Cet ID vous est remis par l'administrateur\n"
-              "EduPay lors de l'enregistrement de votre école.",
-          textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 12, color: Colors.grey),
+        const SizedBox(height: 12),
+        TextButton(
+          onPressed: _reset,
+          child: const Text("← Retour"),
         ),
       ],
     );
@@ -585,18 +737,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             labelText: "Mot de passe (min 6 caractères)",
             prefixIcon: const Icon(Icons.lock),
             suffixIcon: IconButton(
-              icon: Icon(_obscure
-                  ? Icons.visibility
-                  : Icons.visibility_off),
-              onPressed: () =>
-                  setState(() => _obscure = !_obscure),
+              icon: Icon(
+                  _obscure ? Icons.visibility : Icons.visibility_off),
+              onPressed: () => setState(() => _obscure = !_obscure),
             ),
             border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12)),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(
-                  color: Colors.indigo, width: 2),
+              borderSide:
+              const BorderSide(color: Colors.indigo, width: 2),
             ),
           ),
         ),
@@ -611,8 +761,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 borderRadius: BorderRadius.circular(12)),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(
-                  color: Colors.indigo, width: 2),
+              borderSide:
+              const BorderSide(color: Colors.indigo, width: 2),
             ),
           ),
           onSubmitted: (_) => _activateSchool(),
@@ -643,7 +793,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         const SizedBox(height: 12),
         TextButton(
           onPressed: () => setState(() {
-            _step     = 'enter_id';
+            _mode     = 'new_id';
             _errorMsg = null;
           }),
           child: const Text("← Retour"),
@@ -655,19 +805,39 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   Widget _buildLoginStep() {
     return Column(
       children: [
-        if (_schoolName != null && _schoolName != "Votre école")
-          Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: Text(
-              _schoolName!,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.indigo,
-              ),
-              textAlign: TextAlign.center,
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.blue.shade200),
+          ),
+          child: const Text(
+            "ℹ️ Le code école est visible dans Paramètres → "
+                "\"Code de l'école\" (ex: MAPENDO, AMANI...).\n"
+                "Il vous a été envoyé lors de votre première connexion.",
+            style: TextStyle(fontSize: 12, color: Colors.blueGrey),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _codeController,
+          textCapitalization: TextCapitalization.characters,
+          decoration: InputDecoration(
+            labelText: "Code de l'école",
+            hintText: "Ex: MAPENDO",
+            prefixIcon: const Icon(Icons.school, color: Colors.green),
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12)),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide:
+              const BorderSide(color: Colors.green, width: 2),
             ),
           ),
+        ),
+        const SizedBox(height: 12),
         TextField(
           controller: _passwordController,
           obscureText: _obscure,
@@ -675,21 +845,19 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             labelText: "Mot de passe",
             prefixIcon: const Icon(Icons.lock),
             suffixIcon: IconButton(
-              icon: Icon(_obscure
-                  ? Icons.visibility
-                  : Icons.visibility_off),
-              onPressed: () =>
-                  setState(() => _obscure = !_obscure),
+              icon: Icon(
+                  _obscure ? Icons.visibility : Icons.visibility_off),
+              onPressed: () => setState(() => _obscure = !_obscure),
             ),
             border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12)),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(
-                  color: Colors.indigo, width: 2),
+              borderSide:
+              const BorderSide(color: Colors.green, width: 2),
             ),
           ),
-          onSubmitted: (_) => _loginWithPassword(),
+          onSubmitted: (_) => _loginWithCodeAndPassword(),
         ),
         const SizedBox(height: 20),
         SizedBox(
@@ -697,12 +865,12 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           height: 52,
           child: ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.indigo,
+              backgroundColor: Colors.green,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
             ),
-            onPressed: _isLoading ? null : _loginWithPassword,
+            onPressed: _isLoading ? null : _loginWithCodeAndPassword,
             child: _isLoading
                 ? const SizedBox(
               width: 22,
@@ -710,18 +878,23 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               child: CircularProgressIndicator(
                   strokeWidth: 2, color: Colors.white),
             )
-                : const Text("Se connecter",
-                style: TextStyle(fontSize: 16)),
+                : const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.cloud_download, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  "Se connecter et récupérer mes données",
+                  style: TextStyle(fontSize: 15),
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 12),
         TextButton(
-          onPressed: () => setState(() {
-            _step     = 'enter_id';
-            _errorMsg = null;
-            _passwordController.clear();
-          }),
-          child: const Text("← Utiliser un autre ID"),
+          onPressed: _reset,
+          child: const Text("← Retour"),
         ),
       ],
     );

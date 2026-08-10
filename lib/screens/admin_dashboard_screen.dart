@@ -23,18 +23,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     "Utilisateur Secondaire 1"
   ];
 
-  // ==================== PAIEMENTS EN ATTENTE ====================
   List<Map<String, dynamic>> pendingPayments = [];
   bool hasPendingPayments = false;
   bool isValidating = false;
   bool isRefreshing = false;
 
-  // ==================== VÉRIFICATION MOT DE PASSE ADMIN ====================
-  //
-  // Méthode réutilisable qui affiche une boîte de dialogue demandant le
-  // mot de passe de sauvegarde (backupPassword de AppState, le même que
-  // dans les Paramètres). Retourne true si le mot de passe est correct,
-  // false sinon (annulation ou mot de passe incorrect).
   Future<bool> _verifyAdminPassword() async {
     final appState = Provider.of<AppState>(context, listen: false);
 
@@ -97,7 +90,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     return result ?? false;
   }
 
-  // ==================== RAFRAÎCHIR ET RÉCUPÉRER LES PAIEMENTS EN ATTENTE ====================
   Future<void> _refreshData() async {
     final appState = Provider.of<AppState>(context, listen: false);
 
@@ -121,9 +113,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     setState(() => isRefreshing = true);
 
     try {
-      // ⚡ CORRIGÉ : restoreFromServer renvoie désormais un
-      // Map<String, dynamic> contenant 'success' (bool) et, en cas
-      // d'échec, 'error' (String) avec le vrai message d'erreur.
       final Map<String, dynamic> restoreResult =
       await widget.fraisScolaires.restoreFromServer(
         appState.schoolCode!,
@@ -196,7 +185,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }
   }
 
-  // ==================== OUVRIR LA VALIDATION MANUELLE ====================
   void _showPendingPaymentsDialog() {
     showDialog(
       context: context,
@@ -244,7 +232,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  // ==================== VALIDATION RÉELLE CÔTÉ SERVEUR ====================
   Future<void> _validateAllPayments() async {
     final appState = Provider.of<AppState>(context, listen: false);
 
@@ -252,6 +239,21 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text("Code école manquant"),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    // ⚡ CORRIGÉ — AVANT : appState.backupPassword! était utilisé plus
+    // bas sans jamais vérifier qu'il n'était pas null, ce qui pouvait
+    // provoquer un crash (null check operator used on a null value) si
+    // l'administrateur n'avait pas encore défini de mot de passe de
+    // sauvegarde au moment de valider des paiements.
+    if (appState.backupPassword == null || appState.backupPassword!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Mot de passe de sauvegarde manquant"),
           backgroundColor: Colors.red,
         ),
       );
@@ -275,9 +277,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
-        // ⚡ CORRIGÉ : restoreFromServer renvoie désormais un
-        // Map<String, dynamic> contenant 'success' (bool) et, en cas
-        // d'échec, 'error' (String) avec le vrai message d'erreur.
         final Map<String, dynamic> restoreResult =
         await widget.fraisScolaires.restoreFromServer(
           appState.schoolCode!,
@@ -340,12 +339,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }
   }
 
-  // ==================== GÉNÉRATION DE CLÉ (SÉCURISÉE) ====================
-  //
-  // Avant de contacter le serveur pour générer la clé, on vérifie
-  // systématiquement l'identité de l'administrateur via son mot de passe
-  // de sauvegarde. Une clé d'accès donne accès aux données de toute
-  // l'école sur le serveur central : cette protection est donc nécessaire.
   Future<void> _generateKey() async {
     final appState = Provider.of<AppState>(context, listen: false);
 
@@ -361,7 +354,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       return;
     }
 
-    // --- Vérification du mot de passe avant toute génération ---
     final bool authorized = await _verifyAdminPassword();
     if (!authorized) return;
 
@@ -423,7 +415,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  // ==================== BUILD ====================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -451,7 +442,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ---- Génération de Clé d'Accès ----
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -512,7 +502,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ),
               const SizedBox(height: 20),
 
-              // ---- Clés générées ----
               const Text(
                 "Clés Générées",
                 style:
@@ -554,7 +543,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 ),
               const SizedBox(height: 30),
 
-              // ---- Bouton validation / rafraîchissement ----
               if (hasPendingPayments)
                 ElevatedButton.icon(
                   icon: isValidating
@@ -598,7 +586,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 ),
               const SizedBox(height: 30),
 
-              // ---- Utilisateurs connectés ----
               const Text(
                 "Utilisateurs Connectés",
                 style:
@@ -620,7 +607,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ),
               const SizedBox(height: 30),
 
-              // ---- Paiements en attente (récapitulatif) ----
               const Text(
                 "Paiements en Attente de Validation",
                 style:
