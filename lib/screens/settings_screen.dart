@@ -1,6 +1,11 @@
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:image/image.dart' as img;
 import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
@@ -28,12 +33,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? selectedClasseScopeForException;
   final TextEditingController newClasseController = TextEditingController();
 
-  // ⚡ CORRIGÉ — Imprimante Epson TM-T20III en USB (via spouleur Windows),
+  // ⚡ Imprimante Epson TM-T20III en USB (via spouleur Windows),
   // remplace l'ancienne détection de ports COM Bluetooth.
   List<String> _availablePrinters = [];
   String?      _selectedPrinterName;
   bool         _loadingPrinters = false;
   bool         _testingPrint    = false;
+
+  // ⚡ NOUVEAU — Logo de l'école imprimé sur les reçus (gauche + droite,
+  // avec le nom de l'établissement centré entre les deux).
+  Uint8List? _logoBytes;
+  bool       _loadingLogo = false;
 
   bool _showBackupReminder = true;
 
@@ -47,13 +57,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ? widget.fraisScolaires.config.sections.first
         : null;
     _loadPrinterConfig();
+    _loadSavedLogo();
   }
 
   Future<void> _loadPrinterConfig() async {
     final prefs = await SharedPreferences.getInstance();
-    // ⚡ CORRIGÉ — nouvelle clé de préférence : on stocke maintenant le
-    // NOM de l'imprimante Windows (ex: "EPSON TM-T20III Receipt") au lieu
-    // d'un port COM Bluetooth.
+    // ⚡ Clé de préférence : on stocke le NOM de l'imprimante Windows
+    // (ex: "EPSON TM-T20III Receipt") au lieu d'un port COM Bluetooth.
     final saved = prefs.getString('printer_name');
     if (saved != null && saved.isNotEmpty) {
       setState(() => _selectedPrinterName = saved);
@@ -125,22 +135,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ====================================================================
   // NOM DE L'ÉCOLE
   // ====================================================================
-  // ⚡ CORRIGÉ — AVANT, cette fonction appelait `_verifyBackupPassword()`
-  // en tout premier, et si aucun mot de passe de sauvegarde n'avait
-  // encore été défini (cas très courant pour une école qui n'a jamais
-  // configuré la synchronisation serveur), la fonction retournait `false`
-  // et la sauvegarde du nom était SILENCIEUSEMENT annulée : seul un
-  // SnackBar discret apparaissait, `config.schoolName` ne changeait
-  // jamais, et le nom par défaut "EduPay School RDC" continuait donc
-  // d'apparaître sur tous les PDF et reçus générés — même après avoir
-  // "enregistré" un nouveau nom dans les Paramètres.
-  //
-  // MAINTENANT : le nom de l'école est une information locale, pas une
-  // action sensible liée à la synchronisation serveur — elle n'exige
-  // donc plus de mot de passe pour être enregistrée. Elle met à jour à
-  // la fois `fraisScolaires.config.schoolName` (source utilisée pour les
-  // PDF et les reçus imprimés) ET `appState.schoolName` (utilisé pour
-  // les titres d'écran), pour que les deux restent toujours synchronisés.
   void _saveSchoolName() async {
     final newName = nameController.text.trim();
     if (newName.isEmpty) {
@@ -417,8 +411,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ====================================================================
-  // IMPRIMANTE — ⚡ CORRIGÉ : détection des imprimantes Windows (Epson
-  // TM-T20III en USB) au lieu des ports COM Bluetooth.
+  // IMPRIMANTE — détection des imprimantes Windows (Epson TM-T20III en USB).
   // ====================================================================
   Future<void> _detectPrinters() async {
     setState(() => _loadingPrinters = true);
@@ -457,6 +450,109 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  // ====================================================================
+  // ⚡ NOUVEAU — LOGO DE L'ÉCOLE POUR LES REÇUS
+  // ====================================================================
+  // Le logo est stocké localement sur ce PC (comme le nom de
+  // l'imprimante), pas dans la sauvegarde serveur : chaque poste peut
+  // donc avoir son propre fichier logo. Il est toujours réenregistré en
+  // PNG pour garder un chemin de fichier stable quel que soit le format
+  // d'origine (jpg, png...) choisi par l'utilisateur.
+  Future<String> _logoFilePath() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return '${dir.path}/school_logo.png';
+  }
+
+  Future<void> _loadSavedLogo() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasLogo = prefs.getBool('has_logo') ?? false;
+    if (!hasLogo) return;
+    try {
+      final path = await _logoFilePath();
+      final file = File(path);
+      if (await file.exists()) {
+        final bytes = await file.readAsBytes();
+        if (mounted) setState(() => _logoBytes = bytes);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _pickLogo() async {
+    setState(() => _loadingLogo = true);
+    try {
+      const typeGroup = XTypeGroup(
+        label: 'images',
+        extensions: ['png', 'jpg', 'jpeg'],
+      );
+      final file = await openFile(acceptedTypeGroups: [typeGroup]);
+      if (file == null) {
+        setState(() => _loadingLogo = false);
+        return;
+      }
+
+      final rawBytes = await file.readAsBytes();
+      final decoded  = img.decodeImage(rawBytes);
+      if (decoded == null) {
+        setState(() => _loadingLogo = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content:
+                Text("⚠️ Image invalide ou format non supporté")),
+          );
+        }
+        return;
+      }
+
+      final pngBytes = Uint8List.fromList(img.encodePng(decoded));
+      final path     = await _logoFilePath();
+      await File(path).writeAsBytes(pngBytes);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('has_logo', true);
+
+      setState(() {
+        _logoBytes   = pngBytes;
+        _loadingLogo = false;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                "✅ Logo enregistré — il apparaîtra sur les prochains reçus"),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() => _loadingLogo = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content:
+              Text("⚠️ Erreur lors de la sélection du logo : $e")),
+        );
+      }
+    }
+  }
+
+  Future<void> _removeLogo() async {
+    try {
+      final path = await _logoFilePath();
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('has_logo', false);
+    setState(() => _logoBytes = null);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Logo retiré")),
+      );
+    }
+  }
+
   Future<void> _testPrint() async {
     if (_selectedPrinterName == null) return;
     setState(() => _testingPrint = true);
@@ -481,6 +577,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'amount': 35000,
         }
       ],
+      logoBytes: _logoBytes, // ⚡ logo choisi (ou null si aucun)
     );
     setState(() => _testingPrint = false);
     if (mounted) {
@@ -495,6 +592,189 @@ class _SettingsScreenState extends State<SettingsScreen> {
           duration: const Duration(seconds: 5),
         ),
       );
+    }
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — AUTRES FRAIS DE PAIEMENT (ÉPHÉMÈRES)
+  // ====================================================================
+  String _autreFraisScopeLabel(AutreFrais f) {
+    switch (f.scope) {
+      case 'section':
+        return "Section : ${f.section ?? ''}";
+      case 'classe':
+        return "Classe : ${f.classe ?? ''}";
+      default:
+        return "Toutes les classes (toute l'école)";
+    }
+  }
+
+  void _showAddAutreFraisDialog() async {
+    if (!await _verifyBackupPassword()) return;
+
+    final nomController      = TextEditingController();
+    final montantController  = TextEditingController();
+    String? dialogSection;
+    String? dialogClasse;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final classesOptions = dialogSection != null
+              ? widget.fraisScolaires.getClassesForSection(dialogSection!)
+              : <String>[];
+          return AlertDialog(
+            title: const Text("Nouveau Frais Additionnel"),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nomController,
+                    decoration: const InputDecoration(
+                      labelText: "Nom du frais",
+                      hintText: "Ex: Frais de l'État, Frais d'Aide...",
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: montantController,
+                    keyboardType: TextInputType.number,
+                    decoration:
+                    const InputDecoration(labelText: "Montant (FC)"),
+                  ),
+                  const SizedBox(height: 16),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      "Ce frais concerne :",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  DropdownButton<String>(
+                    isExpanded: true,
+                    value: dialogSection,
+                    hint: const Text(
+                        "Toutes les classes (toute l'école)"),
+                    items: [
+                      const DropdownMenuItem<String>(
+                        value: null,
+                        child:
+                        Text("Toutes les classes (toute l'école)"),
+                      ),
+                      ...widget.fraisScolaires.config.sections.map(
+                            (s) => DropdownMenuItem(
+                          value: s,
+                          child: Text("Section : $s"),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) => setDialogState(() {
+                      dialogSection = value;
+                      dialogClasse  = null;
+                    }),
+                  ),
+                  if (dialogSection != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        value: dialogClasse,
+                        hint: const Text(
+                            "Toutes les classes de cette section"),
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: null,
+                            child: Text(
+                                "Toutes les classes de cette section"),
+                          ),
+                          ...classesOptions.map(
+                                (c) => DropdownMenuItem(
+                                value: c, child: Text(c)),
+                          ),
+                        ],
+                        onChanged: (value) =>
+                            setDialogState(() => dialogClasse = value),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("Annuler")),
+              ElevatedButton(
+                onPressed: () async {
+                  final nom     = nomController.text.trim();
+                  final montant = double.tryParse(montantController.text);
+                  if (nom.isEmpty || montant == null || montant <= 0) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              "Veuillez entrer un nom et un montant valides")),
+                    );
+                    return;
+                  }
+                  final scope = dialogSection == null
+                      ? 'all'
+                      : (dialogClasse == null ? 'section' : 'classe');
+                  await widget.fraisScolaires.addAutreFrais(
+                    nom: nom,
+                    montant: montant,
+                    scope: scope,
+                    section: dialogSection,
+                    classe: dialogClasse,
+                  );
+                  if (mounted) {
+                    Navigator.pop(ctx);
+                    setState(() {});
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text("✅ Frais ajouté avec succès")),
+                    );
+                  }
+                },
+                child: const Text("Ajouter"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _deleteAutreFrais(AutreFrais frais) async {
+    if (!await _verifyBackupPassword()) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Supprimer ce frais ?"),
+        content: Text(
+          "Voulez-vous vraiment supprimer \"${frais.nom}\" ?\n\n"
+              "Les paiements déjà enregistrés pour ce frais resteront "
+              "dans l'historique, mais il ne sera plus proposé pour de "
+              "nouveaux paiements.",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Supprimer"),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await widget.fraisScolaires.deleteAutreFrais(frais.id);
+      if (mounted) setState(() {});
     }
   }
 
@@ -522,6 +802,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         e.key.startsWith("${selectedSectionForFee!}|"))
         .toList()
         : <MapEntry<String, double>>[];
+
+    final autresFraisList = widget.fraisScolaires.getAutresFrais();
 
     return Scaffold(
       appBar: AppBar(
@@ -878,6 +1160,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const Divider(),
 
+            // ==================== ⚡ NOUVEAU — AUTRES FRAIS DE PAIEMENT ====================
+            const Text("Autres Frais de Paiement",
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              "Frais ponctuels propres à votre école (ex: Frais de l'État, "
+                  "Frais d'Aide...). Contrairement au frais mensuel principal, "
+                  "vous pouvez les ajouter ou les supprimer librement à tout "
+                  "moment. Ils sont ensuite payables depuis le bouton "
+                  "\"Autres Frais\" de l'écran d'accueil.",
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            if (autresFraisList.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  "Aucun frais additionnel défini pour le moment.",
+                  style: TextStyle(
+                      color: Colors.grey, fontStyle: FontStyle.italic),
+                ),
+              )
+            else
+              ...autresFraisList.map(
+                    (f) => Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    title: Text(f.nom),
+                    subtitle: Text(
+                      "${f.montant.toStringAsFixed(0)} FC — "
+                          "${_autreFraisScopeLabel(f)}",
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline,
+                          color: Colors.red),
+                      onPressed: () => _deleteAutreFrais(f),
+                    ),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 10),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add_box),
+              label: const Text("Ajouter un Frais Additionnel"),
+              onPressed: _showAddAutreFraisDialog,
+            ),
+            const Divider(),
+
             // ==================== ANNÉE SCOLAIRE ====================
             const Text("Année Scolaire",
                 style: TextStyle(
@@ -1131,7 +1462,80 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       color: Colors.indigo),
                 ),
               ),
+            const SizedBox(height: 18),
+
+            // ==================== ⚡ NOUVEAU — LOGO DU REÇU ====================
+            const Text("Logo de l'établissement (sur les reçus)",
+                style: TextStyle(
+                    fontSize: 15, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              "Le logo choisi sera imprimé à gauche ET à droite, en haut "
+                  "du reçu, avec le nom de l'établissement bien centré "
+                  "entre les deux. Une image carrée donne le meilleur "
+                  "résultat.",
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
             const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.grey.shade300),
+                    ),
+                    child: _logoBytes != null
+                        ? ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.memory(_logoBytes!,
+                          fit: BoxFit.contain),
+                    )
+                        : const Icon(Icons.image_not_supported,
+                        color: Colors.grey),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      _logoBytes != null
+                          ? "Logo actuel"
+                          : "Aucun logo sélectionné",
+                      style: const TextStyle(fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                  ElevatedButton.icon(
+                    icon: _loadingLogo
+                        ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2))
+                        : const Icon(Icons.upload, size: 18),
+                    label: Text(
+                        _logoBytes == null ? "Choisir" : "Changer"),
+                    onPressed: _loadingLogo ? null : _pickLogo,
+                  ),
+                  if (_logoBytes != null) ...[
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline,
+                          color: Colors.red),
+                      tooltip: "Retirer le logo",
+                      onPressed: _loadingLogo ? null : _removeLogo,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
             ElevatedButton.icon(
               icon: _testingPrint
                   ? const SizedBox(

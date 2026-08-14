@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -26,6 +27,29 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   int _mobilePendingCount = 0;
   List<Map<String, dynamic>> _mobilePendingPayments = [];
   bool _loadingMobile = false;
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MODE ADMINISTRATEUR CACHÉ
+  //
+  // Aucun bouton visible n'existe nulle part dans cet écran. Le point
+  // d'entrée est un triple-tap sur le titre de l'AppBar ("Paiements des
+  // Élèves"), un geste qui ne ressemble à rien de particulier pour un
+  // caissier qui ne connaît pas son existence.
+  //
+  // - Si aucun code masqué n'est encore configuré (première fois) :
+  //   on demande à l'admin de le définir.
+  // - Sinon : on demande de saisir le code masqué pour déverrouiller
+  //   le mode administrateur pour la durée de cette session d'écran
+  //   uniquement (jamais persisté).
+  // ==========================================================================
+  int _secretTapCount = 0;
+  DateTime? _lastSecretTap;
+  bool _adminModeUnlocked = false;
+  Timer? _adminAutoLockTimer;
+
+  // Anti-brute-force simple : après 5 essais faux, blocage 60 secondes.
+  int _failedAttempts = 0;
+  DateTime? _lockedUntil;
 
   @override
   void initState() {
@@ -213,6 +237,362 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — DÉCLENCHEUR SECRET (triple-tap sur le titre de l'AppBar)
+  // ==========================================================================
+  void _handleSecretTap() {
+    final now = DateTime.now();
+    if (_lastSecretTap == null ||
+        now.difference(_lastSecretTap!) > const Duration(milliseconds: 700)) {
+      _secretTapCount = 0;
+    }
+    _lastSecretTap = now;
+    _secretTapCount++;
+
+    if (_secretTapCount >= 3) {
+      _secretTapCount = 0;
+      _onSecretTriggered();
+    }
+  }
+
+  void _onSecretTriggered() {
+    if (_adminModeUnlocked) {
+      // Déjà déverrouillé pour cette session : on ignore, pour ne pas
+      // redemander le code inutilement.
+      return;
+    }
+    if (widget.fraisScolaires.hiddenCodeIsConfigured) {
+      _showEnterHiddenCodeDialog();
+    } else {
+      _showSetupHiddenCodeDialog();
+    }
+  }
+
+  // ---- Première configuration du code masqué ----
+  void _showSetupHiddenCodeDialog() {
+    final codeController = TextEditingController();
+    final confirmController = TextEditingController();
+    String? errorText;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => AlertDialog(
+          title: const Text("Configuration — Code masqué"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "Définissez un code secret, différent du mot de passe "
+                    "de sauvegarde. Ce code sera nécessaire pour annuler "
+                    "ou modifier un paiement déjà enregistré. "
+                    "Ne le partagez avec personne.",
+                style: TextStyle(fontSize: 12.5),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: codeController,
+                obscureText: true,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: "Nouveau code masqué",
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: confirmController,
+                obscureText: true,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: "Confirmer le code",
+                ),
+              ),
+              if (errorText != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(errorText!,
+                      style: const TextStyle(color: Colors.red, fontSize: 12)),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler"),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final code = codeController.text.trim();
+                final confirm = confirmController.text.trim();
+                if (code.length < 4) {
+                  setStateDialog(() =>
+                  errorText = "Le code doit contenir au moins 4 caractères.");
+                  return;
+                }
+                if (code != confirm) {
+                  setStateDialog(
+                          () => errorText = "Les deux codes ne correspondent pas.");
+                  return;
+                }
+                await widget.fraisScolaires.setHiddenCode(code);
+                if (mounted) {
+                  Navigator.pop(ctx);
+                  setState(() => _adminModeUnlocked = true);
+                  _startAdminAutoLockTimer();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                          "Code masqué défini. Gardez-le secret — mode "
+                              "administrateur actif pour cette session."),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                }
+              },
+              child: const Text("Définir"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---- Saisie du code masqué existant ----
+  void _showEnterHiddenCodeDialog() {
+    if (_lockedUntil != null && DateTime.now().isBefore(_lockedUntil!)) {
+      final remaining = _lockedUntil!.difference(DateTime.now()).inSeconds;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Trop de tentatives. Réessayez dans ${remaining}s."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final codeController = TextEditingController();
+    String? errorText;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => AlertDialog(
+          title: const Text("Code masqué"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: codeController,
+                obscureText: true,
+                keyboardType: TextInputType.number,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: "Code"),
+                onSubmitted: (_) {},
+              ),
+              if (errorText != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(errorText!,
+                      style: const TextStyle(color: Colors.red, fontSize: 12)),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final ok = widget.fraisScolaires
+                    .verifyHiddenCode(codeController.text);
+                if (ok) {
+                  _failedAttempts = 0;
+                  _lockedUntil = null;
+                  Navigator.pop(ctx);
+                  setState(() => _adminModeUnlocked = true);
+                  _startAdminAutoLockTimer();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text("Mode administrateur activé pour cette session."),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                } else {
+                  _failedAttempts++;
+                  if (_failedAttempts >= 5) {
+                    _lockedUntil =
+                        DateTime.now().add(const Duration(seconds: 60));
+                    _failedAttempts = 0;
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                            "Trop de tentatives incorrectes. Blocage de 60 secondes."),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  } else {
+                    setStateDialog(() => errorText = "Code incorrect.");
+                  }
+                }
+              },
+              child: const Text("Valider"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Verrouillage automatique du mode admin après 10 minutes d'inactivité
+  /// dans cet écran, pour éviter qu'il reste actif trop longtemps si
+  /// l'appareil change de main.
+  void _startAdminAutoLockTimer() {
+    _adminAutoLockTimer?.cancel();
+    _adminAutoLockTimer = Timer(const Duration(minutes: 10), () {
+      if (mounted) setState(() => _adminModeUnlocked = false);
+    });
+  }
+
+  /// Synchronise vers le serveur après une annulation/modification, pour
+  /// que les autres appareils (app admin desktop, app parent) voient la
+  /// correction dès que possible.
+  Future<void> _syncAfterAdminChange() async {
+    final schoolCode = widget.fraisScolaires.schoolCode;
+    if (schoolCode == null || schoolCode.isEmpty) return;
+    final appState = Provider.of<AppState>(context, listen: false);
+    if (appState.backupPassword == null) return;
+    try {
+      await widget.fraisScolaires
+          .backupToServer(schoolCode, appState.backupPassword!);
+    } catch (_) {
+      // Silencieux — la sauvegarde locale est déjà faite ; la synchro
+      // se refera à la prochaine sauvegarde/restauration manuelle.
+    }
+  }
+
+  // ---- Options admin sur une transaction (annuler / modifier) ----
+  void _showAdminTransactionOptions(
+      Eleve eleve, Map<String, dynamic> transaction, String mois) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit, color: Colors.blue),
+              title: const Text("Modifier ce paiement"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showModifyTransactionDialog(eleve, transaction, mois);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_forever, color: Colors.red),
+              title: const Text("Annuler ce paiement"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _confirmCancelTransaction(eleve, transaction, mois);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _confirmCancelTransaction(
+      Eleve eleve, Map<String, dynamic> transaction, String mois) {
+    final montant = (transaction['amount'] as num?)?.toDouble() ?? 0;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Confirmer l'annulation"),
+        content: Text(
+          "Annuler ce paiement de ${montant.toStringAsFixed(0)} FC "
+              "pour \"$mois\" ?\n\nCette action modifiera directement les "
+              "données de l'élève et sera synchronisée avec le serveur.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Non"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await widget.fraisScolaires
+                  .cancelTransaction(eleve: eleve, transaction: transaction);
+              await _syncAfterAdminChange();
+              if (mounted) {
+                _filterEleves();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text("Paiement annulé."),
+                    backgroundColor: Colors.orange,
+                  ),
+                );
+              }
+            },
+            child: const Text("Oui, annuler"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showModifyTransactionDialog(
+      Eleve eleve, Map<String, dynamic> transaction, String mois) {
+    final currentAmount = (transaction['amount'] as num?)?.toDouble() ?? 0;
+    final controller =
+    TextEditingController(text: currentAmount.toStringAsFixed(0));
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text("Modifier le paiement — $mois"),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: "Nouveau montant (FC)"),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final newAmount = double.tryParse(controller.text);
+              if (newAmount == null || newAmount < 0) return;
+              Navigator.pop(ctx);
+              await widget.fraisScolaires.modifyTransactionAmount(
+                eleve: eleve,
+                transaction: transaction,
+                newAmount: newAmount,
+              );
+              await _syncAfterAdminChange();
+              if (mounted) {
+                _filterEleves();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text("Paiement modifié."),
+                    backgroundColor: Colors.blue,
+                  ),
+                );
+              }
+            },
+            child: const Text("Enregistrer"),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ==================== FILTRE ====================
   void _filterEleves() {
     final query = searchController.text.toLowerCase().trim();
@@ -236,6 +616,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     widget.fraisScolaires.lastSelectedSectionFilter = selectedSectionFilter;
     widget.fraisScolaires.saveData();
     searchController.dispose();
+    _adminAutoLockTimer?.cancel();
     super.dispose();
   }
 
@@ -251,6 +632,38 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       return rest.isEmpty ? null : rest;
     }
     return null;
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — PAIEMENT SÉQUENTIEL DES MOIS
+  // Règle : un mois ne peut être payé (même partiellement) que si tous les
+  // mois qui le précèdent (dans l'ordre `fraisScolaires.months`, c'est-à-
+  // dire Septembre → Juin) sont déjà intégralement soldés pour cet élève.
+  // Ces deux petits utilitaires sont purement des helpers d'affichage/
+  // validation dans l'écran : ils ne modifient rien, ils se contentent de
+  // lire `eleve.paid` et les montants requis via `getRequiredForMonth`.
+  // ==========================================================================
+
+  /// Retourne le premier mois (dans l'ordre chronologique) qui n'est pas
+  /// encore intégralement payé par l'élève, ou `null` si tous les mois
+  /// sont soldés.
+  String? _premierMoisNonPaye(Eleve eleve) {
+    for (final m in widget.fraisScolaires.months) {
+      final required = widget.fraisScolaires
+          .getRequiredForMonth(m, eleve.section, eleve.classe);
+      final paid = eleve.paid[m] ?? 0;
+      if (paid < required) return m;
+    }
+    return null;
+  }
+
+  /// Vrai si l'élève est autorisé à effectuer un paiement pour `mois` :
+  /// cela n'est possible que si `mois` est exactement le premier mois non
+  /// encore soldé (donc tous les mois précédents sont déjà complets).
+  bool _peutPayerCeMois(Eleve eleve, String mois) {
+    final premierNonPaye = _premierMoisNonPaye(eleve);
+    if (premierNonPaye == null) return false; // tout est déjà payé
+    return mois == premierNonPaye;
   }
 
   void _showEditStudentDialog(Eleve eleve) {
@@ -418,7 +831,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Paiements des Élèves"),
+        // ⚡ NOUVEAU — le titre sert de déclencheur secret (triple-tap).
+        // Aucune indication visuelle particulière n'est ajoutée : pour
+        // un caissier, ce titre est un simple texte comme n'importe où
+        // ailleurs dans l'application.
+        title: GestureDetector(
+          onTap: _handleSecretTap,
+          behavior: HitTestBehavior.opaque,
+          child: const Text("Paiements des Élèves"),
+        ),
         actions: [
           // ⚡ Badge Mobile Money
           GestureDetector(
@@ -607,6 +1028,13 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     .getRequiredForMonth(mois, eleve.section, eleve.classe);
                 final paid = eleve.paid[mois] ?? 0;
                 final isFullyPaid = paid >= required;
+                // ⚡ NOUVEAU — un mois non payé mais qui n'est pas encore
+                // "ouvert" (car un mois précédent n'est pas soldé) est
+                // affiché avec un cadenas plutôt qu'un simple avertissement,
+                // pour indiquer clairement qu'il faut d'abord régler les
+                // mois précédents.
+                final estOuvert =
+                    isFullyPaid || _peutPayerCeMois(eleve, mois);
                 final nbPaiements = eleve.transactions
                     .where((t) => t['mois'] == mois)
                     .length;
@@ -614,11 +1042,18 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                   title: Text(mois),
                   subtitle: Text(
                     'Requis: $required FC | Payé: $paid FC'
-                        '${nbPaiements > 0 ? ' • $nbPaiements paiement(s)' : ''}',
+                        '${nbPaiements > 0 ? ' • $nbPaiements paiement(s)' : ''}'
+                        '${!isFullyPaid && !estOuvert ? '\nSoldez d\'abord les mois précédents' : ''}',
+                    style: (!isFullyPaid && !estOuvert)
+                        ? const TextStyle(
+                        color: Colors.grey, fontStyle: FontStyle.italic)
+                        : null,
                   ),
                   trailing: isFullyPaid
                       ? const Icon(Icons.check_circle, color: Colors.green)
-                      : const Icon(Icons.warning, color: Colors.orange),
+                      : (estOuvert
+                      ? const Icon(Icons.warning, color: Colors.orange)
+                      : const Icon(Icons.lock_outline, color: Colors.grey)),
                   onTap: () async {
                     await _showMonthDetailDialog(context, eleve, mois);
                     setStateDialog(() {});
@@ -647,6 +1082,10 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               .getRequiredForMonth(mois, eleve.section, eleve.classe);
           final paid = eleve.paid[mois] ?? 0;
           final isFullyPaid = paid >= required;
+          // ⚡ NOUVEAU — n'autorise l'ajout d'un paiement que si ce mois
+          // est bien le premier mois non encore soldé de l'élève.
+          final peutPayer = !isFullyPaid && _peutPayerCeMois(eleve, mois);
+          final premierNonPaye = _premierMoisNonPaye(eleve);
           final historique = eleve.transactions
               .where((t) => t['mois'] == mois)
               .toList()
@@ -667,6 +1106,38 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                         "Déjà payé : ${paid.toStringAsFixed(0)} FC",
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
+                  // ⚡ NOUVEAU — message d'avertissement si ce mois n'est
+                  // pas encore payable car un mois antérieur reste dû.
+                  if (!isFullyPaid && !peutPayer && premierNonPaye != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withAlpha(30),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.orange),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.lock_outline,
+                                color: Colors.orange, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                "Ce mois ne peut pas encore être payé. "
+                                    "Vous devez d'abord solder entièrement "
+                                    "\"$premierNonPaye\".",
+                                style: const TextStyle(
+                                    color: Colors.deepOrange,
+                                    fontSize: 12.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   const SizedBox(height: 12),
                   const Text("Historique des paiements :",
                       style: TextStyle(
@@ -716,6 +1187,20 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                               style: const TextStyle(
                                   fontWeight: FontWeight.bold),
                             ),
+                            // ⚡ NOUVEAU — en mode administrateur
+                            // déverrouillé, un tap sur un paiement déjà
+                            // enregistré propose de l'annuler ou de le
+                            // modifier. En mode normal (caissier), ce
+                            // onTap est simplement absent (null) : rien
+                            // ne change visuellement, aucune trace de
+                            // cette fonctionnalité n'apparaît.
+                            onTap: _adminModeUnlocked
+                                ? () {
+                              Navigator.pop(ctx);
+                              _showAdminTransactionOptions(
+                                  eleve, t, mois);
+                            }
+                                : null,
                           );
                         },
                       ),
@@ -727,7 +1212,11 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               TextButton(
                   onPressed: () => Navigator.pop(ctx),
                   child: const Text("Fermer")),
-              if (!isFullyPaid)
+              // ⚡ NOUVEAU — le bouton "Ajouter un paiement" n'apparaît
+              // que si le mois est réellement payable (premier mois non
+              // soldé de l'élève). Sinon, seul le message d'avertissement
+              // ci-dessus est visible.
+              if (peutPayer)
                 ElevatedButton.icon(
                   icon: const Icon(Icons.add),
                   label: const Text("Ajouter un paiement"),
@@ -745,6 +1234,25 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   void _showPaymentDialog(
       BuildContext context, Eleve eleve, String mois) {
+    // ⚡ NOUVEAU — double sécurité : même si ce dialogue venait à être
+    // appelé depuis un autre endroit du code, on revérifie ici que le
+    // mois est bien payable avant d'accepter le moindre montant.
+    if (!_peutPayerCeMois(eleve, mois)) {
+      final premierNonPaye = _premierMoisNonPaye(eleve);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            premierNonPaye != null
+                ? "Veuillez d'abord solder entièrement \"$premierNonPaye\" "
+                "avant de payer \"$mois\"."
+                : "Tous les mois sont déjà soldés pour cet élève.",
+          ),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     final controller = TextEditingController();
     showDialog(
       context: context,
@@ -763,6 +1271,28 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             onPressed: () async {
               final amount = double.tryParse(controller.text);
               if (amount != null && amount > 0) {
+                // ⚡ NOUVEAU — dernière vérification juste avant
+                // l'enregistrement effectif du paiement, au cas où l'état
+                // de l'élève aurait changé entre l'ouverture du dialogue
+                // et la confirmation (ex: paiement mobile reçu entre-
+                // temps).
+                if (!_peutPayerCeMois(eleve, mois)) {
+                  Navigator.pop(ctx);
+                  final premierNonPaye = _premierMoisNonPaye(eleve);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        premierNonPaye != null
+                            ? "Impossible : \"$premierNonPaye\" doit être "
+                            "soldé en premier."
+                            : "Tous les mois sont déjà soldés pour cet "
+                            "élève.",
+                      ),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                  return;
+                }
                 widget.fraisScolaires.handlePayment(eleve, mois, amount);
                 await widget.fraisScolaires.saveData();
                 Navigator.pop(ctx);

@@ -22,6 +22,8 @@ dependencies:
   serial_port_win32: ^2.3.0
   ffi: ^2.1.3
   image: ^4.1.7
+  fl_chart: ^0.69.0
+  crypto: ^3.0.3
 
 dev_dependencies:
   flutter_test:

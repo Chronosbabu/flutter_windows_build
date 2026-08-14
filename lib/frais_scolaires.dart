@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
@@ -9,6 +11,239 @@ import 'package:file_selector/file_selector.dart';
 import 'models.dart';
 
 const String serverUrl = "https://jsinf.onrender.com";
+
+// ==========================================================================
+// ⚡ NOUVEAU — MODÈLE DÉPENSE (sortie de caisse)
+// Autonome (pas besoin de toucher models.dart) : motif/justification,
+// montant, date/heure exacte, et qui l'a enregistrée.
+// ==========================================================================
+class Depense {
+  String id;
+  String motif;
+  double montant;
+  DateTime date;
+  String enregistrePar;
+
+  Depense({
+    required this.id,
+    required this.motif,
+    required this.montant,
+    required this.date,
+    this.enregistrePar = 'Direction',
+  });
+
+  factory Depense.fromJson(Map<String, dynamic> json) => Depense(
+    id: json['id'] as String? ?? '',
+    motif: json['motif'] as String? ?? '',
+    montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+    date: DateTime.tryParse(json['date'] as String? ?? '') ??
+        DateTime.now(),
+    enregistrePar: json['enregistrePar'] as String? ?? 'Direction',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'motif': motif,
+    'montant': montant,
+    'date': date.toIso8601String(),
+    'enregistrePar': enregistrePar,
+  };
+
+  /// Ex: "14/08/2026 à 10:32"
+  String get dateFormatee {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(date.day)}/${two(date.month)}/${date.year} à '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+}
+
+// ==========================================================================
+// ⚡ NOUVEAU — MODÈLE AUTRE FRAIS (frais additionnel/éphémère)
+// Contrairement aux frais mensuels principaux (feesBySection/feesByClasse),
+// ce sont des frais ponctuels propres à chaque école (ex: Frais de l'État,
+// Frais d'Aide...) que l'utilisateur peut ajouter ou supprimer librement,
+// à tout moment, depuis les Paramètres.
+// ==========================================================================
+class AutreFrais {
+  String id;
+  String nom;
+  double montant;
+  // 'all'     = toute l'école
+  // 'section' = une section précise (voir `section`)
+  // 'classe'  = une classe précise (voir `classe`, nom complet avec
+  //             éventuelle sous-classe, ex: "6eme A")
+  String scope;
+  String? section;
+  String? classe;
+  DateTime dateCreation;
+
+  AutreFrais({
+    required this.id,
+    required this.nom,
+    required this.montant,
+    this.scope = 'all',
+    this.section,
+    this.classe,
+    DateTime? dateCreation,
+  }) : dateCreation = dateCreation ?? DateTime.now();
+
+  factory AutreFrais.fromJson(Map<String, dynamic> json) => AutreFrais(
+    id: json['id'] as String? ?? '',
+    nom: json['nom'] as String? ?? '',
+    montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+    scope: json['scope'] as String? ?? 'all',
+    section: json['section'] as String?,
+    classe: json['classe'] as String?,
+    dateCreation:
+    DateTime.tryParse(json['dateCreation'] as String? ?? '') ??
+        DateTime.now(),
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'nom': nom,
+    'montant': montant,
+    'scope': scope,
+    'section': section,
+    'classe': classe,
+    'dateCreation': dateCreation.toIso8601String(),
+  };
+}
+
+// ==========================================================================
+// ⚡ NOUVEAU — PAIEMENT D'UN AUTRE FRAIS
+// On conserve une "photo" du nom du frais au moment du paiement
+// (autreFraisNom), pour que l'historique reste lisible même si le frais
+// correspondant a été supprimé entretemps par l'utilisateur (frais
+// éphémères, contrairement au frais mensuel principal).
+// ==========================================================================
+class AutreFraisPaiement {
+  String id;
+  String autreFraisId;
+  String autreFraisNom;
+  String eleveId;
+  double montant;
+  DateTime date;
+  String enregistrePar;
+
+  AutreFraisPaiement({
+    required this.id,
+    required this.autreFraisId,
+    required this.autreFraisNom,
+    required this.eleveId,
+    required this.montant,
+    required this.date,
+    this.enregistrePar = 'Direction',
+  });
+
+  factory AutreFraisPaiement.fromJson(Map<String, dynamic> json) =>
+      AutreFraisPaiement(
+        id: json['id'] as String? ?? '',
+        autreFraisId: json['autreFraisId'] as String? ?? '',
+        autreFraisNom: json['autreFraisNom'] as String? ?? '',
+        eleveId: json['eleveId'] as String? ?? '',
+        montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+        date: DateTime.tryParse(json['date'] as String? ?? '') ??
+            DateTime.now(),
+        enregistrePar: json['enregistrePar'] as String? ?? 'Direction',
+      );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'autreFraisId': autreFraisId,
+    'autreFraisNom': autreFraisNom,
+    'eleveId': eleveId,
+    'montant': montant,
+    'date': date.toIso8601String(),
+    'enregistrePar': enregistrePar,
+  };
+
+  String get dateFormatee {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(date.day)}/${two(date.month)}/${date.year} à '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+}
+
+// ==========================================================================
+// ⚡ NOUVEAU — DÉTAIL DE RÉPARTITION (par Option ou par Section pédagogique)
+// Structure légère de sortie utilisée par les méthodes de répartition
+// ci-dessous. Purement calculée à la volée (rien n'est persisté ici) :
+// un simple libellé, un montant total, et la répartition théorique de
+// ce montant selon les pourcentages des administrations.
+// ==========================================================================
+class RepartitionDetail {
+  final String label;
+  final double total;
+  final Map<String, double> parAdministration;
+
+  RepartitionDetail({
+    required this.label,
+    required this.total,
+    required this.parAdministration,
+  });
+}
+
+// ==========================================================================
+// ⚡ NOUVEAU — JOURNAL D'AUDIT ADMINISTRATEUR (mode caché)
+// Chaque annulation ou modification d'un paiement déjà enregistré passe
+// forcément par ici, pour garder une trace complète (qui/quoi/quand/
+// combien). C'est la contrepartie indispensable d'une fonctionnalité
+// cachée : elle doit rester traçable pour celui qui la détient.
+// ==========================================================================
+class AdminAuditLog {
+  String id;
+  String action; // 'annulation' | 'modification'
+  String eleveId;
+  String eleveNomComplet;
+  String classe;
+  String mois;
+  double montantAvant;
+  double montantApres;
+  DateTime date;
+
+  AdminAuditLog({
+    required this.id,
+    required this.action,
+    required this.eleveId,
+    required this.eleveNomComplet,
+    required this.classe,
+    required this.mois,
+    required this.montantAvant,
+    required this.montantApres,
+    DateTime? date,
+  }) : date = date ?? DateTime.now();
+
+  factory AdminAuditLog.fromJson(Map<String, dynamic> json) => AdminAuditLog(
+    id: json['id'] as String? ?? '',
+    action: json['action'] as String? ?? '',
+    eleveId: json['eleveId'] as String? ?? '',
+    eleveNomComplet: json['eleveNomComplet'] as String? ?? '',
+    classe: json['classe'] as String? ?? '',
+    mois: json['mois'] as String? ?? '',
+    montantAvant: (json['montantAvant'] as num?)?.toDouble() ?? 0.0,
+    montantApres: (json['montantApres'] as num?)?.toDouble() ?? 0.0,
+    date: DateTime.tryParse(json['date'] as String? ?? '') ?? DateTime.now(),
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'action': action,
+    'eleveId': eleveId,
+    'eleveNomComplet': eleveNomComplet,
+    'classe': classe,
+    'mois': mois,
+    'montantAvant': montantAvant,
+    'montantApres': montantApres,
+    'date': date.toIso8601String(),
+  };
+
+  String get dateFormatee {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(date.day)}/${two(date.month)}/${date.year} à '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+}
 
 class FraisScolaires {
   SchoolConfig config;
@@ -26,6 +261,37 @@ class FraisScolaires {
   // n'avait été relancé manuellement.
   String? schoolCode;
 
+  // ⚡ NOUVEAU — sorties de caisse (dépenses), classées par année scolaire
+  // comme "history", pour rester cohérent avec le reste de l'appli.
+  Map<String, List<Depense>> depensesByYear = {};
+
+  // ⚡ NOUVEAU — frais additionnels (éphémères, propres à chaque école)
+  // et leurs paiements, classés par année scolaire comme "depensesByYear".
+  List<AutreFrais> autresFrais = [];
+  Map<String, List<AutreFraisPaiement>> autresFraisPaiementsByYear = {};
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MODE ADMINISTRATEUR CACHÉ (annulation / modification de
+  // paiements déjà enregistrés).
+  //
+  // Le "code masqué" est totalement indépendant du mot de passe de
+  // sauvegarde/restauration : c'est un code que l'admin choisit lui-même
+  // au premier déclenchement du geste secret, dans l'écran des
+  // paiements. Le caissier à qui l'appareil est confié n'a normalement
+  // jamais connaissance de son existence.
+  //
+  // Sécurité : on ne stocke JAMAIS le code en clair. On stocke un hash
+  // SHA-256 du code combiné à un sel aléatoire unique. Même en ouvrant
+  // le fichier school_fees_data.json avec un éditeur de texte, il est
+  // impossible de retrouver le code original.
+  // ==========================================================================
+  String? hiddenCodeHash;
+  String? hiddenCodeSalt;
+
+  // ⚡ NOUVEAU — journal d'audit des annulations/modifications de
+  // paiements effectuées via le mode administrateur caché.
+  List<AdminAuditLog> adminAuditLog = [];
+
   int _localIdCounter = 0;
 
   final List<String> months = [
@@ -34,6 +300,130 @@ class FraisScolaires {
   ];
 
   FraisScolaires() : config = SchoolConfig(schoolName: "EduPay School RDC");
+
+  // ====================================================================
+  // ⚡ NOUVEAU — GESTION DU CODE MASQUÉ (mode administrateur caché)
+  // ====================================================================
+
+  /// Vrai si un code masqué a déjà été défini sur cette installation
+  /// (ou reçu via une restauration serveur).
+  bool get hiddenCodeIsConfigured =>
+      hiddenCodeHash != null && hiddenCodeHash!.isNotEmpty;
+
+  String _hashWithSalt(String code, String salt) {
+    final bytes = utf8.encode('$salt::$code');
+    return sha256.convert(bytes).toString();
+  }
+
+  /// Définit (ou redéfinit) le code masqué. À utiliser uniquement lors
+  /// de la première configuration par l'admin — l'écran doit s'assurer
+  /// qu'il ne propose ceci que si `hiddenCodeIsConfigured` est faux,
+  /// pour ne pas laisser n'importe qui l'écraser.
+  Future<void> setHiddenCode(String code) async {
+    final trimmed = code.trim();
+    if (trimmed.isEmpty) return;
+    final rand = Random.secure();
+    final saltBytes = List<int>.generate(16, (_) => rand.nextInt(256));
+    final salt = base64Url.encode(saltBytes);
+    hiddenCodeSalt = salt;
+    hiddenCodeHash = _hashWithSalt(trimmed, salt);
+    await saveData();
+  }
+
+  /// Vérifie un code saisi par rapport au hash stocké. Ne révèle jamais
+  /// le code réel, seulement vrai/faux.
+  bool verifyHiddenCode(String code) {
+    if (!hiddenCodeIsConfigured) return false;
+    return _hashWithSalt(code.trim(), hiddenCodeSalt!) == hiddenCodeHash;
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — ANNULATION / MODIFICATION D'UN PAIEMENT DÉJÀ ENREGISTRÉ
+  // (réservé au mode administrateur caché)
+  //
+  // Contrairement au reste de l'application, aucun paiement n'est
+  // normalement modifiable après coup — ces deux méthodes sont les
+  // SEULES portes d'entrée qui permettent de le faire, et elles
+  // journalisent systématiquement l'action dans `adminAuditLog`.
+  //
+  // Important : `transaction` doit être la RÉFÉRENCE exacte de l'entrée
+  // telle que lue depuis `eleve.transactions` (ex: via `.where(...)`),
+  // pas une copie — la suppression/modification se fait par identité
+  // d'objet, ce qui évite d'avoir à ajouter un identifiant unique à
+  // chaque transaction existante.
+  // ====================================================================
+
+  /// Annule complètement un paiement : retire l'entrée de l'historique
+  /// et déduit son montant du total payé pour le mois concerné.
+  Future<void> cancelTransaction({
+    required Eleve eleve,
+    required Map<String, dynamic> transaction,
+  }) async {
+    final mois = transaction['mois']?.toString() ?? '';
+    final montant = (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+
+    final currentPaid = eleve.paid[mois] ?? 0;
+    double newPaid = currentPaid - montant;
+    if (newPaid < 0) newPaid = 0;
+    eleve.paid[mois] = newPaid;
+
+    eleve.transactions.remove(transaction);
+
+    adminAuditLog.add(AdminAuditLog(
+      id: 'AUD${DateTime.now().millisecondsSinceEpoch}',
+      action: 'annulation',
+      eleveId: eleve.id,
+      eleveNomComplet: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      classe: eleve.classe,
+      mois: mois,
+      montantAvant: montant,
+      montantApres: 0,
+    ));
+
+    await saveData();
+  }
+
+  /// Modifie le montant d'un paiement déjà enregistré. Ajuste le total
+  /// payé du mois par la différence entre l'ancien et le nouveau
+  /// montant (et non en le remplaçant brutalement), pour rester
+  /// cohérent si d'autres paiements existent pour le même mois.
+  Future<void> modifyTransactionAmount({
+    required Eleve eleve,
+    required Map<String, dynamic> transaction,
+    required double newAmount,
+  }) async {
+    final mois = transaction['mois']?.toString() ?? '';
+    final oldAmount = (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+
+    final currentPaid = eleve.paid[mois] ?? 0;
+    double newPaid = currentPaid - oldAmount + newAmount;
+    if (newPaid < 0) newPaid = 0;
+    eleve.paid[mois] = newPaid;
+
+    transaction['amount'] = newAmount;
+    transaction['modifiePar'] = 'Admin';
+    transaction['modifieLe'] = DateTime.now().toString().split(' ')[0];
+
+    adminAuditLog.add(AdminAuditLog(
+      id: 'AUD${DateTime.now().millisecondsSinceEpoch}',
+      action: 'modification',
+      eleveId: eleve.id,
+      eleveNomComplet: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      classe: eleve.classe,
+      mois: mois,
+      montantAvant: oldAmount,
+      montantApres: newAmount,
+    ));
+
+    await saveData();
+  }
+
+  /// Journal d'audit, du plus récent au plus ancien.
+  List<AdminAuditLog> getAdminAuditLog() {
+    final list = List<AdminAuditLog>.from(adminAuditLog);
+    list.sort((a, b) => b.date.compareTo(a.date));
+    return list;
+  }
 
   // ====================================================================
   // GÉNÉRATION D'ID LOCALE
@@ -354,6 +744,393 @@ class FraisScolaires {
   }
 
   // ====================================================================
+  // ⚡ NOUVEAU — GESTION DES DÉPENSES (SORTIES DE CAISSE)
+  // Le principe retenu : une dépense enregistrée diminue directement le
+  // solde disponible en caisse pour l'année scolaire en cours. Comme il
+  // n'existe pas de règle officielle unique documentée pour ce cas
+  // précis, la répartition entre administrations est calculée sur le
+  // SOLDE NET (total collecté - dépenses), puisqu'on ne peut pas
+  // redistribuer un montant déjà sorti de la caisse. Ce comportement
+  // est isolé ici et facile à modifier si votre pratique réelle diffère.
+  // ====================================================================
+
+  /// Liste des dépenses de l'année donnée (par défaut l'année courante),
+  /// triée de la plus récente à la plus ancienne.
+  List<Depense> getDepensesForYear([String? year]) {
+    final y = year ?? currentYear;
+    final list = List<Depense>.from(depensesByYear[y] ?? []);
+    list.sort((a, b) => b.date.compareTo(a.date));
+    return list;
+  }
+
+  /// Total des sorties de caisse pour l'année donnée.
+  double getTotalDepenses([String? year]) {
+    final y = year ?? currentYear;
+    return (depensesByYear[y] ?? [])
+        .fold(0.0, (sum, d) => sum + d.montant);
+  }
+
+  /// Solde net en caisse = total collecté - total des dépenses,
+  /// pour l'année donnée (par défaut l'année courante).
+  double getSoldeNetActuel([String? year]) {
+    final y = year ?? currentYear;
+    final totalCollecte = (y == currentYear)
+        ? getYearTotalCollected()
+        : months.fold<double>(
+      0.0,
+          (sum, m) =>
+      sum +
+          (history[y]?.eleves.fold<double>(
+              0.0, (s, e) => s + (e.paid[m] ?? 0)) ??
+              0.0),
+    );
+    return totalCollecte - getTotalDepenses(y);
+  }
+
+  /// Enregistre une nouvelle sortie de caisse (motif + montant), horodatée
+  /// automatiquement, et sauvegarde immédiatement.
+  Future<Depense> addDepense({
+    required String motif,
+    required double montant,
+    String enregistrePar = 'Direction',
+  }) async {
+    final depense = Depense(
+      id: 'DEP${DateTime.now().millisecondsSinceEpoch}',
+      motif: motif.trim(),
+      montant: montant,
+      date: DateTime.now(),
+      enregistrePar: enregistrePar,
+    );
+    depensesByYear.putIfAbsent(currentYear, () => []).add(depense);
+    await saveData();
+    return depense;
+  }
+
+  /// Supprime une dépense (ex: erreur de saisie) et sauvegarde.
+  Future<void> deleteDepense(String id, [String? year]) async {
+    final y = year ?? currentYear;
+    depensesByYear[y]?.removeWhere((d) => d.id == id);
+    await saveData();
+  }
+
+  /// ⚡ NOUVEAU — Vide complètement l'historique des dépenses d'une année
+  /// donnée (par défaut l'année courante). Action irréversible, protégée
+  /// côté écran par le mot de passe de sauvegarde (comme dans les
+  /// Paramètres).
+  Future<void> clearDepensesForYear([String? year]) async {
+    final y = year ?? currentYear;
+    depensesByYear[y] = [];
+    await saveData();
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — GESTION DES AUTRES FRAIS DE PAIEMENT (ÉPHÉMÈRES)
+  // Frais ponctuels propres à chaque école (ex: Frais de l'État, Frais
+  // d'Aide...), différents du frais mensuel principal : l'utilisateur
+  // peut les ajouter ou les supprimer librement à tout moment depuis les
+  // Paramètres.
+  // ====================================================================
+
+  /// Liste des frais additionnels actuellement définis, triée par nom.
+  List<AutreFrais> getAutresFrais() {
+    final list = List<AutreFrais>.from(autresFrais);
+    list.sort((a, b) => a.nom.toLowerCase().compareTo(b.nom.toLowerCase()));
+    return list;
+  }
+
+  /// Crée un nouveau frais additionnel et sauvegarde immédiatement.
+  Future<AutreFrais> addAutreFrais({
+    required String nom,
+    required double montant,
+    String scope = 'all',
+    String? section,
+    String? classe,
+  }) async {
+    final frais = AutreFrais(
+      id: 'AF${DateTime.now().millisecondsSinceEpoch}',
+      nom: nom.trim(),
+      montant: montant,
+      scope: scope,
+      section: scope == 'all' ? null : section,
+      classe: scope == 'classe' ? classe : null,
+    );
+    autresFrais.add(frais);
+    await saveData();
+    return frais;
+  }
+
+  /// Supprime un frais additionnel. Les paiements déjà enregistrés pour
+  /// ce frais restent dans l'historique (avec le nom du frais tel qu'il
+  /// était au moment du paiement), mais il ne sera plus proposé pour de
+  /// nouveaux paiements.
+  Future<void> deleteAutreFrais(String id) async {
+    autresFrais.removeWhere((f) => f.id == id);
+    await saveData();
+  }
+
+  /// Détermine si un frais additionnel donné s'applique à un élève donné,
+  /// selon son périmètre (toute l'école / une section / une classe).
+  bool autreFraisAppliesToStudent(AutreFrais frais, Eleve eleve) {
+    switch (frais.scope) {
+      case 'section':
+        return frais.section != null && eleve.section == frais.section;
+      case 'classe':
+        return frais.classe != null && eleve.classe == frais.classe;
+      case 'all':
+      default:
+        return true;
+    }
+  }
+
+  /// Liste des élèves concernés par un frais additionnel donné, triée
+  /// par classe puis par nom.
+  List<Eleve> getEligibleStudentsForAutreFrais(AutreFrais frais) {
+    final students = currentData.eleves
+        .where((e) => autreFraisAppliesToStudent(frais, e))
+        .toList();
+    students.sort((a, b) {
+      final c = a.classe.compareTo(b.classe);
+      if (c != 0) return c;
+      return a.nom.compareTo(b.nom);
+    });
+    return students;
+  }
+
+  /// Vérifie si un élève a déjà payé un frais additionnel donné, pour
+  /// l'année donnée (par défaut l'année courante).
+  bool hasPaidAutreFrais(Eleve eleve, AutreFrais frais, [String? year]) {
+    final y = year ?? currentYear;
+    return (autresFraisPaiementsByYear[y] ?? []).any(
+            (p) => p.autreFraisId == frais.id && p.eleveId == eleve.id);
+  }
+
+  /// Enregistre le paiement d'un frais additionnel par un élève,
+  /// horodaté automatiquement, et sauvegarde immédiatement.
+  Future<AutreFraisPaiement> payAutreFrais({
+    required AutreFrais frais,
+    required Eleve eleve,
+    String enregistrePar = 'Direction',
+  }) async {
+    final paiement = AutreFraisPaiement(
+      id: 'AFP${DateTime.now().millisecondsSinceEpoch}',
+      autreFraisId: frais.id,
+      autreFraisNom: frais.nom,
+      eleveId: eleve.id,
+      montant: frais.montant,
+      date: DateTime.now(),
+      enregistrePar: enregistrePar,
+    );
+    autresFraisPaiementsByYear
+        .putIfAbsent(currentYear, () => [])
+        .add(paiement);
+    await saveData();
+    return paiement;
+  }
+
+  /// Supprime un paiement d'autre frais (ex: erreur de saisie) et
+  /// sauvegarde.
+  Future<void> deleteAutreFraisPaiement(String id, [String? year]) async {
+    final y = year ?? currentYear;
+    autresFraisPaiementsByYear[y]?.removeWhere((p) => p.id == id);
+    await saveData();
+  }
+
+  /// Liste des paiements d'autres frais pour l'année donnée (par défaut
+  /// l'année courante), triée de la plus récente à la plus ancienne.
+  List<AutreFraisPaiement> getAutresFraisPaiementsForYear([String? year]) {
+    final y = year ?? currentYear;
+    final list = List<AutreFraisPaiement>.from(
+        autresFraisPaiementsByYear[y] ?? []);
+    list.sort((a, b) => b.date.compareTo(a.date));
+    return list;
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — RÉPARTITION PAR OPTION (Primaire / Secondaire /
+  // Maternelle...) ET PAR SECTION PÉDAGOGIQUE (ex: Électricité,
+  // Commerciale...) À L'INTÉRIEUR D'UNE OPTION.
+  //
+  // Dans cette application, ce que la direction appelle une "Option"
+  // (Primaire, Secondaire, Maternelle) correspond au champ `section` de
+  // l'élève (`config.sections`). Ce que la direction appelle une
+  // "Section" pédagogique (ex: Électricité, Commerciale...) correspond
+  // à la SOUS-CLASSE de l'élève (subClasseFromFullClasse) : dans le
+  // système éducatif de la RDC, ces sections ne démarrent qu'à partir
+  // de la 1ère (cycle long des Humanités) — la 7ème et la 8ème forment
+  // le Cycle d'Orientation / Éducation de Base (tronc commun) et
+  // n'appartiennent à aucune section pédagogique précise. C'est
+  // pourquoi, pour toute classe sans sous-classe, on regroupe par
+  // numéro de classe ("7ème", "8ème"...) sous forme d'"Éducation de
+  // Base", plutôt que par une section qui n'existe pas encore à ce
+  // niveau.
+  //
+  // Cette répartition est purement informative pour la direction/les
+  // autorités scolaires : elle additionne les montants BRUTS collectés
+  // (sans déduire les dépenses, qui sont globales à l'école et non
+  // rattachées à une option ou section précise). Elle est calculée à la
+  // volée et ne modifie/ne persiste rien.
+  // ====================================================================
+
+  /// Liste des options actuellement configurées (alias de
+  /// config.sections, conservé séparément pour la lisibilité de cette
+  /// API dédiée à la répartition).
+  List<String> getOptions() => List<String>.from(config.sections);
+
+  /// Répartition globale (total + par administration) pour une option
+  /// donnée (ex: "Secondaire"), toutes classes confondues — c'est la
+  /// combinaison totale de toutes les sections/tronc commun de cette
+  /// option.
+  RepartitionDetail getRepartitionForOption(String option) {
+    final total = getStudentsBySection(option)
+        .fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
+    return RepartitionDetail(
+      label: option,
+      total: total,
+      parAdministration: calculateAdminDistribution(total),
+    );
+  }
+
+  /// Libellé de regroupement "section pédagogique" d'un élève à
+  /// l'intérieur de son option : le nom de la sous-classe si elle
+  /// existe (ex: "Électricité"), sinon "Éducation de Base (<classe>)"
+  /// pour les classes sans section pédagogique (ex: 7ème, 8ème).
+  String _sousSectionLabelFor(Eleve eleve) {
+    final sousClasse = subClasseFromFullClasse(eleve.classe);
+    if (sousClasse != null && sousClasse.trim().isNotEmpty) {
+      return sousClasse.trim();
+    }
+    final numero = classeNumeroFromFullClasse(eleve.classe);
+    return "Éducation de Base ($numero)";
+  }
+
+  /// Répartition détaillée par section pédagogique (ou "Éducation de
+  /// Base" pour les classes sans section, ex: 7ème/8ème) à l'intérieur
+  /// d'une option donnée.
+  List<RepartitionDetail> getSousSectionsForOption(String option) {
+    final students = getStudentsBySection(option);
+    final Map<String, double> totalsByLabel = {};
+    for (var e in students) {
+      final label = _sousSectionLabelFor(e);
+      totalsByLabel[label] =
+          (totalsByLabel[label] ?? 0) + getStudentTotalPaid(e);
+    }
+    final details = totalsByLabel.entries
+        .map((entry) => RepartitionDetail(
+      label: entry.key,
+      total: entry.value,
+      parAdministration: calculateAdminDistribution(entry.value),
+    ))
+        .toList();
+    // Tri : "Éducation de Base" d'abord (7ème avant 8ème par ordre
+    // naturel du libellé), puis les sections pédagogiques par ordre
+    // alphabétique.
+    details.sort((a, b) {
+      final aBase = a.label.startsWith("Éducation de Base");
+      final bBase = b.label.startsWith("Éducation de Base");
+      if (aBase && !bBase) return -1;
+      if (!aBase && bBase) return 1;
+      return a.label.compareTo(b.label);
+    });
+    return details;
+  }
+
+  /// Vrai si cette option comporte au moins une classe organisée en
+  /// sections pédagogiques (sous-classes) — sert à savoir si l'écran
+  /// "Autres Répartitions" doit proposer le détail par section pour
+  /// cette option, ou seulement son total.
+  bool optionHasSousSections(String option) {
+    return getStudentsBySection(option).any((e) {
+      final sc = subClasseFromFullClasse(e.classe);
+      return sc != null && sc.trim().isNotEmpty;
+    });
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — COURBE D'ÉVOLUTION MENSUELLE (par Option / Section /
+  // Classe), pour l'écran "Courbe d'Évolution" de la Répartition.
+  // ====================================================================
+
+  /// Totaux mensuels collectés (Septembre → Juin), filtrés selon option,
+  /// section pédagogique et/ou classe. Chaque filtre est optionnel ;
+  /// laissé à null, il n'est pas appliqué. Renvoie une liste alignée
+  /// sur `months`.
+  List<double> getMonthlyEvolution({
+    String? option,
+    String? sousSectionLabel,
+    String? classe,
+  }) {
+    List<Eleve> students = currentData.eleves;
+    if (option != null) {
+      students = students.where((e) => e.section == option).toList();
+    }
+    if (sousSectionLabel != null) {
+      students = students
+          .where((e) => _sousSectionLabelFor(e) == sousSectionLabel)
+          .toList();
+    }
+    if (classe != null) {
+      students = students.where((e) => e.classe == classe).toList();
+    }
+    return months
+        .map((m) =>
+        students.fold<double>(0.0, (sum, e) => sum + (e.paid[m] ?? 0)))
+        .toList();
+  }
+
+  /// Classes complètes (avec sous-classe) appartenant à une option et,
+  /// éventuellement, à une section pédagogique donnée (ou "Éducation de
+  /// Base (<classe>)" pour les classes sans section) — sert à peupler
+  /// le filtre "Classe" de l'écran d'évolution.
+  List<String> getClassesForOptionAndSousSection(
+      String option, [
+        String? sousSectionLabel,
+      ]) {
+    final classes = getAllDisplayClassesForSection(option);
+    if (sousSectionLabel == null) return classes;
+    return classes.where((c) {
+      final sousClasse = subClasseFromFullClasse(c);
+      final label = (sousClasse != null && sousClasse.trim().isNotEmpty)
+          ? sousClasse.trim()
+          : "Éducation de Base (${classeNumeroFromFullClasse(c)})";
+      return label == sousSectionLabel;
+    }).toList();
+  }
+
+  // ====================================================================
+  // STATUT DE PAIEMENT PAR MOIS (EN ORDRE / PAS EN ORDRE)
+  // ====================================================================
+  bool isStudentEnOrdrePourMois(Eleve eleve, String mois) {
+    final required     = getRequiredForMonth(mois, eleve.section, eleve.classe);
+    final paidForMonth = eleve.paid[mois] ?? 0;
+    return paidForMonth >= required;
+  }
+
+  List<Eleve> getStudentsByOrderStatus({
+    required String mois,
+    required bool enOrdre,
+    String? sectionFilter,
+    String? classFilter,
+  }) {
+    List<Eleve> students = currentData.eleves;
+    if (sectionFilter != null) {
+      students = students.where((e) => e.section == sectionFilter).toList();
+    }
+    if (classFilter != null) {
+      students = students.where((e) => e.classe == classFilter).toList();
+    }
+    students = students
+        .where((e) => isStudentEnOrdrePourMois(e, mois) == enOrdre)
+        .toList();
+
+    students.sort((a, b) {
+      final c = a.classe.compareTo(b.classe);
+      if (c != 0) return c;
+      return a.nom.compareTo(b.nom);
+    });
+    return students;
+  }
+
+  // ====================================================================
   // GÉNÉRATION PDF
   // ====================================================================
   Future<void> generatePdf({
@@ -590,6 +1367,128 @@ class FraisScolaires {
     await _savePdf(pdf, filename, "student_list");
   }
 
+  // ====================================================================
+  // GÉNÉRATION PDF — LISTE PAR STATUT DE PAIEMENT
+  // ====================================================================
+  Future<void> generateOrderStatusPdf({
+    required String filename,
+    required String mois,
+    required bool enOrdre,
+    String? sectionFilter,
+    String? classFilter,
+  }) async {
+    final students = getStudentsByOrderStatus(
+      mois:          mois,
+      enOrdre:       enOrdre,
+      sectionFilter: sectionFilter,
+      classFilter:   classFilter,
+    );
+
+    final sectionLabel = sectionFilter ?? "Toutes les sections";
+    final classeLabel  = classFilter   ?? "Toutes les classes";
+    final dateStr      = DateTime.now().toString().split(' ')[0];
+    final statutLabel  =
+    enOrdre ? "QUI ONT DÉJÀ PAYÉ" : "QUI N'ONT PAS ENCORE PAYÉ";
+
+    final title = "LISTE DES ÉLÈVES DE $classeLabel - $sectionLabel "
+        "DU $dateStr $statutLabel $mois";
+
+    final rows = <List<String>>[];
+    for (int i = 0; i < students.length; i++) {
+      final e              = students[i];
+      final montantPaye    = e.paid[mois] ?? 0;
+      final montantRequis  =
+      getRequiredForMonth(mois, e.section, e.classe);
+      rows.add([
+        '${i + 1}',
+        e.nom,
+        e.postNom,
+        e.prenom,
+        e.classe,
+        '${montantPaye.toStringAsFixed(0)} / ${montantRequis.toStringAsFixed(0)} FC',
+      ]);
+    }
+
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(36),
+        build: (pw.Context context) => [
+          pw.Center(
+            child: pw.Text(
+              config.schoolName.toUpperCase(),
+              style: pw.TextStyle(
+                  fontSize: 20, fontWeight: pw.FontWeight.bold),
+            ),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+              title,
+              textAlign: pw.TextAlign.center,
+              style: pw.TextStyle(
+                  fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+              "Section : $sectionLabel | Classe : $classeLabel | Mois : $mois",
+              style: const pw.TextStyle(fontSize: 11),
+            ),
+          ),
+          pw.SizedBox(height: 2),
+          pw.Center(
+            child: pw.Text(
+              "Année $currentYear | Imprimé le : $dateStr | "
+                  "Total : ${students.length} élève(s)",
+              style: const pw.TextStyle(
+                  fontSize: 10, color: PdfColors.grey700),
+            ),
+          ),
+          pw.SizedBox(height: 16),
+          pw.Divider(thickness: 1),
+          pw.SizedBox(height: 10),
+          pw.TableHelper.fromTextArray(
+            headers: [
+              'N°', 'Nom', 'Post-nom', 'Prénom', 'Classe',
+              'Payé / Requis ($mois)',
+            ],
+            data: rows,
+            headerStyle: pw.TextStyle(
+              fontSize: 9,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.white,
+            ),
+            headerDecoration: pw.BoxDecoration(
+              color: enOrdre ? PdfColors.green700 : PdfColors.red700,
+            ),
+            cellStyle:  const pw.TextStyle(fontSize: 9),
+            cellHeight: 22,
+            cellAlignments: {
+              0: pw.Alignment.center,
+              1: pw.Alignment.centerLeft,
+              2: pw.Alignment.centerLeft,
+              3: pw.Alignment.centerLeft,
+              4: pw.Alignment.center,
+              5: pw.Alignment.center,
+            },
+            oddRowDecoration: pw.BoxDecoration(
+              color: enOrdre ? PdfColors.green50 : PdfColors.red50,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    await _savePdf(
+      pdf,
+      filename,
+      enOrdre ? 'en_ordre_$mois' : 'pas_en_ordre_$mois',
+    );
+  }
+
   Future<void> _savePdf(
       pw.Document pdf, String filename, String reportType) async {
     try {
@@ -635,13 +1534,55 @@ class FraisScolaires {
         lastSelectedClassFilter   = data['lastSelectedClassFilter'];
         lastSelectedSectionFilter = data['lastSelectedSectionFilter'];
 
-        // ⚡ CORRIGÉ : on relit le school_code persisté localement.
         schoolCode = data['schoolCode'] as String?;
+
+        // ⚡ NOUVEAU — chargement du code masqué (mode administrateur
+        // caché) et du journal d'audit associé.
+        hiddenCodeHash = data['hiddenCodeHash'] as String?;
+        hiddenCodeSalt = data['hiddenCodeSalt'] as String?;
+        if (data['adminAuditLog'] != null) {
+          adminAuditLog = (data['adminAuditLog'] as List<dynamic>)
+              .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
 
         if (data['history'] != null) {
           history = (data['history'] as Map<String, dynamic>).map(
                 (key, value) =>
                 MapEntry(key, SchoolYearData.fromJson(value)),
+          );
+        }
+
+        // ⚡ NOUVEAU — chargement des dépenses par année
+        if (data['depensesByYear'] != null) {
+          depensesByYear =
+              (data['depensesByYear'] as Map<String, dynamic>).map(
+                    (key, value) => MapEntry(
+                  key,
+                  (value as List<dynamic>)
+                      .map((e) => Depense.fromJson(e as Map<String, dynamic>))
+                      .toList(),
+                ),
+              );
+        }
+
+        // ⚡ NOUVEAU — chargement des autres frais + leurs paiements
+        if (data['autresFrais'] != null) {
+          autresFrais = (data['autresFrais'] as List<dynamic>)
+              .map((e) => AutreFrais.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
+        if (data['autresFraisPaiementsByYear'] != null) {
+          autresFraisPaiementsByYear = (data['autresFraisPaiementsByYear']
+          as Map<String, dynamic>)
+              .map(
+                (key, value) => MapEntry(
+              key,
+              (value as List<dynamic>)
+                  .map((e) => AutreFraisPaiement.fromJson(
+                  e as Map<String, dynamic>))
+                  .toList(),
+            ),
           );
         }
 
@@ -714,10 +1655,24 @@ class FraisScolaires {
       'localIdCounter':          _localIdCounter,
       'lastSelectedClassFilter': lastSelectedClassFilter,
       'lastSelectedSectionFilter': lastSelectedSectionFilter,
-      // ⚡ CORRIGÉ : on persiste maintenant le school_code localement.
       'schoolCode':              schoolCode,
       'history':                 history.map(
               (key, value) => MapEntry(key, value.toJson())),
+      // ⚡ NOUVEAU
+      'depensesByYear': depensesByYear.map(
+            (key, value) =>
+            MapEntry(key, value.map((d) => d.toJson()).toList()),
+      ),
+      // ⚡ NOUVEAU
+      'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
+      'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
+            (key, value) =>
+            MapEntry(key, value.map((p) => p.toJson()).toList()),
+      ),
+      // ⚡ NOUVEAU — mode administrateur caché
+      'hiddenCodeHash': hiddenCodeHash,
+      'hiddenCodeSalt': hiddenCodeSalt,
+      'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
     };
     await file.writeAsString(json.encode(data));
   }
@@ -742,6 +1697,12 @@ class FraisScolaires {
     lastSelectedClassFilter   = null;
     lastSelectedSectionFilter = null;
     schoolCode  = null;
+    depensesByYear = {}; // ⚡ NOUVEAU
+    autresFrais = []; // ⚡ NOUVEAU
+    autresFraisPaiementsByYear = {}; // ⚡ NOUVEAU
+    hiddenCodeHash = null; // ⚡ NOUVEAU
+    hiddenCodeSalt = null; // ⚡ NOUVEAU
+    adminAuditLog = []; // ⚡ NOUVEAU
   }
 
   Future<void> changeYear(String newYear) async {
@@ -801,14 +1762,6 @@ class FraisScolaires {
 
   // ====================================================================
   // BACKUP & RESTORE
-  // ⚡ CORRIGÉ — Ces deux méthodes renvoient maintenant un
-  // Map<String, dynamic> avec 'success' (bool) et, en cas d'échec,
-  // 'error' (String) contenant le vrai message d'erreur. AVANT, elles
-  // renvoyaient un simple bool, ce qui provoquait une ERREUR DE
-  // COMPILATION dans admin_dashboard_screen.dart, qui accède déjà à
-  // restoreResult['success'] et restoreResult['error'] en s'attendant à
-  // un Map. C'était une incompatibilité de type qui empêchait purement
-  // et simplement le projet de compiler.
   // ====================================================================
   Future<Map<String, dynamic>> backupToServer(
       String schoolCodeParam, String password) async {
@@ -825,6 +1778,26 @@ class FraisScolaires {
         'lastSelectedSectionFilter': lastSelectedSectionFilter,
         'history':         history.map(
                 (key, value) => MapEntry(key, value.toJson())),
+        // ⚡ NOUVEAU — les dépenses suivent aussi la sauvegarde serveur
+        'depensesByYear': depensesByYear.map(
+              (key, value) =>
+              MapEntry(key, value.map((d) => d.toJson()).toList()),
+        ),
+        // ⚡ NOUVEAU — les autres frais et leurs paiements suivent aussi
+        // la sauvegarde serveur
+        'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
+        'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
+              (key, value) =>
+              MapEntry(key, value.map((p) => p.toJson()).toList()),
+        ),
+        // ⚡ NOUVEAU — le mode administrateur caché suit aussi la
+        // sauvegarde serveur, pour que l'annulation/modification d'un
+        // paiement se propage vers les autres appareils (app admin
+        // desktop, app parent) et que le code masqué soit récupérable
+        // en cas de restauration sur un nouvel appareil.
+        'hiddenCodeHash': hiddenCodeHash,
+        'hiddenCodeSalt': hiddenCodeSalt,
+        'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
         'backup_password': password,
       };
 
@@ -935,15 +1908,6 @@ class FraisScolaires {
     }
   }
 
-  // ⚡ CORRIGÉ — RENOMMÉE en publique (sans underscore).
-  // AVANT : `_mergeRestoredData` (privée) était appelée depuis
-  // recovery_screen.dart (`fraisScolaires._mergeRestoredData(data)`),
-  // ce qui est une ERREUR DE COMPILATION en Dart : un membre préfixé
-  // par "_" n'est visible que dans le fichier où il est déclaré.
-  // MAINTENANT : la méthode est publique et peut être appelée depuis
-  // n'importe quel autre fichier du projet, comme le fait
-  // recovery_screen.dart pour fusionner les données après une
-  // reconnexion "code école + mot de passe" sur un nouvel appareil.
   Future<void> mergeRestoredData(Map<String, dynamic> serverData) async {
     config = SchoolConfig.fromJson(serverData['config'] ?? {});
 
@@ -1001,6 +1965,112 @@ class FraisScolaires {
       }
     }
 
+    // ⚡ NOUVEAU — fusion des dépenses reçues du serveur (sans doublons,
+    // en se basant sur l'id unique de chaque dépense).
+    if (serverData['depensesByYear'] != null) {
+      final serverDepenses =
+      (serverData['depensesByYear'] as Map<String, dynamic>).map(
+            (key, value) => MapEntry(
+          key,
+          (value as List<dynamic>)
+              .map((e) => Depense.fromJson(e as Map<String, dynamic>))
+              .toList(),
+        ),
+      );
+
+      for (var entry in serverDepenses.entries) {
+        final year       = entry.key;
+        final serverList = entry.value;
+
+        if (depensesByYear.containsKey(year)) {
+          final existingIds =
+          depensesByYear[year]!.map((d) => d.id).toSet();
+          for (var d in serverList) {
+            if (!existingIds.contains(d.id)) {
+              depensesByYear[year]!.add(d);
+            }
+          }
+        } else {
+          depensesByYear[year] = serverList;
+        }
+      }
+    }
+
+    // ⚡ NOUVEAU — fusion des autres frais (types) reçus du serveur :
+    // on ajoute simplement ceux qu'on n'a pas encore localement, en se
+    // basant sur leur id. On ne touche pas à ceux qui existent déjà
+    // localement (l'utilisateur a pu les supprimer volontairement).
+    if (serverData['autresFrais'] != null) {
+      final serverAutresFrais = (serverData['autresFrais'] as List<dynamic>)
+          .map((e) => AutreFrais.fromJson(e as Map<String, dynamic>))
+          .toList();
+      final existingFraisIds = autresFrais.map((f) => f.id).toSet();
+      for (var f in serverAutresFrais) {
+        if (!existingFraisIds.contains(f.id)) {
+          autresFrais.add(f);
+        }
+      }
+    }
+
+    // ⚡ NOUVEAU — fusion des paiements d'autres frais reçus du serveur
+    // (sans doublons, en se basant sur l'id unique de chaque paiement).
+    if (serverData['autresFraisPaiementsByYear'] != null) {
+      final serverPaiements = (serverData['autresFraisPaiementsByYear']
+      as Map<String, dynamic>)
+          .map(
+            (key, value) => MapEntry(
+          key,
+          (value as List<dynamic>)
+              .map((e) =>
+              AutreFraisPaiement.fromJson(e as Map<String, dynamic>))
+              .toList(),
+        ),
+      );
+
+      for (var entry in serverPaiements.entries) {
+        final year       = entry.key;
+        final serverList = entry.value;
+
+        if (autresFraisPaiementsByYear.containsKey(year)) {
+          final existingIds =
+          autresFraisPaiementsByYear[year]!.map((p) => p.id).toSet();
+          for (var p in serverList) {
+            if (!existingIds.contains(p.id)) {
+              autresFraisPaiementsByYear[year]!.add(p);
+            }
+          }
+        } else {
+          autresFraisPaiementsByYear[year] = serverList;
+        }
+      }
+    }
+
+    // ⚡ NOUVEAU — le code masqué : on ne l'écrase JAMAIS silencieusement
+    // s'il est déjà configuré sur cet appareil (pour éviter qu'une
+    // restauration ne remplace le code choisi par l'admin sur place).
+    // On ne l'adopte depuis le serveur que si cet appareil n'en a pas
+    // encore — utile lors de la toute première restauration sur un
+    // nouvel appareil.
+    if (!hiddenCodeIsConfigured) {
+      hiddenCodeHash =
+          serverData['hiddenCodeHash'] as String? ?? hiddenCodeHash;
+      hiddenCodeSalt =
+          serverData['hiddenCodeSalt'] as String? ?? hiddenCodeSalt;
+    }
+
+    // ⚡ NOUVEAU — fusion du journal d'audit (sans doublons, par id).
+    if (serverData['adminAuditLog'] != null) {
+      final serverAudit = (serverData['adminAuditLog'] as List<dynamic>)
+          .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
+          .toList();
+      final existingAuditIds = adminAuditLog.map((a) => a.id).toSet();
+      for (var a in serverAudit) {
+        if (!existingAuditIds.contains(a.id)) {
+          adminAuditLog.add(a);
+        }
+      }
+    }
+
     currentYear = serverData['currentYear'] ?? currentYear;
     if (history.containsKey(currentYear)) {
       currentData = history[currentYear]!;
@@ -1010,5 +2080,173 @@ class FraisScolaires {
     }
 
     await _assignMissingIds();
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — MODULE DISCIPLINE
+  // Centralise tous les appels réseau liés aux absences, convocations
+  // et communiqués, sur le modèle de backupToServer/restoreFromServer
+  // (retour Map avec 'success' + 'error' pour rester cohérent avec le
+  // reste de l'appli).
+  // ====================================================================
+
+  /// Enregistre le registre d'absence d'une classe pour une date donnée
+  /// et déclenche l'envoi automatique d'un message aux parents des
+  /// élèves cochés absents.
+  Future<Map<String, dynamic>> recordAbsences({
+    required List<String> absentIds,
+    required String classe,
+    required String section,
+    String? date,
+    String? message,
+    String recordedBy = 'Direction',
+  }) async {
+    if (schoolCode == null || schoolCode!.isEmpty) {
+      return {
+        'success': false,
+        'error': "Code école manquant. Sauvegardez d'abord sur le serveur "
+            "(Paramètres) avant d'utiliser le module Discipline.",
+      };
+    }
+    try {
+      final response = await http.post(
+        Uri.parse('$serverUrl/school/record_absences'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'school_code': schoolCode,
+          'annee':       currentYear,
+          'classe':      classe,
+          'section':     section,
+          'date':        date ?? DateTime.now().toString().split(' ')[0],
+          'absent_ids':  absentIds,
+          'message':     message ?? '',
+          'recorded_by': recordedBy,
+        }),
+      ).timeout(const Duration(seconds: 20));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'success': true,
+          'notified_count': data['notified_count'] ?? 0,
+        };
+      }
+      return {
+        'success': false,
+        'error': 'Statut ${response.statusCode} : ${response.body}',
+      };
+    } on SocketException catch (e) {
+      return {'success': false, 'error': 'Aucune connexion réseau : $e'};
+    } catch (e) {
+      return {'success': false, 'error': 'Erreur inattendue : $e'};
+    }
+  }
+
+  /// Récupère le registre déjà enregistré pour une classe/date, pour
+  /// rouvrir l'écran sans perdre les cases déjà cochées.
+  Future<Map<String, dynamic>> getAttendance({
+    required String classe,
+    String? date,
+  }) async {
+    if (schoolCode == null || schoolCode!.isEmpty) {
+      return {'success': false, 'absents': <String>[]};
+    }
+    try {
+      final dateStr = date ?? DateTime.now().toString().split(' ')[0];
+      final response = await http.get(
+        Uri.parse('$serverUrl/school/get_attendance'
+            '?school_code=$schoolCode&date=$dateStr'
+            '&classe=${Uri.encodeComponent(classe)}'),
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'success': true,
+          'absents': List<String>.from(data['absents'] ?? []),
+        };
+      }
+      return {'success': false, 'absents': <String>[]};
+    } catch (_) {
+      return {'success': false, 'absents': <String>[]};
+    }
+  }
+
+  /// Envoie une convocation individuelle (comportement, discipline...)
+  /// au parent d'un élève précis.
+  Future<Map<String, dynamic>> sendConvocation({
+    required String studentId,
+    required String title,
+    required String message,
+  }) async {
+    if (schoolCode == null || schoolCode!.isEmpty) {
+      return {'success': false, 'error': 'Code école manquant.'};
+    }
+    try {
+      final response = await http.post(
+        Uri.parse('$serverUrl/school/send_convocation'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'school_code': schoolCode,
+          'student_id':  studentId,
+          'title':       title,
+          'message':     message,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) return {'success': true};
+      return {
+        'success': false,
+        'error': 'Statut ${response.statusCode} : ${response.body}',
+      };
+    } on SocketException catch (e) {
+      return {'success': false, 'error': 'Aucune connexion réseau : $e'};
+    } catch (e) {
+      return {'success': false, 'error': 'Erreur inattendue : $e'};
+    }
+  }
+
+  /// Envoie un communiqué aux parents, ciblé par élèves sélectionnés,
+  /// par classe, par section, ou à toute l'école.
+  Future<Map<String, dynamic>> sendAnnouncement({
+    required String title,
+    required String message,
+    required String target, // 'all' | 'section' | 'classe' | 'students'
+    String? classe,
+    String? section,
+    List<String>? studentIds,
+  }) async {
+    if (schoolCode == null || schoolCode!.isEmpty) {
+      return {'success': false, 'error': 'Code école manquant.'};
+    }
+    try {
+      final response = await http.post(
+        Uri.parse('$serverUrl/school/send_announcement'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'school_code': schoolCode,
+          'annee':       currentYear,
+          'title':       title,
+          'message':     message,
+          'target':      target,
+          'classe':      classe ?? '',
+          'section':     section ?? '',
+          'student_ids': studentIds ?? [],
+        }),
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'success': true,
+          'notified_count': data['notified_count'] ?? 0,
+        };
+      }
+      return {
+        'success': false,
+        'error': 'Statut ${response.statusCode} : ${response.body}',
+      };
+    } on SocketException catch (e) {
+      return {'success': false, 'error': 'Aucune connexion réseau : $e'};
+    } catch (e) {
+      return {'success': false, 'error': 'Erreur inattendue : $e'};
+    }
   }
 }
