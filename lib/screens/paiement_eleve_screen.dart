@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
@@ -1315,9 +1318,37 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     );
   }
 
+  // ⚡ NOUVEAU — Recharge le logo depuis le disque, exactement comme le
+  // fait SettingsScreen (même clé SharedPreferences 'has_logo', même
+  // chemin de fichier 'school_logo.png' dans getApplicationDocumentsDirectory).
+  // C'est ce qui manquait : cet écran n'avait jamais accès au logo,
+  // donc il l'envoyait toujours comme "null" à l'impression.
+  // On ne le garde pas dans un champ d'état permanent : on le relit à
+  // chaque impression, pour être sûr d'avoir toujours la version la
+  // plus récente même si l'admin vient de le changer dans les Paramètres.
+  Future<Uint8List?> _loadLogoBytesFromDisk() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final hasLogo = prefs.getBool('has_logo') ?? false;
+      if (!hasLogo) return null;
+
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/school_logo.png');
+      if (await file.exists()) {
+        return await file.readAsBytes();
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ⚡ CORRIGÉ — utilise EscPosPrinterService (imprimante Epson TM-T20III
   // en USB, ciblée par son nom Windows) au lieu de l'ancien
   // BluetoothPrinterService (port COM Bluetooth), qui n'existe plus.
+  // ⚡ CORRIGÉ (bug logo) — charge maintenant le logo depuis le disque
+  // (comme SettingsScreen) et le transmet à printReceipt, alors qu'avant
+  // logoBytes n'était jamais fourni et restait donc "null" à l'impression.
   Future<void> _printReceiptAfterPayment({
     required Eleve eleve,
     required String mois,
@@ -1329,6 +1360,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     // un port COM ('printer_com_port' est obsolète).
     final printerName = prefs.getString('printer_name') ?? '';
     if (printerName.isEmpty) return;
+
+    // ⚡ NOUVEAU — chargement du logo AVANT l'impression du reçu.
+    final logoBytes = await _loadLogoBytesFromDisk();
 
     final double montantRequis = widget.fraisScolaires
         .getRequiredForMonth(mois, eleve.section, eleve.classe);
@@ -1356,6 +1390,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       historiqueTransactions: eleve.transactions
           .map((t) => Map<String, dynamic>.from(t))
           .toList(),
+      logoBytes: logoBytes, // ⚡ NOUVEAU — le logo est maintenant transmis
     );
 
     if (mounted) {

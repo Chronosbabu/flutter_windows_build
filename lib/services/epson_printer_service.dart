@@ -20,6 +20,24 @@ import 'package:image/image.dart' as img;
 /// le Vendor ID / Product ID USB : on cible l'imprimante par son nom Windows,
 /// ce qui évite de devoir remplacer le pilote Epson par un pilote WinUSB
 /// générique (qui casserait l'impression normale de l'imprimante).
+///
+/// ⚡ NOUVEAU — ÉCONOMIE DE PAPIER (reçu plus court)
+/// À la demande de l'employeur : le reçu doit occuper le MOINS de papier
+/// possible, sans qu'aucune information n'y soit retirée. Pour y arriver,
+/// on a :
+///   1. Combiné plusieurs informations sur une même ligne (2 colonnes)
+///      au lieu d'une ligne par information (ex: "N° Reçu" + "ID Élève"
+///      sur la même ligne, "Classe" + "Section" sur la même ligne,
+///      "Date" + "Heure" sur la même ligne).
+///   2. Supprimé les sauts de ligne vides purement décoratifs entre les
+///      sections (feed(1) qui ne servaient qu'à aérer visuellement).
+///   3. Réduit l'espace de signature (feed(2) → feed(1)) et la marge de
+///      découpe en fin de reçu (feed(3) → feed(2)).
+///   4. Réduit la taille de l'image d'en-tête (logo + nom de l'école) :
+///      marges et hauteur de ligne plus petites, sans perdre de lisibilité
+///      ni couper le nom de l'école.
+/// Toutes les données affichées avant restent affichées — rien n'a été
+/// retiré, seulement réorganisé et compacté.
 class EscPosPrinterService {
   // ====================================================================
   // LISTER LES IMPRIMANTES INSTALLÉES SUR WINDOWS
@@ -118,7 +136,7 @@ class EscPosPrinterService {
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — EN-TÊTE COMPOSITE : LOGO GAUCHE + NOM CENTRÉ + LOGO DROITE
+  // ⚡ EN-TÊTE COMPOSITE : LOGO GAUCHE + NOM CENTRÉ + LOGO DROITE
   // ====================================================================
   // Une imprimante thermique ne peut pas mélanger texte ESC/POS et image
   // sur la même ligne physique. Pour avoir "logo — nom de l'école — logo"
@@ -130,14 +148,18 @@ class EscPosPrinterService {
   // partie qui rentre reste sur la ligne du logo, et le reste du nom
   // s'affiche sur une ou plusieurs lignes en dessous, centrées sur toute
   // la largeur du reçu.
+  //
+  // ⚡ CORRIGÉ (économie de papier) — marges et hauteur de ligne réduites
+  // par rapport à avant (margin 8→6, logoBox 82→60, lineHeight 30→24),
+  // pour un en-tête plus compact sans perdre le logo ni le nom complet.
   static const int _headerWidth = 380;
 
   static img.Image _buildReceiptHeaderImage({
     required String schoolName,
     required Uint8List logoBytes,
   }) {
-    const int margin  = 8;
-    const int logoBox = 82;
+    const int margin  = 6;
+    const int logoBox = 60;
     final font = img.arial24;
 
     final int textZoneLeft  = margin + logoBox + margin;
@@ -197,10 +219,10 @@ class EscPosPrinterService {
       if (line.isNotEmpty) extraLines.add(line);
     }
 
-    const int lineHeight   = 30;
-    final int topRowHeight = logo != null ? logoBox : 40;
+    const int lineHeight   = 24;
+    final int topRowHeight = logo != null ? logoBox : 32;
     final int extraHeight  =
-    extraLines.isEmpty ? 0 : (extraLines.length * lineHeight) + 6;
+    extraLines.isEmpty ? 0 : (extraLines.length * lineHeight) + 4;
     final int headerHeight = (margin * 2) + topRowHeight + extraHeight;
 
     final canvas = img.Image(width: _headerWidth, height: headerHeight);
@@ -228,7 +250,7 @@ class EscPosPrinterService {
         font: font, x: fx, y: fy, color: img.ColorRgb8(0, 0, 0));
 
     // Lignes suivantes (reste du nom), centrées sur toute la largeur
-    int ey = margin + topRowHeight + 6;
+    int ey = margin + topRowHeight + 4;
     for (final line in extraLines) {
       final safeLine = _safeText(line);
       final w = _textWidth(font, safeLine);
@@ -285,6 +307,14 @@ class EscPosPrinterService {
   // ====================================================================
   // GÉNÉRER ET IMPRIMER UN REÇU COMPLET (paiement mensuel principal)
   // ====================================================================
+  // ⚡ CORRIGÉ (économie de papier) — mise en page compactée :
+  //   - "N° Reçu" et "ID Élève" sur la même ligne (au lieu de 2 lignes)
+  //   - "Classe" et "Section" sur la même ligne (au lieu de 2 lignes)
+  //   - "Date" et "Heure" sur la même ligne (au lieu de 2 lignes)
+  //   - Suppression des feed(1) purement décoratifs entre les blocs
+  //   - Espace de signature réduit (feed(2) → feed(1))
+  //   - Marge de découpe finale réduite (feed(3) → feed(2))
+  // Toutes les informations affichées avant sont toujours présentes.
   static Future<bool> printReceipt({
     required String printerName,
     required String schoolName,
@@ -379,7 +409,6 @@ class EscPosPrinterService {
         '================================',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
       // ==================== NOM COMPLET ÉLÈVE (TOUT EN HAUT) ====================
       bytes += generator.text(
@@ -398,61 +427,39 @@ class EscPosPrinterService {
         '................................',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
-      // ==================== INFOS ÉLÈVE ====================
+      // ==================== INFOS ÉLÈVE (compactées 2 par ligne) ====================
       bytes += generator.row([
         PosColumn(
-          text: 'N° Reçu :',
-          width: 5,
-          styles: const PosStyles(bold: true),
+          text: 'Reçu : $numRecu',
+          width: 12,
+          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
         ),
-        PosColumn(text: numRecu, width: 7),
       ]);
       bytes += generator.row([
         PosColumn(
-          text: 'ID Élève :',
-          width: 5,
+          text: 'ID : $studentId',
+          width: 6,
           styles: const PosStyles(bold: true),
         ),
-        PosColumn(text: studentId, width: 7),
+        PosColumn(
+          text: 'Cl. : $classe',
+          width: 6,
+          styles: const PosStyles(bold: true),
+        ),
       ]);
       bytes += generator.row([
         PosColumn(
-          text: 'Classe :',
-          width: 5,
+          text: 'Sect. : $section',
+          width: 6,
           styles: const PosStyles(bold: true),
         ),
-        PosColumn(text: classe, width: 7),
-      ]);
-      bytes += generator.row([
         PosColumn(
-          text: 'Section :',
-          width: 5,
-          styles: const PosStyles(bold: true),
+          text: '$today $heure',
+          width: 6,
+          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
         ),
-        PosColumn(text: section, width: 7),
       ]);
-      bytes += generator.feed(1);
-
-      // ==================== DATE & HEURE ====================
-      bytes += generator.row([
-        PosColumn(
-          text: 'Date :',
-          width: 5,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(text: today, width: 7),
-      ]);
-      bytes += generator.row([
-        PosColumn(
-          text: 'Heure :',
-          width: 5,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(text: heure, width: 7),
-      ]);
-      bytes += generator.feed(1);
 
       // ==================== PAIEMENT ====================
       bytes += generator.text(
@@ -507,19 +514,17 @@ class EscPosPrinterService {
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
       // ==================== SIGNATURE ====================
       bytes += generator.text(
         'Signature :',
         styles: const PosStyles(bold: true),
       );
-      bytes += generator.feed(2);
+      bytes += generator.feed(1);
       bytes += generator.text(
         '................................',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
       // ==================== PIED DE PAGE ====================
       bytes += generator.text(
@@ -538,7 +543,7 @@ class EscPosPrinterService {
         '================================',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(3);
+      bytes += generator.feed(2);
       bytes += generator.cut();
 
       return await _sendRawBytes(printerName, Uint8List.fromList(bytes));
@@ -548,10 +553,14 @@ class EscPosPrinterService {
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — PETIT REÇU POUR UN "AUTRE FRAIS" (frais éphémère)
+  // ⚡ PETIT REÇU POUR UN "AUTRE FRAIS" (frais éphémère)
   // Volontairement plus court que le reçu de paiement mensuel : nom de
   // l'école, titre du frais (ex: "Frais de l'État"), nom de l'élève,
   // classe, date de paiement, montant, et une ligne signature.
+  //
+  // ⚡ CORRIGÉ (économie de papier) — "Classe" et "Section" combinées sur
+  // une même ligne, feed(2) de signature réduit à feed(1), même principe
+  // que pour printReceipt. Aucune information retirée.
   // ====================================================================
   static Future<bool> printAutreFraisReceipt({
     required String printerName,
@@ -602,7 +611,6 @@ class EscPosPrinterService {
         '================================',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
       bytes += generator.text(
         'Nom complet :',
@@ -616,23 +624,18 @@ class EscPosPrinterService {
           width: PosTextSize.size1,
         ),
       );
-      bytes += generator.feed(1);
 
       bytes += generator.row([
         PosColumn(
-          text: 'Classe :',
-          width: 5,
+          text: 'Cl. : $classe',
+          width: 6,
           styles: const PosStyles(bold: true),
         ),
-        PosColumn(text: classe, width: 7),
-      ]);
-      bytes += generator.row([
         PosColumn(
-          text: 'Section :',
-          width: 5,
+          text: 'Sect. : $section',
+          width: 6,
           styles: const PosStyles(bold: true),
         ),
-        PosColumn(text: section, width: 7),
       ]);
       bytes += generator.row([
         PosColumn(
@@ -642,7 +645,6 @@ class EscPosPrinterService {
         ),
         PosColumn(text: '$today $heure', width: 7),
       ]);
-      bytes += generator.feed(1);
 
       bytes += generator.text(
         '--------------------------------',
@@ -664,18 +666,16 @@ class EscPosPrinterService {
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
       bytes += generator.text(
         'Signature :',
         styles: const PosStyles(bold: true),
       );
-      bytes += generator.feed(2);
+      bytes += generator.feed(1);
       bytes += generator.text(
         '................................',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(1);
 
       bytes += generator.text(
         '================================',
@@ -689,7 +689,7 @@ class EscPosPrinterService {
         '================================',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.feed(3);
+      bytes += generator.feed(2);
       bytes += generator.cut();
 
       return await _sendRawBytes(printerName, Uint8List.fromList(bytes));
