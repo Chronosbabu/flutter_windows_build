@@ -1,4 +1,7 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 
@@ -26,6 +29,23 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
   bool _isSaving = false;
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — AUTRES INFORMATIONS SUR L'IDENTITÉ DE L'ÉLÈVE (OPTIONNEL)
+  // ==========================================================================
+  // Champs par défaut toujours proposés (mais jamais obligatoires) : nom du
+  // père, nom de la mère, adresse, date de naissance, photo. En plus de ça,
+  // l'utilisateur peut ajouter librement ses propres questions
+  // personnalisées via customFieldsControllers (question -> contrôleur de
+  // réponse). Toutes ces données sont saisies dans une boîte de dialogue
+  // dédiée (_showAutresInfosDialog) ouverte depuis le bouton tout en bas du
+  // formulaire.
+  final pereNomController = TextEditingController();
+  final mereNomController = TextEditingController();
+  final adresseController = TextEditingController();
+  DateTime? selectedDateNaissance;
+  Uint8List? photoBytes;
+  final Map<String, TextEditingController> customFieldsControllers = {};
+
   @override
   void initState() {
     super.initState();
@@ -42,6 +62,13 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     nomFocus.dispose();
     postNomFocus.dispose();
     prenomFocus.dispose();
+    // ⚡ NOUVEAU
+    pereNomController.dispose();
+    mereNomController.dispose();
+    adresseController.dispose();
+    for (var c in customFieldsControllers.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -49,10 +76,22 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     nomController.clear();
     postNomController.clear();
     prenomController.clear();
+    // ⚡ NOUVEAU — on vide les valeurs saisies pour cet élève, mais on garde
+    // les QUESTIONS personnalisées déjà créées (elles restent proposées
+    // pour l'élève suivant, très utile lors d'une saisie en série).
+    pereNomController.clear();
+    mereNomController.clear();
+    adresseController.clear();
+    for (var c in customFieldsControllers.values) {
+      c.clear();
+    }
     setState(() {
       selectedClasseNumero = null;
       selectedSousClasse = null;
       // On garde la section sélectionnée pour accélérer la saisie en série
+      // ⚡ NOUVEAU
+      selectedDateNaissance = null;
+      photoBytes = null;
     });
     nomFocus.requestFocus();
   }
@@ -210,6 +249,259 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     );
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — BOÎTE DE DIALOGUE "AUTRES INFORMATIONS" (OPTIONNEL)
+  // ==========================================================================
+  // Ouverte depuis le bouton tout en bas du formulaire. Contient :
+  //   - Photo de l'élève (sélection depuis le PC via file_selector)
+  //   - Nom du père / Nom de la mère / Adresse / Date de naissance
+  //   - Un bouton "Ajouter une Question Personnalisée" qui permet à
+  //     l'utilisateur de créer autant de champs libres qu'il le souhaite ;
+  //     chaque question ajoutée fait apparaître immédiatement son propre
+  //     champ de saisie dans la boîte de dialogue.
+  // Toutes les valeurs vivent dans les contrôleurs de l'écran parent (pas
+  // seulement dans la boîte de dialogue), donc rien n'est perdu si
+  // l'utilisateur ferme puis rouvre la boîte de dialogue avant d'enregistrer
+  // l'élève.
+  Future<void> _showAutresInfosDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> pickPhoto() async {
+            const typeGroup = XTypeGroup(
+              label: 'images',
+              extensions: ['png', 'jpg', 'jpeg'],
+            );
+            final file = await openFile(acceptedTypeGroups: [typeGroup]);
+            if (file == null) return;
+            final bytes = await file.readAsBytes();
+            setDialogState(() => photoBytes = bytes);
+          }
+
+          Future<void> pickDate() async {
+            final now = DateTime.now();
+            final picked = await showDatePicker(
+              context: ctx,
+              initialDate: selectedDateNaissance ?? DateTime(now.year - 10),
+              firstDate: DateTime(1990),
+              lastDate: now,
+            );
+            if (picked != null) {
+              setDialogState(() => selectedDateNaissance = picked);
+            }
+          }
+
+          Future<void> addCustomField() async {
+            final questionController = TextEditingController();
+            final question = await showDialog<String>(
+              context: ctx,
+              builder: (ctx2) => AlertDialog(
+                title: const Text("Nouvelle Question Personnalisée"),
+                content: TextField(
+                  controller: questionController,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: "Ex: Numéro de téléphone du parent",
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx2),
+                    child: const Text("Annuler"),
+                  ),
+                  ElevatedButton(
+                    onPressed: () {
+                      final q = questionController.text.trim();
+                      if (q.isNotEmpty) Navigator.pop(ctx2, q);
+                    },
+                    child: const Text("Ajouter"),
+                  ),
+                ],
+              ),
+            );
+            if (question != null && question.isNotEmpty) {
+              if (!customFieldsControllers.containsKey(question)) {
+                setDialogState(() {
+                  customFieldsControllers[question] = TextEditingController();
+                });
+              }
+            }
+          }
+
+          void removeCustomField(String question) {
+            setDialogState(() {
+              customFieldsControllers[question]?.dispose();
+              customFieldsControllers.remove(question);
+            });
+          }
+
+          final dateLabel = selectedDateNaissance != null
+              ? "${selectedDateNaissance!.day.toString().padLeft(2, '0')}/"
+              "${selectedDateNaissance!.month.toString().padLeft(2, '0')}/"
+              "${selectedDateNaissance!.year}"
+              : "Non renseignée";
+
+          return AlertDialog(
+            title: const Text("Autres Informations (Optionnel)"),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Ces informations sont facultatives. Remplissez uniquement "
+                          "ce dont votre école a besoin.",
+                      style: TextStyle(color: Colors.grey, fontSize: 12.5),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // ---- Photo ----
+                    Center(
+                      child: Column(
+                        children: [
+                          CircleAvatar(
+                            radius: 45,
+                            backgroundColor: Colors.grey.shade200,
+                            backgroundImage: photoBytes != null
+                                ? MemoryImage(photoBytes!)
+                                : null,
+                            child: photoBytes == null
+                                ? const Icon(Icons.person, size: 45, color: Colors.grey)
+                                : null,
+                          ),
+                          const SizedBox(height: 8),
+                          TextButton.icon(
+                            icon: const Icon(Icons.photo_camera, size: 18),
+                            label: Text(
+                              photoBytes == null ? "Choisir une photo" : "Changer la photo",
+                            ),
+                            onPressed: pickPhoto,
+                          ),
+                          if (photoBytes != null)
+                            TextButton.icon(
+                              icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+                              label: const Text("Retirer", style: TextStyle(color: Colors.red)),
+                              onPressed: () => setDialogState(() => photoBytes = null),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+
+                    TextField(
+                      controller: pereNomController,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        labelText: "Nom du père",
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: mereNomController,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        labelText: "Nom de la mère",
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: adresseController,
+                      textCapitalization: TextCapitalization.sentences,
+                      decoration: const InputDecoration(
+                        labelText: "Adresse",
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    InkWell(
+                      onTap: pickDate,
+                      child: InputDecorator(
+                        decoration: const InputDecoration(
+                          labelText: "Date de naissance",
+                          border: OutlineInputBorder(),
+                          suffixIcon: Icon(Icons.calendar_today, size: 18),
+                        ),
+                        child: Text(dateLabel),
+                      ),
+                    ),
+
+                    if (customFieldsControllers.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text(
+                        "Questions Personnalisées",
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                      const SizedBox(height: 8),
+                      ...customFieldsControllers.entries.map(
+                            (entry) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: entry.value,
+                                  decoration: InputDecoration(
+                                    labelText: entry.key,
+                                    border: const OutlineInputBorder(),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.close, color: Colors.red, size: 20),
+                                tooltip: "Supprimer cette question",
+                                onPressed: () => removeCustomField(entry.key),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.add_circle_outline),
+                      label: const Text("Ajouter une Question Personnalisée"),
+                      onPressed: addCustomField,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("Terminé"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    // Rafraîchit l'écran principal (ex: le résumé sous le bouton).
+    if (mounted) setState(() {});
+  }
+
+  // ⚡ NOUVEAU — Nombre de champs optionnels actuellement remplis, affiché
+  // en résumé sous le bouton "Autres Informations".
+  int _countFilledExtras() {
+    int count = 0;
+    if (pereNomController.text.trim().isNotEmpty) count++;
+    if (mereNomController.text.trim().isNotEmpty) count++;
+    if (adresseController.text.trim().isNotEmpty) count++;
+    if (selectedDateNaissance != null) count++;
+    if (photoBytes != null) count++;
+    count += customFieldsControllers.values
+        .where((c) => c.text.trim().isNotEmpty)
+        .length;
+    return count;
+  }
+
   Future<void> _ajouterEleve() async {
     if (nomController.text.trim().isEmpty ||
         postNomController.text.trim().isEmpty ||
@@ -233,6 +525,21 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         selectedSousClasse,
       );
 
+      // ⚡ NOUVEAU — formatage de la date de naissance en "JJ/MM/AAAA"
+      String dateNaissanceStr = '';
+      if (selectedDateNaissance != null) {
+        final d = selectedDateNaissance!;
+        String two(int n) => n.toString().padLeft(2, '0');
+        dateNaissanceStr = "${two(d.day)}/${two(d.month)}/${d.year}";
+      }
+
+      // ⚡ NOUVEAU — construction de la carte des questions personnalisées
+      // (on ne garde que celles qui ont réellement une réponse remplie)
+      final Map<String, String> customFieldsMap = {
+        for (var entry in customFieldsControllers.entries)
+          entry.key: entry.value.text.trim(),
+      }..removeWhere((k, v) => v.isEmpty);
+
       final nouvelEleve = Eleve(
         id: generatedId,
         nom: nomController.text.trim(),
@@ -240,6 +547,13 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         prenom: prenomController.text.trim(),
         classe: classeFinale,
         section: selectedSection!,
+        // ⚡ NOUVEAU
+        pereNom: pereNomController.text.trim(),
+        mereNom: mereNomController.text.trim(),
+        adresse: adresseController.text.trim(),
+        dateNaissance: dateNaissanceStr,
+        photoBase64: photoBytes != null ? base64Encode(photoBytes!) : null,
+        customFields: customFieldsMap,
       );
 
       widget.fraisScolaires.currentData.eleves.add(nouvelEleve);
@@ -274,6 +588,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     final sousClasses = (selectedSection != null && selectedClasseNumero != null)
         ? widget.fraisScolaires.getSubClassesFor(selectedSection!, selectedClasseNumero!)
         : <String>[];
+
+    // ⚡ NOUVEAU
+    final extrasCount = _countFilledExtras();
 
     return Scaffold(
       appBar: AppBar(
@@ -451,6 +768,38 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                 onPressed: () => Navigator.pop(context),
               ),
             ),
+
+            // ==========================================================================
+            // ⚡ NOUVEAU — BOUTON "AUTRES INFORMATIONS" (TOUT EN BAS)
+            // ==========================================================================
+            const SizedBox(height: 15),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.badge_outlined),
+                label: Text(
+                  extrasCount > 0
+                      ? "Autres Informations ($extrasCount rempli(s))"
+                      : "Autres Informations (Optionnel)",
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.indigo,
+                  side: const BorderSide(color: Colors.indigo),
+                ),
+                onPressed: _showAutresInfosDialog,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Center(
+              child: Text(
+                "Nom du père, nom de la mère, adresse, date de naissance, photo, "
+                    "et vos propres questions personnalisées.",
+                style: TextStyle(color: Colors.grey, fontSize: 11.5),
+                textAlign: TextAlign.center,
+              ),
+            ),
+
             const SizedBox(height: 30),
             const Center(
               child: Text(

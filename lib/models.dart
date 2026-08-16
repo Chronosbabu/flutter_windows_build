@@ -8,6 +8,34 @@ class Eleve {
   Map<String, double> paid = {};
   List<Map<String, dynamic>> transactions = [];
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — INFORMATIONS ADDITIONNELLES SUR L'IDENTITÉ DE L'ÉLÈVE
+  // ==========================================================================
+  // Toutes ces informations sont 100% FACULTATIVES : chaque école décide si
+  // elle les remplit ou non. Elles sont saisies pour la première fois dans
+  // EnregistrerEleveScreen (bouton "Autres Informations" en bas du
+  // formulaire) et peuvent être modifiées plus tard depuis la fiche/carte
+  // d'élève dans StudentListScreen (clic sur un élève dans le registre).
+  //
+  // - pereNom / mereNom / adresse / dateNaissance : champs fixes par défaut,
+  //   toujours proposés à l'école mais jamais obligatoires.
+  // - photoBase64 : la photo de l'élève, choisie depuis le PC de
+  //   l'utilisateur, encodée en base64 pour rester dans le même fichier JSON
+  //   local que le reste des données (comme tout le reste de l'application).
+  // - customFields : questions personnalisées ajoutées librement par
+  //   l'utilisateur (ex: "Numéro de téléphone du parent", "Groupe sanguin"),
+  //   sous forme clé (la question) -> valeur (la réponse pour cet élève).
+  //
+  // Toutes les méthodes existantes de l'application (paiements, PDF,
+  // passation, sauvegarde/restauration serveur...) continuent de fonctionner
+  // exactement comme avant, que ces champs soient remplis ou non.
+  String pereNom;
+  String mereNom;
+  String adresse;
+  String dateNaissance; // format "JJ/MM/AAAA", chaîne vide si non renseignée
+  String? photoBase64;  // photo encodée en base64, ou null si aucune photo
+  Map<String, String> customFields = {}; // question personnalisée -> réponse
+
   Eleve({
     required this.id,
     required this.nom,
@@ -15,7 +43,24 @@ class Eleve {
     required this.prenom,
     required this.classe,
     required this.section,
-  });
+    this.pereNom = '',
+    this.mereNom = '',
+    this.adresse = '',
+    this.dateNaissance = '',
+    this.photoBase64,
+    Map<String, String>? customFields,
+  }) : customFields = customFields ?? {};
+
+  // ⚡ NOUVEAU — Vrai si au moins une information additionnelle a été
+  // renseignée pour cet élève (utile pour savoir si la carte d'élève a
+  // quelque chose à montrer au-delà des données de base).
+  bool get hasCarteInfo =>
+      pereNom.trim().isNotEmpty ||
+          mereNom.trim().isNotEmpty ||
+          adresse.trim().isNotEmpty ||
+          dateNaissance.trim().isNotEmpty ||
+          (photoBase64 != null && photoBase64!.isNotEmpty) ||
+          customFields.values.any((v) => v.trim().isNotEmpty);
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -26,6 +71,13 @@ class Eleve {
     'section': section,
     'paid': paid,
     'transactions': transactions,
+    // ⚡ NOUVEAU
+    'pereNom': pereNom,
+    'mereNom': mereNom,
+    'adresse': adresse,
+    'dateNaissance': dateNaissance,
+    'photoBase64': photoBase64,
+    'customFields': customFields,
   };
 
   factory Eleve.fromJson(Map<String, dynamic> json) {
@@ -36,6 +88,17 @@ class Eleve {
       prenom: json['prenom'] ?? '',
       classe: json['classe'] ?? '',
       section: json['section'] ?? 'Primaire',
+      // ⚡ NOUVEAU — valeurs par défaut vides si absentes du JSON, pour
+      // rester 100% compatible avec les données déjà existantes des écoles
+      // qui utilisent déjà l'application (aucune migration nécessaire).
+      pereNom: json['pereNom'] ?? '',
+      mereNom: json['mereNom'] ?? '',
+      adresse: json['adresse'] ?? '',
+      dateNaissance: json['dateNaissance'] ?? '',
+      photoBase64: json['photoBase64'] as String?,
+      customFields: json['customFields'] != null
+          ? Map<String, String>.from(json['customFields'] as Map)
+          : {},
     )
       ..paid = Map<String, double>.from(json['paid'] ?? {})
       ..transactions = (json['transactions'] as List? ?? [])
