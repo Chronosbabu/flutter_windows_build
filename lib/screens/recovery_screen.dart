@@ -6,6 +6,13 @@ import 'dart:io';
 import '../app_state.dart';
 import '../frais_scolaires.dart';
 import 'school_home_screen.dart';
+// ⚡⚡⚡ NOUVEAU — nécessaires pour la vérification d'abonnement lors
+// d'une connexion sur un nouvel appareil (code école + mot de passe).
+// Ajustez ces deux chemins si subscription_service.dart et
+// subscription_expired_screen.dart ne sont pas dans le même dossier que
+// ce fichier.
+import 'subscription_service.dart';
+import 'subscription_expired_screen.dart';
 
 const String _serverUrl = "https://jsinf.onrender.com";
 
@@ -58,7 +65,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — Nettoyage robuste de l'ID/code saisi ou collé.
+  // ⚡ Nettoyage robuste de l'ID/code saisi ou collé.
   //
   // Un copier-coller depuis WhatsApp, Word ou un email peut insérer des
   // espaces insécables ou des retours à la ligne invisibles au milieu du
@@ -214,6 +221,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           await appState.setSchoolCode(realCode);
           await appState.updateSchoolName(data['school_name']);
           await appState.setBackupPassword(password);
+
+          // ⚡⚡⚡ NOUVEAU — dès l'activation, le serveur démarre la
+          // période d'abonnement (voir /school/activate côté serveur,
+          // qui renvoie subscription_expires_at + subscription_seconds).
+          // On initialise immédiatement le cache local de
+          // SubscriptionService pour que le compte à rebours démarre
+          // dès maintenant, même si l'appareil repasse hors-ligne juste
+          // après (comme demandé : le comptage doit fonctionner sans
+          // avoir besoin d'internet à chaque fois).
+          await SubscriptionService.instance.applyServerSubscription(
+            schoolCode: realCode,
+            expiresAtIso: data['subscription_expires_at'] as String?,
+            blocked: false,
+          );
+
           await _showWelcomeDialog(data['school_name']);
         }
       } else {
@@ -270,6 +292,47 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       if (verifyResponse.statusCode == 200) {
         final vData = jsonDecode(verifyResponse.body);
         if (vData['valid'] == true) {
+          // ==============================================================
+          // ⚡⚡⚡ NOUVEAU — POINT CLÉ DEMANDÉ :
+          // C'est ICI, juste après un mot de passe correct, que l'appli
+          // doit vérifier si l'école est "en ordre" auprès du serveur —
+          // exactement le scénario décrit : "même si l'utilisateur change
+          // d'ordinateur [...] une fois il entre ces informations
+          // directement le serveur va vérifier s'il n'est pas en ordre,
+          // si il n'est pas, directement on lui emmène encore dans cette
+          // fenêtre là [SubscriptionExpiredScreen]".
+          //
+          // Le serveur (/verify_password) renvoie déjà ce bloc :
+          //   "subscription": { "valid": bool, "blocked": bool,
+          //                      "expires_at": "...",
+          //                      "seconds_remaining": int|null }
+          //
+          // On met d'abord à jour le cache local (utile pour cet
+          // appareil, même s'il repasse hors-ligne ensuite), PUIS on
+          // décide de bloquer ou non l'accès selon "valid".
+          // ==============================================================
+          final subMap = vData['subscription'] as Map<String, dynamic>?;
+
+          await SubscriptionService.instance.applyFromServerMap(
+            schoolCode: code,
+            subscriptionMap: subMap,
+          );
+
+          final bool subscriptionValid = subMap == null || subMap['valid'] == true;
+
+          if (!subscriptionValid) {
+            if (mounted) {
+              setState(() => _isLoading = false);
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(
+                  builder: (_) => SubscriptionExpiredScreen(schoolCode: code),
+                ),
+                    (route) => false,
+              );
+            }
+            return;
+          }
+
           await _restoreAllData(code, password);
         } else {
           setState(() => _errorMsg = "Mot de passe incorrect.");
@@ -317,13 +380,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           final fraisScolaires = FraisScolaires();
           fraisScolaires.schoolCode = code;
           await fraisScolaires.loadData();
-          // ⚡ CORRIGÉ — AVANT : fraisScolaires._mergeRestoredData(data)
-          // appelait une méthode PRIVÉE depuis un autre fichier, ce qui
-          // est une ERREUR DE COMPILATION en Dart. La méthode a été
-          // renommée en publique (mergeRestoredData) dans
-          // frais_scolaires.dart, donc cet appel est maintenant valide.
           await fraisScolaires.mergeRestoredData(data);
           await fraisScolaires.saveData();
+
+          // ⚡⚡⚡ NOUVEAU — /restore renvoie aussi le bloc "subscription"
+          // (voir server.py : data['subscription'] = ... juste avant le
+          // retour). On rafraîchit le cache local une seconde fois ici
+          // par cohérence, même si la vérification décisive a déjà eu
+          // lieu juste après /verify_password ci-dessus.
+          final subMap = data['subscription'] as Map<String, dynamic>?;
+          if (subMap != null) {
+            await SubscriptionService.instance.applyFromServerMap(
+              schoolCode: code,
+              subscriptionMap: subMap,
+            );
+          }
 
           await _showReconnectedDialog(schoolName);
         }

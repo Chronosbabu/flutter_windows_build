@@ -35,6 +35,32 @@ jobs:
             "build\windows\x64\runner\Release\c_schollapp.exe" `
             "EDUPAY-DRC.exe"
 
+      # ==========================================================================
+      # ⚡ NOUVEAU — Télécharge le Visual C++ Redistributable officiel
+      # Microsoft (lien permanent aka.ms, toujours pointé vers la dernière
+      # version 2015-2022 x64). C'est ce fichier qui sera embarqué DANS
+      # l'installateur EDUPAY-DRC-Setup.exe, pour que l'application
+      # fonctionne même sur un PC qui n'a jamais eu ce composant installé
+      # (PC neuf, Windows "allégé", entreprise avec un poste minimal...).
+      # ==========================================================================
+      - name: Download VC++ Redistributable
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.x64.exe"
+
+      - name: Verify VC++ Redistributable
+        shell: powershell
+        run: |
+          if (!(Test-Path "vc_redist.x64.exe")) {
+            Write-Error "Le téléchargement de vc_redist.x64.exe a échoué."
+            exit 1
+          }
+          $size = (Get-Item "vc_redist.x64.exe").Length
+          if ($size -lt 10000000) {
+            Write-Error "vc_redist.x64.exe semble corrompu (taille anormale : $size octets)."
+            exit 1
+          }
+
       - name: Install Inno Setup
         shell: powershell
         run: |
