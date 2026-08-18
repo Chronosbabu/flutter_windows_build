@@ -1,99 +1,101 @@
-name: Windows Build Only
 
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+  name: Windows Build Only
 
-jobs:
-  build:
-    runs-on: windows-latest
+  on:
+    push:
+      branches:
+        - main
+    workflow_dispatch:
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  jobs:
+    build:
+      runs-on: windows-latest
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.38.4'
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
 
-      - name: Enable Windows
-        run: flutter config --enable-windows-desktop
+        - name: Setup Flutter
+          uses: subosito/flutter-action@v2
+          with:
+            flutter-version: '3.38.4'
 
-      - name: Get dependencies
-        run: flutter pub get
+        - name: Enable Windows
+          run: flutter config --enable-windows-desktop
 
-      - name: Build Windows
-        run: flutter build windows --release
+        - name: Get dependencies
+          run: flutter pub get
 
-      - name: Rename executable
-        shell: powershell
-        run: |
-          Rename-Item `
-            "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "EDUPAY-DRC.exe"
+        - name: Build Windows
+          run: flutter build windows --release
 
-      # ==========================================================================
-      # Télécharge le Visual C++ Redistributable officiel Microsoft (lien
-      # permanent aka.ms, toujours pointé vers la dernière version 2015-2022
-      # x64). C'est ce fichier qui sera embarqué DANS l'installateur
-      # EDUPAY-DRC-Setup.exe, pour que l'application fonctionne même sur un
-      # PC qui n'a jamais eu ce composant installé (PC neuf, Windows
-      # "allégé", entreprise avec un poste minimal...).
-      # ==========================================================================
-      - name: Download VC++ Redistributable
-        shell: powershell
-        run: |
-          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.x64.exe"
+        - name: Rename executable
+          shell: powershell
+          run: |
+            Rename-Item `
+              "build\windows\x64\runner\Release\c_schollapp.exe" `
+              "EDUPAY-DRC-Acces.exe"
 
-      - name: Verify VC++ Redistributable
-        shell: powershell
-        run: |
-          if (!(Test-Path "vc_redist.x64.exe")) {
-            Write-Error "Le téléchargement de vc_redist.x64.exe a échoué."
-            exit 1
-          }
-          $size = (Get-Item "vc_redist.x64.exe").Length
-          if ($size -lt 10000000) {
-            Write-Error "vc_redist.x64.exe semble corrompu (taille anormale : $size octets)."
-            exit 1
-          }
+        # ==========================================================================
+        # Télécharge le Visual C++ Redistributable officiel Microsoft (lien
+        # permanent aka.ms, toujours pointé vers la dernière version 2015-2022
+        # x64). C'est ce fichier qui sera embarqué DANS l'installateur
+        # EDUPAY-DRC-Acces-Setup.exe, pour que l'application fonctionne même sur
+        # un PC qui n'a jamais eu ce composant installé (PC neuf, Windows
+        # "allégé", entreprise avec un poste minimal...).
+        # ==========================================================================
+        - name: Download VC++ Redistributable
+          shell: powershell
+          run: |
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.x64.exe"
 
-      - name: Install Inno Setup
-        shell: powershell
-        run: |
-          choco install innosetup -y --no-progress
+        - name: Verify VC++ Redistributable
+          shell: powershell
+          run: |
+            if (!(Test-Path "vc_redist.x64.exe")) {
+              Write-Error "Le téléchargement de vc_redist.x64.exe a échoué."
+              exit 1
+            }
+            $size = (Get-Item "vc_redist.x64.exe").Length
+            if ($size -lt 10000000) {
+              Write-Error "vc_redist.x64.exe semble corrompu (taille anormale : $size octets)."
+              exit 1
+            }
 
-      - name: Compile installer
-        shell: powershell
-        run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        - name: Install Inno Setup
+          shell: powershell
+          run: |
+            choco install innosetup -y --no-progress
 
-          if (!(Test-Path $iscc)) {
-            Write-Error "Inno Setup Compiler introuvable : $iscc"
-            exit 1
-          }
+        - name: Compile installer
+          shell: powershell
+          run: |
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            
+            if (!(Test-Path $iscc)) {
+              Write-Error "Inno Setup Compiler introuvable : $iscc"
+              exit 1
+            }
+            
+            & $iscc "installer.iss"
+            
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "La compilation Inno Setup a échoué."
+              exit $LASTEXITCODE
+            }
 
-          & $iscc "installer.iss"
+        - name: Verify installer
+          shell: powershell
+          run: |
+            if (!(Test-Path "EDUPAY-DRC-Acces-Setup.exe")) {
+              Write-Error "EDUPAY-DRC-Acces-Setup.exe n'a pas été créé."
+              exit 1
+            }
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "La compilation Inno Setup a échoué."
-            exit $LASTEXITCODE
-          }
+        - name: Upload installer
+          uses: actions/upload-artifact@v4
+          with:
+            name: EDUPAY-DRC-Acces-Setup
+            path: EDUPAY-DRC-Acces-Setup.exe
+            if-no-files-found: error
 
-      - name: Verify installer
-        shell: powershell
-        run: |
-          if (!(Test-Path "EDUPAY-DRC-Setup.exe")) {
-            Write-Error "EDUPAY-DRC-Setup.exe n'a pas été créé."
-            exit 1
-          }
-
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: EDUPAY-DRC-Setup
-          path: EDUPAY-DRC-Setup.exe
-          if-no-files-found: error
