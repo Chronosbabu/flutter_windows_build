@@ -1,4 +1,3 @@
-```ini
 [Setup]
 AppName=EDUPAY-DRC-Acces
 AppVersion=1.0.0
@@ -112,4 +111,3 @@ begin
       '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ErrorCode);
   end;
 end;
-```
