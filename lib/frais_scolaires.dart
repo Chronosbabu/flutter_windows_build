@@ -503,6 +503,147 @@ class FraisScolaires {
     }
   }
 
+  // ====================================================================
+  // ⚡ NOUVEAU — RENOMMAGE / SUPPRESSION D'UN NUMÉRO DE CLASSE
+  //
+  // Sert à corriger une faute de frappe (ex: "6eme" écrit "6eem") sans
+  // avoir à recréer la classe et réaffecter tous les élèves un par un.
+  // Le renommage met à jour TOUT ce qui référence ce numéro de classe :
+  // - la liste des classes de la section (config.classesBySection)
+  // - les sous-classes rattachées (config.subClassesByClasse)
+  // - les frais spécifiques à cette classe (config.feesByClasse)
+  // - les exceptions mensuelles de cette classe
+  //   (config.monthlyExceptionsByClasse)
+  // - CHAQUE ÉLÈVE, dans l'année en cours ET dans tout l'historique des
+  //   années précédentes, dont la classe correspond à cet ancien numéro
+  //   (en conservant sa sous-classe si elle en a une, ex: "6eme A"
+  //   devient "6A A" si on renomme "6eme" en "6A").
+  //
+  // Comme `currentData` est la MÊME référence que `history[currentYear]`
+  // (voir loadData), il suffit de parcourir `history.values` pour que
+  // l'année en cours soit également mise à jour — et donc que le
+  // changement soit immédiatement visible sur tous les écrans qui lisent
+  // `currentData` (accueil, listes, PDF, reçus...).
+  // ====================================================================
+  Future<void> renameClasseNumero(
+      String section, String oldNumero, String newNumero) async {
+    final trimmedNew = newNumero.trim();
+    if (trimmedNew.isEmpty || trimmedNew == oldNumero) return;
+
+    // 1. Liste des numéros de classe de la section.
+    final list = config.classesBySection[section];
+    if (list != null) {
+      final idx = list.indexOf(oldNumero);
+      if (idx != -1) {
+        if (list.contains(trimmedNew)) {
+          // Le nouveau nom existe déjà dans la liste : on fusionne en
+          // retirant simplement l'ancien pour éviter un doublon.
+          list.removeAt(idx);
+        } else {
+          list[idx] = trimmedNew;
+        }
+      }
+    }
+
+    final oldKey = _classeKey(section, oldNumero);
+    final newKey = _classeKey(section, trimmedNew);
+
+    // 2. Sous-classes rattachées à ce numéro de classe.
+    if (config.subClassesByClasse.containsKey(oldKey)) {
+      final subs = config.subClassesByClasse.remove(oldKey)!;
+      if (config.subClassesByClasse.containsKey(newKey)) {
+        for (var s in subs) {
+          if (!config.subClassesByClasse[newKey]!.contains(s)) {
+            config.subClassesByClasse[newKey]!.add(s);
+          }
+        }
+      } else {
+        config.subClassesByClasse[newKey] = subs;
+      }
+    }
+
+    // 3. Frais spécifiques déjà définis pour cette classe.
+    if (config.feesByClasse.containsKey(oldKey)) {
+      final fee = config.feesByClasse.remove(oldKey)!;
+      config.feesByClasse[newKey] = fee;
+    }
+
+    // 4. Exceptions mensuelles déjà définies pour cette classe.
+    if (config.monthlyExceptionsByClasse.containsKey(oldKey)) {
+      final exc = config.monthlyExceptionsByClasse.remove(oldKey)!;
+      config.monthlyExceptionsByClasse[newKey] = exc;
+    }
+
+    // 5. Tous les élèves (année en cours + historique complet) dont le
+    // numéro de classe correspond à l'ancien nom, en gardant leur
+    // éventuelle sous-classe.
+    for (var yearData in history.values) {
+      for (var eleve in yearData.eleves) {
+        if (eleve.section != section) continue;
+        final numero = classeNumeroFromFullClasse(eleve.classe);
+        if (numero == oldNumero) {
+          final sub = subClasseFromFullClasse(eleve.classe);
+          eleve.classe = buildFullClasseName(trimmedNew, sub);
+        }
+      }
+    }
+
+    // 6. Filtres mémorisés (écran d'accueil) qui pointaient sur
+    // l'ancien nom.
+    if (lastSelectedClassFilter == oldNumero) {
+      lastSelectedClassFilter = trimmedNew;
+    }
+
+    await saveData();
+  }
+
+  /// Supprime un numéro de classe d'une section.
+  ///
+  /// Si des élèves (année en cours OU historique) sont encore inscrits
+  /// dans cette classe et que `force` est faux, la suppression est
+  /// refusée et le nombre d'élèves concernés est renvoyé, afin que
+  /// l'écran puisse demander une confirmation explicite avant de
+  /// continuer (les élèves ne sont jamais supprimés ni modifiés
+  /// silencieusement).
+  ///
+  /// Avec `force: true`, la classe est retirée de la configuration
+  /// (elle n'apparaîtra plus dans les listes de choix) ; les élèves déjà
+  /// affectés à cette classe conservent ce nom jusqu'à ce qu'ils soient
+  /// réaffectés manuellement (via le renommage ou une modification de
+  /// leur fiche).
+  Future<Map<String, dynamic>> deleteClasseNumero(
+      String section,
+      String numero, {
+        bool force = false,
+      }) async {
+    int studentCount = 0;
+    for (var yearData in history.values) {
+      for (var eleve in yearData.eleves) {
+        if (eleve.section == section &&
+            classeNumeroFromFullClasse(eleve.classe) == numero) {
+          studentCount++;
+        }
+      }
+    }
+
+    if (studentCount > 0 && !force) {
+      return {'success': false, 'studentCount': studentCount};
+    }
+
+    config.classesBySection[section]?.remove(numero);
+    final key = _classeKey(section, numero);
+    config.subClassesByClasse.remove(key);
+    config.feesByClasse.remove(key);
+    config.monthlyExceptionsByClasse.remove(key);
+
+    if (lastSelectedClassFilter == numero) {
+      lastSelectedClassFilter = null;
+    }
+
+    await saveData();
+    return {'success': true, 'studentCount': studentCount};
+  }
+
   List<String> getSubClassesFor(String section, String classeNumero) {
     return config.subClassesByClasse[_classeKey(section, classeNumero)] ?? [];
   }

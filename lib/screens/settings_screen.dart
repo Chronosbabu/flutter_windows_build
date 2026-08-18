@@ -779,6 +779,160 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ====================================================================
+  // ⚡ NOUVEAU — RENOMMER / SUPPRIMER UN NUMÉRO DE CLASSE
+  // Permet de corriger une classe mal orthographiée (ex: "6eme" tapé
+  // "6eem" par erreur) sans devoir recréer la classe et réaffecter
+  // chaque élève à la main. Le renommage se propage automatiquement à
+  // TOUS les élèves concernés (année en cours + historique), aux frais
+  // spécifiques et aux exceptions déjà configurés pour cette classe —
+  // donc à tous les écrans qui affichent ces données (accueil, listes,
+  // PDF, reçus...).
+  // ====================================================================
+  void _renameClasseNumeroDialog(String section, String oldNumero) async {
+    if (!await _verifyBackupPassword()) return;
+
+    final controller = TextEditingController(text: oldNumero);
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text("Renommer \"$oldNumero\""),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration:
+              const InputDecoration(labelText: "Nouveau nom de la classe"),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              "Ce changement sera appliqué immédiatement à tous les élèves "
+                  "déjà inscrits dans cette classe (année en cours et années "
+                  "précédentes), ainsi qu'aux frais et exceptions déjà "
+                  "configurés pour elle.",
+              style: TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () async {
+              final newName = controller.text.trim();
+              if (newName.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                      content: Text("Le nom ne peut pas être vide")),
+                );
+                return;
+              }
+              await widget.fraisScolaires
+                  .renameClasseNumero(section, oldNumero, newName);
+              if (mounted) {
+                Navigator.pop(ctx);
+                setState(() {
+                  if (selectedClasseScopeForFee == oldNumero) {
+                    selectedClasseScopeForFee = newName;
+                  }
+                  if (selectedClasseScopeForException == oldNumero) {
+                    selectedClasseScopeForException = newName;
+                  }
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                        "✅ Classe renommée en \"$newName\" — mis à jour "
+                            "partout dans l'application"),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
+            },
+            child: const Text("Renommer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteClasseNumeroDialog(String section, String numero) async {
+    if (!await _verifyBackupPassword()) return;
+
+    final result =
+    await widget.fraisScolaires.deleteClasseNumero(section, numero);
+
+    if (result['success'] == true) {
+      if (mounted) {
+        setState(() {
+          if (selectedClasseScopeForFee == numero) {
+            selectedClasseScopeForFee = null;
+          }
+          if (selectedClasseScopeForException == numero) {
+            selectedClasseScopeForException = null;
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("✅ Classe supprimée")),
+        );
+      }
+      return;
+    }
+
+    // La classe contient encore des élèves : on demande une
+    // confirmation explicite avant de forcer la suppression.
+    final int count = result['studentCount'] as int? ?? 0;
+    if (!mounted) return;
+    final forceDelete = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Classe non vide"),
+        content: Text(
+          "$count élève(s) sont actuellement dans la classe \"$numero\" "
+              "(année en cours ou années précédentes).\n\n"
+              "Si vous supprimez cette classe, elle n'apparaîtra plus dans "
+              "les listes de choix, mais les élèves concernés garderont "
+              "\"$numero\" comme classe jusqu'à ce que vous les "
+              "réaffectiez manuellement (ou que vous renommiez cette "
+              "classe au lieu de la supprimer).\n\n"
+              "Voulez-vous continuer ?",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Supprimer quand même"),
+          ),
+        ],
+      ),
+    );
+
+    if (forceDelete == true) {
+      await widget.fraisScolaires
+          .deleteClasseNumero(section, numero, force: true);
+      if (mounted) {
+        setState(() {
+          if (selectedClasseScopeForFee == numero) {
+            selectedClasseScopeForFee = null;
+          }
+          if (selectedClasseScopeForException == numero) {
+            selectedClasseScopeForException = null;
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("✅ Classe supprimée")),
+        );
+      }
+    }
+  }
+
+  // ====================================================================
   // BUILD
   // ====================================================================
   @override
@@ -991,6 +1145,75 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
               ),
+
+            // ⚡ NOUVEAU — Liste des classes existantes de la section
+            // sélectionnée, avec un bouton pour RENOMMER (corriger une
+            // faute de frappe) et un bouton pour SUPPRIMER chacune.
+            if (selectedSectionForFee != null &&
+                classesForFeeSection.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Classes existantes (touchez l'icône crayon pour "
+                          "corriger un nom, ou la croix pour supprimer) :",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: classesForFeeSection.map((c) {
+                        return Container(
+                          padding: const EdgeInsets.only(
+                              left: 12, right: 4, top: 2, bottom: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.indigo.withAlpha(18),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                                color: Colors.indigo.shade100),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                c,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w500),
+                              ),
+                              const SizedBox(width: 2),
+                              IconButton(
+                                icon: const Icon(Icons.edit,
+                                    size: 16, color: Colors.indigo),
+                                tooltip: "Renommer cette classe",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 30, minHeight: 30),
+                                onPressed: () => _renameClasseNumeroDialog(
+                                    selectedSectionForFee!, c),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline,
+                                    size: 16, color: Colors.red),
+                                tooltip: "Supprimer cette classe",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 30, minHeight: 30),
+                                onPressed: () => _deleteClasseNumeroDialog(
+                                    selectedSectionForFee!, c),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+
             DropdownButton<String>(
               value: selectedClasseScopeForFee,
               isExpanded: true,
