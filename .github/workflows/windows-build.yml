@@ -36,12 +36,12 @@ jobs:
             "EDUPAY-DRC.exe"
 
       # ==========================================================================
-      # ⚡ NOUVEAU — Télécharge le Visual C++ Redistributable officiel
-      # Microsoft (lien permanent aka.ms, toujours pointé vers la dernière
-      # version 2015-2022 x64). C'est ce fichier qui sera embarqué DANS
-      # l'installateur EDUPAY-DRC-Setup.exe, pour que l'application
-      # fonctionne même sur un PC qui n'a jamais eu ce composant installé
-      # (PC neuf, Windows "allégé", entreprise avec un poste minimal...).
+      # Télécharge le Visual C++ Redistributable officiel Microsoft (lien
+      # permanent aka.ms, toujours pointé vers la dernière version 2015-2022
+      # x64). C'est ce fichier qui sera embarqué DANS l'installateur
+      # EDUPAY-DRC-Setup.exe, pour que l'application fonctionne même sur un
+      # PC qui n'a jamais eu ce composant installé (PC neuf, Windows
+      # "allégé", entreprise avec un poste minimal...).
       # ==========================================================================
       - name: Download VC++ Redistributable
         shell: powershell
