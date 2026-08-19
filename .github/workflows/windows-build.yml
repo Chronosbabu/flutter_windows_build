@@ -1,4 +1,6 @@
+
 name: Windows Build Only
+
 on:
   push:
     branches:
@@ -8,6 +10,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,13 +34,13 @@ jobs:
         run: |
           Rename-Item `
             "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "EDUPAY-DRC.exe"
+            "EDUPAY-DRC-Acces.exe"
 
       # ==========================================================================
       # Télécharge le Visual C++ Redistributable officiel Microsoft (lien
       # permanent aka.ms, toujours pointé vers la dernière version 2015-2022
       # x64). C'est ce fichier qui sera embarqué DANS l'installateur
-      # EDUPAY-DRC-Setup.exe, pour que l'application fonctionne même sur
+      # EDUPAY-DRC-Acces-Setup.exe, pour que l'application fonctionne même sur
       # un PC qui n'a jamais eu ce composant installé (PC neuf, Windows
       # "allégé", entreprise avec un poste minimal...).
       # ==========================================================================
@@ -68,11 +71,14 @@ jobs:
         shell: powershell
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          
           if (!(Test-Path $iscc)) {
             Write-Error "Inno Setup Compiler introuvable : $iscc"
             exit 1
           }
+          
           & $iscc "installer.iss"
+          
           if ($LASTEXITCODE -ne 0) {
             Write-Error "La compilation Inno Setup a échoué."
             exit $LASTEXITCODE
@@ -81,14 +87,16 @@ jobs:
       - name: Verify installer
         shell: powershell
         run: |
-          if (!(Test-Path "EDUPAY-DRC-Setup.exe")) {
-            Write-Error "EDUPAY-DRC-Setup.exe n'a pas été créé."
+          if (!(Test-Path "EDUPAY-DRC-Acces-Setup.exe")) {
+            Write-Error "EDUPAY-DRC-Acces-Setup.exe n'a pas été créé."
             exit 1
           }
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: EDUPAY-DRC-Setup
-          path: EDUPAY-DRC-Setup.exe
+          name: EDUPAY-DRC-Acces-Setup
+          path: EDUPAY-DRC-Acces-Setup.exe
           if-no-files-found: error
+
+
