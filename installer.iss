@@ -1,11 +1,11 @@
 [Setup]
-AppName=EDUPAY-DRC-Acces
+AppName=EDUPAY-DRC
 AppVersion=1.0.0
-AppPublisher=EDUPAY-DRC-Acces
-DefaultDirName={autopf}\EDUPAY-DRC-Acces
-DefaultGroupName=EDUPAY-DRC-Acces
+AppPublisher=EDUPAY-DRC
+DefaultDirName={autopf}\EDUPAY-DRC
+DefaultGroupName=EDUPAY-DRC
 OutputDir=.
-OutputBaseFilename=EDUPAY-DRC-Acces-Setup
+OutputBaseFilename=EDUPAY-DRC-Setup
 Compression=lzma
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -39,8 +39,8 @@ Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: 
 Source: "vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
-Name: "{commondesktop}\EDUPAY-DRC-Acces"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFilename: "{app}\babu.ico"
-Name: "{group}\EDUPAY-DRC-Acces"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFilename: "{app}\babu.ico"
+Name: "{commondesktop}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{app}\babu.ico"
+Name: "{group}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{app}\babu.ico"
 
 [Run]
 ; Installe le VC++ Redistributable AVANT de terminer l'installation, mais
@@ -49,9 +49,8 @@ Name: "{group}\EDUPAY-DRC-Acces"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFi
 ; aucune fenêtre ni question posée à l'utilisateur, et on ne force jamais
 ; un redémarrage automatique du PC.
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installation des composants requis (Visual C++)..."; Check: VCRedistNeedsInstall; Flags: waituntilterminated
-
 ; ⚡⚡⚡ CORRIGÉ — L'ANCIENNE ligne qui lançait directement l'app ici
-; (Filename: "{app}\EDUPAY-DRC-Acces.exe" ... Flags: postinstall) a été
+; (Filename: "{app}\EDUPAY-DRC.exe" ... Flags: postinstall) a été
 ; SUPPRIMÉE d'ici. Raison : PrivilegesRequired=admin (nécessaire pour
 ; installer vc_redist en silencieux) fait tourner TOUT l'installateur en
 ; tant qu'administrateur. Un "Filename:" placé directement dans [Run]
@@ -107,7 +106,6 @@ var
 begin
   if CurStep = ssDone then
   begin
-    ShellExecAsOriginalUser('open', ExpandConstant('{app}\EDUPAY-DRC-Acces.exe'),
-      '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ErrorCode);
+    ShellExecAsOriginalUser('open', ExpandConstant('{app}\EDUPAY-DRC.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ErrorCode);
   end;
 end;
