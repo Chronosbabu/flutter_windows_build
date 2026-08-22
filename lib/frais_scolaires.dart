@@ -292,6 +292,56 @@ class FraisScolaires {
   // paiements effectuées via le mode administrateur caché.
   List<AdminAuditLog> adminAuditLog = [];
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — MODE RÉSEAU LOCAL (sans internet, via le point d'accès
+  // Windows du PC principal, adresse fixe 192.168.137.1)
+  //
+  // Quand l'appareil n'a pas internet, les clés d'accès ne sont plus
+  // générées/vérifiées par le serveur central (render.com) mais
+  // directement ici, en local. Ces données vivent dans le MÊME fichier
+  // school_fees_data.json que le reste (voir loadData/saveData), donc
+  // elles survivent aux redémarrages exactement comme les élèves ou les
+  // paiements.
+  //
+  // Le petit serveur HTTP local (voir local_server_service.dart) lit et
+  // modifie directement CES champs sur l'instance FraisScolaires déjà en
+  // mémoire de l'app principale — il n'y a donc aucune duplication de
+  // données entre "l'admin" et "le serveur qu'il héberge" : c'est
+  // littéralement la même instance.
+  // ==========================================================================
+
+  /// Clés d'accès générées localement : {key, type, sections, classe,
+  /// createdAt}. Indépendant des clés générées par le serveur central —
+  /// les deux formats peuvent coexister sans collision (préfixe "LOC-"
+  /// réservé aux clés locales).
+  List<Map<String, dynamic>> localAccessKeys = [];
+
+  /// Paiements de frais mensuels envoyés par des sous-utilisateurs
+  /// connectés en local, en attente de validation par l'admin — même
+  /// principe que la file d'attente côté serveur central, mais tenue
+  /// ici pour fonctionner entièrement sans internet.
+  List<Map<String, dynamic>> localPendingPayments = [];
+
+  /// Inscriptions d'élèves envoyées en local, en attente de validation.
+  List<Map<String, dynamic>> localPendingRegistrations = [];
+
+  /// Paiements d'"autres frais" envoyés en local, en attente de
+  /// validation.
+  List<Map<String, dynamic>> localPendingAutresFraisPayments = [];
+
+  /// Registre de présence local : clé "classe|date" -> liste des ID
+  /// d'élèves absents ce jour-là pour cette classe.
+  Map<String, List<String>> localAttendance = {};
+
+  /// Journal des convocations/communiqués envoyés en mode local. ⚠️
+  /// IMPORTANT : en l'absence d'internet, il n'existe aucun canal pour
+  /// notifier réellement les parents (pas de SMS/push possible hors
+  /// ligne) — ces entrées sont donc conservées avec `delivered: false`
+  /// pour rappeler qu'elles devront être renvoyées une fois l'appareil
+  /// reconnecté à internet, plutôt que de laisser croire qu'un message a
+  /// été livré alors qu'il ne l'a pas été.
+  List<Map<String, dynamic>> localCommunicationsLog = [];
+
   int _localIdCounter = 0;
 
   final List<String> months = [
@@ -505,6 +555,345 @@ class FraisScolaires {
       if (key == targetKey) return e;
     }
     return null;
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — EXPORT "SNAPSHOT" (utilisé par le serveur local pour
+  // répondre à GET /restore exactement comme le fait le serveur central,
+  // sans passer par le réseau puisque c'est la même instance qui sert
+  // ses propres données)
+  // ====================================================================
+  Map<String, dynamic> exportSnapshotForClients() {
+    return {
+      'config': config.toJson(),
+      'currentYear': currentYear,
+      'localIdCounter': _localIdCounter,
+      'lastSelectedClassFilter': lastSelectedClassFilter,
+      'lastSelectedSectionFilter': lastSelectedSectionFilter,
+      'history': history.map((key, value) => MapEntry(key, value.toJson())),
+      'depensesByYear': depensesByYear.map(
+            (key, value) =>
+            MapEntry(key, value.map((d) => d.toJson()).toList()),
+      ),
+      'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
+      'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
+            (key, value) =>
+            MapEntry(key, value.map((p) => p.toJson()).toList()),
+      ),
+      'hiddenCodeHash': hiddenCodeHash,
+      'hiddenCodeSalt': hiddenCodeSalt,
+      'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
+      // Le serveur local ne protège pas /restore par mot de passe (les
+      // sous-utilisateurs n'en fournissent jamais un) — ce champ reste
+      // donc toujours null ici, contrairement à backupToServer qui
+      // l'envoie au serveur central pour la restauration protégée.
+      'backup_password': null,
+    };
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — CLÉS D'ACCÈS LOCALES (générées et vérifiées sans
+  // internet, par le petit serveur HTTP local — voir
+  // local_server_service.dart)
+  // ====================================================================
+
+  /// Génère une nouvelle clé d'accès locale et la sauvegarde
+  /// immédiatement. Format : "LOC-<CodeEcole>-<Type>-<8 caractères
+  /// aléatoires>" — le préfixe "LOC-" permet de reconnaître au premier
+  /// coup d'œil une clé générée en local plutôt que par le serveur
+  /// central, ce qui aide au diagnostic si jamais une clé ne fonctionne
+  /// pas comme attendu.
+  Future<Map<String, dynamic>> generateLocalKey({
+    required List<String> sections,
+    required String type,
+    String? classe,
+  }) async {
+    final rand = Random.secure();
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    final suffix =
+    List.generate(8, (_) => chars[rand.nextInt(chars.length)]).join();
+    final prefix =
+    (schoolCode != null && schoolCode!.isNotEmpty) ? schoolCode! : 'ECOLE';
+    final key = 'LOC-$prefix-$type-$suffix';
+
+    final entry = <String, dynamic>{
+      'key': key,
+      'type': type,
+      'sections': sections,
+      'classe': classe,
+      'createdAt': DateTime.now().toIso8601String(),
+    };
+    localAccessKeys.add(entry);
+    await saveData();
+    return entry;
+  }
+
+  /// Vérifie une clé locale saisie par un sous-utilisateur. Renvoie
+  /// l'entrée complète si elle existe, sinon `null`. Les clés locales
+  /// n'expirent jamais automatiquement (contrairement à la session
+  /// client, gérée côté app sous-utilisateur avec sa propre durée de
+  /// 24h) — elles restent valables tant que l'admin ne les révoque pas
+  /// manuellement.
+  Map<String, dynamic>? verifyLocalKey(String key) {
+    for (final entry in localAccessKeys) {
+      if (entry['key'] == key) return entry;
+    }
+    return null;
+  }
+
+  /// Révoque (supprime) une clé locale — ex: un agent qui ne devrait
+  /// plus avoir accès.
+  Future<void> revokeLocalKey(String key) async {
+    localAccessKeys.removeWhere((e) => e['key'] == key);
+    await saveData();
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — FILE D'ATTENTE LOCALE : PAIEMENTS DE FRAIS MENSUELS
+  // ====================================================================
+
+  /// Enregistre un paiement envoyé par un sous-utilisateur connecté en
+  /// local, en attente de validation admin. On capture le nom/section/
+  /// classe de l'élève AU MOMENT de l'envoi (comme le fait le serveur
+  /// central), pour que la liste "en attente" reste lisible même si
+  /// l'élève venait à être modifié entretemps.
+  Future<Map<String, dynamic>> addLocalPendingPayment({
+    required String eleveId,
+    required String mois,
+    required double amount,
+  }) async {
+    Eleve? eleve;
+    for (final e in currentData.eleves) {
+      if (e.id == eleveId) {
+        eleve = e;
+        break;
+      }
+    }
+    final entry = <String, dynamic>{
+      'id': 'LPP${DateTime.now().millisecondsSinceEpoch}',
+      'eleve_id': eleveId,
+      'nom': eleve?.nom ?? '',
+      'postNom': eleve?.postNom ?? '',
+      'prenom': eleve?.prenom ?? '',
+      'section': eleve?.section ?? '',
+      'classe': eleve?.classe ?? '',
+      'mois': mois,
+      'amount': amount,
+      'date': DateTime.now().toString().split(' ')[0],
+    };
+    localPendingPayments.add(entry);
+    await saveData();
+    return entry;
+  }
+
+  /// Valide un lot de paiements en attente : applique chacun d'eux sur
+  /// la fiche de l'élève concerné (exactement comme `handlePayment`),
+  /// puis retire l'entrée de la file d'attente. Renvoie le nombre de
+  /// paiements effectivement appliqués (un paiement est ignoré s'il ne
+  /// correspond plus à aucun élève connu — ex: élève supprimé
+  /// entretemps).
+  Future<int> validateLocalPendingPayments(List<String> ids) async {
+    int count = 0;
+    final toValidate =
+    localPendingPayments.where((p) => ids.contains(p['id'])).toList();
+    for (final p in toValidate) {
+      Eleve? eleve;
+      for (final e in currentData.eleves) {
+        if (e.id == p['eleve_id']) {
+          eleve = e;
+          break;
+        }
+      }
+      eleve ??= findStudentByFullName(
+        (p['nom'] ?? '').toString(),
+        (p['postNom'] ?? '').toString(),
+        (p['prenom'] ?? '').toString(),
+      );
+      if (eleve != null) {
+        handlePayment(
+            eleve, p['mois'].toString(), (p['amount'] as num).toDouble());
+        count++;
+      }
+    }
+    localPendingPayments.removeWhere((p) => ids.contains(p['id']));
+    await saveData();
+    return count;
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — FILE D'ATTENTE LOCALE : INSCRIPTIONS
+  // ====================================================================
+
+  /// Enregistre une inscription envoyée en local, en attente de
+  /// validation. ⚠️ Comme documenté déjà côté écran sous-utilisateur
+  /// (limitation identique côté serveur central) : seuls nom, post-nom,
+  /// prénom, section et classe sont conservés jusqu'à la création de
+  /// l'élève — les champs additionnels (père/mère/adresse/date de
+  /// naissance) restent disponibles dans la fiche "en attente" pour
+  /// consultation par l'admin, mais ne sont pas reportés sur la fiche
+  /// élève finale (le modèle `Eleve` ne les stocke pas).
+  Future<Map<String, dynamic>> addLocalPendingRegistration(
+      Map<String, dynamic> data) async {
+    final entry = <String, dynamic>{
+      'id': 'LPR${DateTime.now().millisecondsSinceEpoch}',
+      ...data,
+    };
+    localPendingRegistrations.add(entry);
+    await saveData();
+    return entry;
+  }
+
+  /// Valide un lot d'inscriptions : crée un élève par inscription
+  /// valide (nom + section + classe renseignés), avec un ID généré
+  /// localement, puis retire l'entrée de la file d'attente.
+  Future<int> validateLocalPendingRegistrations(List<String> ids) async {
+    int count = 0;
+    final toValidate = localPendingRegistrations
+        .where((r) => ids.contains(r['id']))
+        .toList();
+    for (final r in toValidate) {
+      final nom = (r['nom'] ?? '').toString().trim();
+      final section = (r['section'] ?? '').toString().trim();
+      final classe = (r['classe'] ?? '').toString().trim();
+      if (nom.isEmpty || section.isEmpty || classe.isEmpty) continue;
+
+      final id = generateLocalStudentId(nom);
+      currentData.eleves.add(Eleve(
+        id: id,
+        nom: nom,
+        postNom: (r['postNom'] ?? '').toString().trim(),
+        prenom: (r['prenom'] ?? '').toString().trim(),
+        classe: classe,
+        section: section,
+      ));
+      count++;
+    }
+    localPendingRegistrations.removeWhere((r) => ids.contains(r['id']));
+    await saveData();
+    return count;
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — FILE D'ATTENTE LOCALE : AUTRES FRAIS
+  // ====================================================================
+
+  Future<Map<String, dynamic>> addLocalPendingAutreFraisPayment({
+    required String eleveId,
+    required String autreFraisId,
+    required double montant,
+    String enregistrePar = 'Agent',
+  }) async {
+    Eleve? eleve;
+    for (final e in currentData.eleves) {
+      if (e.id == eleveId) {
+        eleve = e;
+        break;
+      }
+    }
+    AutreFrais? frais;
+    for (final f in autresFrais) {
+      if (f.id == autreFraisId) {
+        frais = f;
+        break;
+      }
+    }
+    final entry = <String, dynamic>{
+      'id': 'LPAF${DateTime.now().millisecondsSinceEpoch}',
+      'eleveId': eleveId,
+      'nom': eleve?.nom ?? '',
+      'postNom': eleve?.postNom ?? '',
+      'prenom': eleve?.prenom ?? '',
+      'autreFraisId': autreFraisId,
+      'autreFraisNom': frais?.nom ?? '',
+      'montant': montant,
+      'enregistrePar': enregistrePar,
+    };
+    localPendingAutresFraisPayments.add(entry);
+    await saveData();
+    return entry;
+  }
+
+  Future<int> validateLocalPendingAutresFraisPayments(
+      List<String> ids) async {
+    int count = 0;
+    final toValidate = localPendingAutresFraisPayments
+        .where((p) => ids.contains(p['id']))
+        .toList();
+    for (final p in toValidate) {
+      Eleve? eleve;
+      for (final e in currentData.eleves) {
+        if (e.id == p['eleveId']) {
+          eleve = e;
+          break;
+        }
+      }
+      eleve ??= findStudentByFullName(
+        (p['nom'] ?? '').toString(),
+        (p['postNom'] ?? '').toString(),
+        (p['prenom'] ?? '').toString(),
+      );
+      AutreFrais? frais;
+      for (final f in autresFrais) {
+        if (f.id == p['autreFraisId']) {
+          frais = f;
+          break;
+        }
+      }
+      if (eleve != null && frais != null) {
+        await payAutreFrais(
+          frais: frais,
+          eleve: eleve,
+          enregistrePar: (p['enregistrePar'] ?? 'Agent').toString(),
+        );
+        count++;
+      }
+    }
+    localPendingAutresFraisPayments.removeWhere((p) => ids.contains(p['id']));
+    await saveData();
+    return count;
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — DISCIPLINE EN LOCAL (présence + journal de
+  // communications)
+  // ====================================================================
+
+  Future<void> recordLocalAbsences({
+    required String classe,
+    required String section,
+    required String date,
+    required List<String> absentIds,
+    String recordedBy = 'Direction',
+  }) async {
+    localAttendance['$classe|$date'] = absentIds;
+    localCommunicationsLog.add({
+      'type': 'absences',
+      'classe': classe,
+      'section': section,
+      'date': date,
+      'absent_ids': absentIds,
+      'recordedBy': recordedBy,
+      'loggedAt': DateTime.now().toIso8601String(),
+      'delivered': false,
+    });
+    await saveData();
+  }
+
+  List<String> getLocalAttendance(String classe, String date) {
+    return localAttendance['$classe|$date'] ?? [];
+  }
+
+  /// Journalise une convocation ou un communiqué envoyé en mode local.
+  /// Ne notifie PAS réellement les parents (aucun canal disponible hors
+  /// ligne) — l'entrée reste marquée `delivered: false` pour que l'admin
+  /// sache qu'un renvoi sera nécessaire une fois de retour en ligne.
+  Future<void> logLocalCommunication(Map<String, dynamic> entry) async {
+    localCommunicationsLog.add({
+      ...entry,
+      'loggedAt': DateTime.now().toIso8601String(),
+      'delivered': false,
+    });
+    await saveData();
   }
 
   // ====================================================================
@@ -1772,6 +2161,47 @@ class FraisScolaires {
           _localIdCounter = _inferCounterFromExistingIds();
         }
 
+        // ⚡ NOUVEAU — chargement des données du mode réseau local (clés,
+        // files d'attente, présence, communications).
+        if (data['localAccessKeys'] != null) {
+          localAccessKeys = (data['localAccessKeys'] as List<dynamic>)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+        }
+        if (data['localPendingPayments'] != null) {
+          localPendingPayments =
+              (data['localPendingPayments'] as List<dynamic>)
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
+        }
+        if (data['localPendingRegistrations'] != null) {
+          localPendingRegistrations =
+              (data['localPendingRegistrations'] as List<dynamic>)
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
+        }
+        if (data['localPendingAutresFraisPayments'] != null) {
+          localPendingAutresFraisPayments =
+              (data['localPendingAutresFraisPayments'] as List<dynamic>)
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
+        }
+        if (data['localAttendance'] != null) {
+          localAttendance =
+              (data['localAttendance'] as Map<String, dynamic>).map(
+                    (key, value) => MapEntry(
+                  key,
+                  (value as List<dynamic>).map((e) => e.toString()).toList(),
+                ),
+              );
+        }
+        if (data['localCommunicationsLog'] != null) {
+          localCommunicationsLog =
+              (data['localCommunicationsLog'] as List<dynamic>)
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
+        }
+
         await _assignMissingIds();
       } catch (_) {
         _initDefaultData();
@@ -1846,6 +2276,13 @@ class FraisScolaires {
       'hiddenCodeHash': hiddenCodeHash,
       'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
+      // ⚡ NOUVEAU — mode réseau local (clés, files d'attente, présence)
+      'localAccessKeys': localAccessKeys,
+      'localPendingPayments': localPendingPayments,
+      'localPendingRegistrations': localPendingRegistrations,
+      'localPendingAutresFraisPayments': localPendingAutresFraisPayments,
+      'localAttendance': localAttendance,
+      'localCommunicationsLog': localCommunicationsLog,
     };
     await file.writeAsString(json.encode(data));
   }
@@ -1876,6 +2313,12 @@ class FraisScolaires {
     hiddenCodeHash = null; // ⚡ NOUVEAU
     hiddenCodeSalt = null; // ⚡ NOUVEAU
     adminAuditLog = []; // ⚡ NOUVEAU
+    localAccessKeys = []; // ⚡ NOUVEAU
+    localPendingPayments = []; // ⚡ NOUVEAU
+    localPendingRegistrations = []; // ⚡ NOUVEAU
+    localPendingAutresFraisPayments = []; // ⚡ NOUVEAU
+    localAttendance = {}; // ⚡ NOUVEAU
+    localCommunicationsLog = []; // ⚡ NOUVEAU
   }
 
   Future<void> changeYear(String newYear) async {

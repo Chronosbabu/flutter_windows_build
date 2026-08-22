@@ -10,6 +10,8 @@ import 'dart:convert';
 import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../services/epson_printer_service.dart';
+import '../network_resolver.dart';
+import '../local_server_service.dart';
 
 const String _serverUrl = 'https://jsinf.onrender.com';
 
@@ -18,7 +20,8 @@ const String _serverUrl = 'https://jsinf.onrender.com';
 enum KeyAccessType { paiement, discipline, inscription, autresFrais }
 
 extension KeyAccessTypeX on KeyAccessType {
-  // Code envoyé au serveur (doit correspondre à KEY_TYPES côté Python).
+  // Code envoyé au serveur (doit correspondre à KEY_TYPES côté Python
+  // ET à la logique du serveur local, voir local_server_service.dart).
   String get code {
     switch (this) {
       case KeyAccessType.paiement:
@@ -76,10 +79,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   // ---------------- GÉNÉRATION DE CLÉ ----------------
   KeyAccessType selectedKeyType = KeyAccessType.paiement;
 
-  // ⚡⚡⚡ NOUVEAU — Sélection MULTIPLE de sections/options pour une même
-  // clé. Le sous-utilisateur connecté avec cette clé pourra ensuite
-  // basculer librement entre toutes les sections cochées ici, sans
-  // avoir besoin d'une clé différente par section.
+  // ⚡⚡⚡ Sélection MULTIPLE de sections/options pour une même clé. Le
+  // sous-utilisateur connecté avec cette clé pourra ensuite basculer
+  // librement entre toutes les sections cochées ici, sans avoir besoin
+  // d'une clé différente par section.
   final Set<String> selectedSectionsForKey = {};
 
   // La classe précise n'a de sens que lorsqu'UNE SEULE section est
@@ -88,9 +91,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   // ignoré et la clé donne accès à "toutes les classes" de chacune.
   String? selectedClasseForKey; // null / _kToutesLesClasses = toutes les classes
   bool isGeneratingKey = false;
-  // ⚡⚡⚡ NOUVEAU — indique qu'une sauvegarde automatique (déclenchée
-  // après une génération de clé) est en cours, pour désactiver le
-  // bouton "Générer" et éviter les doubles clics pendant l'upload.
+  // ⚡⚡⚡ Indique qu'une sauvegarde automatique (déclenchée après une
+  // génération de clé, en mode INTERNET uniquement) est en cours, pour
+  // désactiver le bouton "Générer" et éviter les doubles clics pendant
+  // l'upload.
   bool isAutoBackingUp = false;
   List<Map<String, dynamic>> generatedKeys = [];
 
@@ -113,8 +117,21 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   List<Map<String, dynamic>> pendingAutresFrais = [];
   bool isValidatingAutresFrais = false;
 
-  // ⚡⚡⚡ NOUVEAU — La classe ne peut être restreinte que si exactement
-  // une section est cochée. Les classes proposées dans le dropdown
+  // ==========================================================================
+  // ⚡ NOUVEAU — SERVEUR LOCAL (mode réseau sans internet)
+  //
+  // Ce serveur tourne DANS cette même app (voir local_server_service.dart)
+  // et sert les sous-utilisateurs connectés au point d'accès Windows du
+  // PC principal, sur l'adresse fixe 192.168.137.1. L'activation du
+  // point d'accès lui-même reste manuelle (enseignée aux utilisateurs) —
+  // ce toggle ne démarre QUE le petit serveur logiciel, pas le point
+  // d'accès Windows.
+  // ==========================================================================
+  bool _localServerRunning = false;
+  bool _togglingLocalServer = false;
+
+  // ⚡⚡⚡ La classe ne peut être restreinte que si exactement une
+  // section est cochée. Les classes proposées dans le dropdown
   // proviennent alors de cette unique section sélectionnée.
   List<String> get _classesForSelectedSection {
     if (selectedSectionsForKey.length != 1) return [];
@@ -123,6 +140,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   bool get _classeSelectionAllowed => selectedSectionsForKey.length == 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _localServerRunning = LocalServerService.isRunning;
+  }
 
   void _toggleSection(String section, bool selected) {
     setState(() {
@@ -137,6 +160,55 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         selectedClasseForKey = null;
       }
     });
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — DÉMARRER / ARRÊTER LE SERVEUR LOCAL
+  // ==========================================================================
+  Future<void> _toggleLocalServer() async {
+    setState(() => _togglingLocalServer = true);
+    try {
+      if (_localServerRunning) {
+        await LocalServerService.stop();
+        if (mounted) {
+          setState(() => _localServerRunning = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Serveur local arrêté")),
+          );
+        }
+      } else {
+        final ok = await LocalServerService.start(widget.fraisScolaires);
+        if (mounted) {
+          setState(() => _localServerRunning = ok);
+          if (ok) {
+            NetworkResolver.invalidateCache();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  "✅ Serveur local démarré sur "
+                      "${NetworkResolver.localHost}:${NetworkResolver.localPort}\n"
+                      "Les sous-utilisateurs connectés au point d'accès de "
+                      "ce PC peuvent maintenant travailler sans internet.",
+                ),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 5),
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                    "❌ Impossible de démarrer le serveur local (port déjà "
+                        "utilisé ou droit réseau refusé)"),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _togglingLocalServer = false);
+    }
   }
 
   Future<bool> _verifyAdminPassword() async {
@@ -201,6 +273,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     return result ?? false;
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — RAFRAÎCHISSEMENT : bascule automatiquement entre serveur
+  // local et serveur internet selon ce qui est joignable maintenant (voir
+  // NetworkResolver). En mode local, il n'y a rien à "restaurer" : les
+  // données sont déjà celles de cette même instance qui héberge le
+  // serveur — on va simplement chercher les files d'attente.
+  // ==========================================================================
   Future<void> _refreshData() async {
     final appState = Provider.of<AppState>(context, listen: false);
 
@@ -213,30 +292,44 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       );
       return;
     }
-    if (appState.backupPassword == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("Définissez un mot de passe de sauvegarde")),
-      );
-      return;
-    }
 
     setState(() => isRefreshing = true);
 
     try {
-      final Map<String, dynamic> restoreResult =
-      await widget.fraisScolaires.restoreFromServer(
-        appState.schoolCode!,
-        appState.backupPassword!,
-      );
-      final bool success = restoreResult['success'] == true;
+      final base = await NetworkResolver.resolve(forceRefresh: true);
+      final bool isLocal = base == NetworkResolver.localBaseUrl;
+
+      bool success = true;
+      String? errorMsg;
+
+      if (isLocal) {
+        // Rien à restaurer : cette instance EST la source de vérité en
+        // mode local.
+        success = true;
+      } else {
+        if (appState.backupPassword == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text("Définissez un mot de passe de sauvegarde")),
+          );
+          setState(() => isRefreshing = false);
+          return;
+        }
+        final Map<String, dynamic> restoreResult =
+        await widget.fraisScolaires.restoreFromServer(
+          appState.schoolCode!,
+          appState.backupPassword!,
+        );
+        success = restoreResult['success'] == true;
+        errorMsg = restoreResult['error']?.toString();
+      }
 
       // Paiements de frais mensuels en attente.
       List<Map<String, dynamic>> fetchedPending = [];
       try {
         final pendingResponse = await http
             .get(Uri.parse(
-            '$_serverUrl/get_pending_payments?school_code=${appState.schoolCode}'))
+            '$base/get_pending_payments?school_code=${appState.schoolCode}'))
             .timeout(const Duration(seconds: 15));
         if (pendingResponse.statusCode == 200) {
           final data = jsonDecode(pendingResponse.body);
@@ -251,7 +344,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       try {
         final regResponse = await http
             .get(Uri.parse(
-            '$_serverUrl/school/get_pending_registrations?school_code=${appState.schoolCode}'))
+            '$base/school/get_pending_registrations?school_code=${appState.schoolCode}'))
             .timeout(const Duration(seconds: 15));
         if (regResponse.statusCode == 200) {
           final data = jsonDecode(regResponse.body);
@@ -267,7 +360,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       try {
         final afrResponse = await http
             .get(Uri.parse(
-            '$_serverUrl/school/get_pending_autres_frais?school_code=${appState.schoolCode}'))
+            '$base/school/get_pending_autres_frais?school_code=${appState.schoolCode}'))
             .timeout(const Duration(seconds: 15));
         if (afrResponse.statusCode == 200) {
           final data = jsonDecode(afrResponse.body);
@@ -293,20 +386,20 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                totalPending > 0
+                (totalPending > 0
                     ? "✅ $totalPending élément(s) en attente de validation"
-                    : "✅ Données récupérées du serveur",
+                    : "✅ Données récupérées") +
+                    (isLocal ? " (mode local)" : ""),
               ),
               backgroundColor: Colors.green,
             ),
           );
         } else {
-          final String errorMsg =
-              restoreResult['error']?.toString() ?? "Erreur inconnue";
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                "⚠️ Impossible de recharger les données générales : $errorMsg",
+                "⚠️ Impossible de recharger les données générales : "
+                    "${errorMsg ?? 'erreur inconnue'}",
               ),
               backgroundColor: Colors.orange,
             ),
@@ -328,20 +421,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — IMPRESSION AUTOMATIQUE GROUPÉE APRÈS VALIDATION D'UN LOT
-  //
-  // Quand l'Admin valide un lot de paiements envoyés par un
-  // sous-utilisateur, les reçus sont désormais imprimés automatiquement :
-  //   - S'il n'y a qu'un seul élève dans le lot : un seul reçu, avec
-  //     TOUS les paiements qu'il vient de faire (même s'il a payé
-  //     plusieurs mois d'un coup).
-  //   - S'il y a plusieurs élèves : un seul reçu PAR ÉLÈVE, chacun
-  //     regroupant tout ce que CET élève vient de payer dans ce lot
-  //     (jamais un reçu par paiement individuel).
-  //
-  // Silencieux si aucune imprimante n'est configurée (l'Admin peut être
-  // sur un poste sans imprimante physique) : la validation elle-même
-  // n'est jamais bloquée par l'impression.
+  // IMPRESSION AUTOMATIQUE GROUPÉE APRÈS VALIDATION D'UN LOT (inchangé —
+  // fonctionne identiquement que la validation vienne du serveur local ou
+  // du serveur internet, puisqu'elle se base sur les données déjà
+  // rechargées dans `widget.fraisScolaires`).
   // ==========================================================================
 
   Future<Uint8List?> _loadLogoBytesFromDisk() async {
@@ -365,9 +448,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       '${nom.trim().toLowerCase()}_${postNom.trim().toLowerCase()}_'
           '${prenom.trim().toLowerCase()}';
 
-  /// Imprime, pour chaque élève concerné par le lot `payments` de frais
-  /// mensuels qui vient d'être validé, UN SEUL reçu regroupant tous ses
-  /// paiements de ce lot (un ou plusieurs mois).
   Future<void> _printReceiptsForValidatedPayments(
       List<Map<String, dynamic>> payments) async {
     if (payments.isEmpty) return;
@@ -396,9 +476,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       final postNom = (first['postNom'] ?? '').toString();
       final prenom = (first['prenom'] ?? '').toString();
 
-      // On retrouve la fiche complète de l'élève (ID, classe, section
-      // exacts) via son nom complet, comme suggéré pour rester
-      // cohérent avec `mergeRestoredData`.
       final eleve =
       widget.fraisScolaires.findStudentByFullName(nom, postNom, prenom);
 
@@ -442,10 +519,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }
   }
 
-  /// Même principe que `_printReceiptsForValidatedPayments`, mais pour
-  /// un lot d'"autres frais" (Frais de l'État, Frais d'Aide...) qui
-  /// vient d'être validé : un seul reçu par élève, regroupant tous les
-  /// frais additionnels qu'il vient de payer dans ce lot.
   Future<void> _printReceiptsForValidatedAutresFrais(
       List<Map<String, dynamic>> paiements) async {
     if (paiements.isEmpty) return;
@@ -576,7 +649,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       );
       return;
     }
-    if (appState.backupPassword == null || appState.backupPassword!.isEmpty) {
+
+    final base = await NetworkResolver.resolve();
+    final bool isLocal = base == NetworkResolver.localBaseUrl;
+
+    if (!isLocal &&
+        (appState.backupPassword == null || appState.backupPassword!.isEmpty)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text("Mot de passe de sauvegarde manquant"),
@@ -588,8 +666,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
     setState(() => isValidating = true);
 
-    // ⚡ NOUVEAU — copie du lot AVANT de le vider, pour pouvoir imprimer
-    // les reçus regroupés par élève une fois la validation confirmée.
+    // Copie du lot AVANT de le vider, pour l'impression groupée par élève.
     final List<Map<String, dynamic>> paymentsToPrint =
     List<Map<String, dynamic>>.from(pendingPayments);
 
@@ -598,7 +675,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
       final response = await http
           .post(
-        Uri.parse('$_serverUrl/validate_payments'),
+        Uri.parse('$base/validate_payments'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'school_code': appState.schoolCode,
@@ -608,16 +685,25 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
-        final Map<String, dynamic> restoreResult =
-        await widget.fraisScolaires.restoreFromServer(
-          appState.schoolCode!,
-          appState.backupPassword!,
-        );
-        final bool success = restoreResult['success'] == true;
+        bool success;
+        String? errorMsg;
+        if (isLocal) {
+          // Le serveur local a déjà appliqué les paiements directement
+          // sur cette même instance — rien à restaurer depuis un autre
+          // serveur, on s'assure juste que le fichier local est à jour.
+          await widget.fraisScolaires.saveData();
+          success = true;
+        } else {
+          final Map<String, dynamic> restoreResult =
+          await widget.fraisScolaires.restoreFromServer(
+            appState.schoolCode!,
+            appState.backupPassword!,
+          );
+          success = restoreResult['success'] == true;
+          errorMsg = restoreResult['error']?.toString();
+        }
 
         if (success && mounted) {
-          await widget.fraisScolaires.saveData();
-
           setState(() {
             hasPendingPayments = false;
             pendingPayments.clear();
@@ -634,17 +720,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           await widget.fraisScolaires.loadData();
           if (mounted) setState(() {});
 
-          // ⚡ NOUVEAU — impression automatique : un seul reçu par élève,
-          // regroupant tous les mois qu'il vient de payer dans ce lot.
+          // Impression automatique : un seul reçu par élève, regroupant
+          // tous les mois qu'il vient de payer dans ce lot.
           await _printReceiptsForValidatedPayments(paymentsToPrint);
         } else if (mounted) {
-          final String errorMsg =
-              restoreResult['error']?.toString() ?? "Erreur inconnue";
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
                 "⚠️ Paiements validés côté serveur mais impossible de "
-                    "recharger les données locales : $errorMsg",
+                    "recharger les données locales : ${errorMsg ?? 'erreur inconnue'}",
               ),
               backgroundColor: Colors.orange,
             ),
@@ -724,12 +808,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     final appState = Provider.of<AppState>(context, listen: false);
     if (appState.schoolCode == null || appState.schoolCode!.isEmpty) return;
 
+    final base = await NetworkResolver.resolve();
+    final bool isLocal = base == NetworkResolver.localBaseUrl;
+
     setState(() => isValidatingRegistrations = true);
     try {
       final ids = pendingRegistrations.map((r) => r['id']).toList();
       final response = await http
           .post(
-        Uri.parse('$_serverUrl/school/validate_registrations'),
+        Uri.parse('$base/school/validate_registrations'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'school_code': appState.schoolCode,
@@ -738,9 +825,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       )
           .timeout(const Duration(seconds: 15));
 
-      if (response.statusCode == 200 && appState.backupPassword != null) {
-        await widget.fraisScolaires
-            .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
+      final bool canSync = isLocal || appState.backupPassword != null;
+
+      if (response.statusCode == 200 && canSync) {
+        if (!isLocal) {
+          await widget.fraisScolaires
+              .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
+        }
         await widget.fraisScolaires.saveData();
         await widget.fraisScolaires.loadData();
         if (mounted) {
@@ -824,10 +915,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     final appState = Provider.of<AppState>(context, listen: false);
     if (appState.schoolCode == null || appState.schoolCode!.isEmpty) return;
 
+    final base = await NetworkResolver.resolve();
+    final bool isLocal = base == NetworkResolver.localBaseUrl;
+
     setState(() => isValidatingAutresFrais = true);
 
-    // ⚡ NOUVEAU — copie du lot AVANT de le vider, pour l'impression
-    // groupée par élève après validation.
     final List<Map<String, dynamic>> autresFraisToPrint =
     List<Map<String, dynamic>>.from(pendingAutresFrais);
 
@@ -835,7 +927,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       final ids = pendingAutresFrais.map((p) => p['id']).toList();
       final response = await http
           .post(
-        Uri.parse('$_serverUrl/school/validate_autres_frais_payments'),
+        Uri.parse('$base/school/validate_autres_frais_payments'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'school_code': appState.schoolCode,
@@ -844,9 +936,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       )
           .timeout(const Duration(seconds: 15));
 
-      if (response.statusCode == 200 && appState.backupPassword != null) {
-        await widget.fraisScolaires
-            .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
+      final bool canSync = isLocal || appState.backupPassword != null;
+
+      if (response.statusCode == 200 && canSync) {
+        if (!isLocal) {
+          await widget.fraisScolaires
+              .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
+        }
         await widget.fraisScolaires.saveData();
         await widget.fraisScolaires.loadData();
         if (mounted) {
@@ -858,9 +954,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ),
           );
 
-          // ⚡ NOUVEAU — impression automatique : un seul reçu par élève,
-          // regroupant tous les frais additionnels qu'il vient de payer
-          // dans ce lot.
           await _printReceiptsForValidatedAutresFrais(autresFraisToPrint);
         }
       } else if (mounted) {
@@ -886,20 +979,16 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   // ==================== ⚡⚡⚡ GÉNÉRATION DE CLÉ MULTI-SECTIONS ====================
-  // ⚡⚡⚡ NOUVEAU — Après une génération de clé réussie, les données sont
-  // désormais AUTOMATIQUEMENT sauvegardées sur le serveur central (même
-  // appel que le bouton "Sauvegarder sur le Serveur" de l'écran
-  // Paramètres), sans que l'admin ait besoin d'y aller manuellement.
-  // Cela garantit que la clé nouvellement générée (et tout ce qui a pu
-  // changer localement depuis la dernière sauvegarde) est immédiatement
-  // disponible pour le sous-utilisateur dès qu'il se connecte avec elle.
+  // ⚡⚡⚡ Après une génération de clé réussie EN MODE INTERNET, les
+  // données sont automatiquement sauvegardées sur le serveur central,
+  // pour que la clé soit immédiatement disponible depuis n'importe quel
+  // appareil. EN MODE LOCAL, il n'y a rien à synchroniser : la clé vit
+  // déjà dans les données locales, qui SONT la source de vérité tant que
+  // l'appareil n'a pas internet.
 
-  /// Sauvegarde silencieuse (pas de SnackBar dédiée en cas de succès —
-  /// le résultat est intégré au message de la génération de clé) sur le
-  /// serveur central. Renvoie un message d'erreur, ou null en cas de
-  /// succès / si la sauvegarde n'a pas pu être tentée faute
-  /// d'identifiants.
-  Future<String?> _autoBackupAfterKeyGeneration() async {
+  Future<String?> _autoBackupAfterKeyGeneration({required bool isLocal}) async {
+    if (isLocal) return null; // rien à faire en mode local
+
     final appState = Provider.of<AppState>(context, listen: false);
 
     if (appState.schoolCode == null || appState.schoolCode!.isEmpty) {
@@ -952,14 +1041,16 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ? selectedClasseForKey
         : null;
 
-    // ⚡⚡⚡ NOUVEAU — on envoie la LISTE complète des sections cochées.
     final List<String> sectionsToSend = selectedSectionsForKey.toList();
 
     setState(() => isGeneratingKey = true);
     try {
+      final base = await NetworkResolver.resolve();
+      final bool isLocal = base == NetworkResolver.localBaseUrl;
+
       final response = await http
           .post(
-        Uri.parse('$_serverUrl/generate_key'),
+        Uri.parse('$base/generate_key'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'school_code': appState.schoolCode,
@@ -982,6 +1073,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             'sections': confirmedSections,
             'type': data['type'] ?? selectedKeyType.code,
             'classe': data['classe'], // null = toutes les classes
+            'isLocal': isLocal,
           });
         });
 
@@ -989,35 +1081,46 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ? "${confirmedSections.length} sections (${confirmedSections.join(', ')})"
             : confirmedSections.first;
 
-        // ⚡⚡⚡ NOUVEAU — sauvegarde automatique sur le serveur central,
-        // juste après la génération de la clé, sans passer par les
-        // Paramètres.
-        final String? backupError = await _autoBackupAfterKeyGeneration();
+        final String keyMsg =
+            "✅ Clé générée (${selectedKeyType.label}) pour "
+            "$sectionsLabel"
+            "${classeToSend != null ? ' - $classeToSend' : ' - toutes les classes'}";
 
-        if (mounted) {
-          final String keyMsg =
-              "✅ Clé générée (${selectedKeyType.label}) pour "
-              "$sectionsLabel"
-              "${classeToSend != null ? ' - $classeToSend' : ' - toutes les classes'}";
-
-          if (backupError == null) {
+        if (isLocal) {
+          if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                    "$keyMsg\n💾 Données également sauvegardées sur le serveur"),
+                    "$keyMsg\n📶 Mode local — utilisable immédiatement par "
+                        "les appareils connectés au point d'accès de ce PC"),
                 backgroundColor: Colors.green,
                 duration: const Duration(seconds: 4),
               ),
             );
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                    "$keyMsg\n⚠️ Sauvegarde automatique impossible : $backupError"),
-                backgroundColor: Colors.orange,
-                duration: const Duration(seconds: 6),
-              ),
-            );
+          }
+        } else {
+          final String? backupError =
+          await _autoBackupAfterKeyGeneration(isLocal: false);
+          if (mounted) {
+            if (backupError == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                      "$keyMsg\n💾 Données également sauvegardées sur le serveur"),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 4),
+                ),
+              );
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                      "$keyMsg\n⚠️ Sauvegarde automatique impossible : $backupError"),
+                  backgroundColor: Colors.orange,
+                  duration: const Duration(seconds: 6),
+                ),
+              );
+            }
           }
         }
       } else {
@@ -1034,7 +1137,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("❌ Pas de connexion internet"),
+            content: Text(
+                "❌ Aucun serveur joignable (ni local, ni internet)"),
             backgroundColor: Colors.red,
           ),
         );
@@ -1055,9 +1159,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   Widget build(BuildContext context) {
     final int totalPendingCount =
         pendingPayments.length + pendingRegistrations.length + pendingAutresFrais.length;
-    // ⚡⚡⚡ NOUVEAU — le bouton "Générer" reste désactivé tant que la
-    // sauvegarde automatique déclenchée par une génération précédente
-    // n'est pas terminée.
     final bool generateButtonBusy = isGeneratingKey || isAutoBackingUp;
 
     return Scaffold(
@@ -1085,6 +1186,98 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // ==================== ⚡ NOUVEAU — SERVEUR LOCAL ====================
+              Card(
+                color: _localServerRunning
+                    ? Colors.green.shade50
+                    : Colors.grey.shade100,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.wifi_tethering,
+                            color: _localServerRunning
+                                ? Colors.green
+                                : Colors.grey,
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            "Serveur Local (sans internet)",
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _localServerRunning
+                            ? "Actif — les appareils connectés au point "
+                            "d'accès de ce PC (${NetworkResolver.localHost}) "
+                            "peuvent travailler avec les clés d'accès, "
+                            "sans internet."
+                            : "Inactif. Étapes : 1) activez le \"Point "
+                            "d'accès mobile\" de Windows sur ce PC, "
+                            "2) démarrez le serveur ci-dessous, 3) "
+                            "connectez les autres appareils au WiFi "
+                            "créé par Windows.",
+                        style: const TextStyle(fontSize: 12.5, color: Colors.black87),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              icon: _togglingLocalServer
+                                  ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: Colors.white),
+                              )
+                                  : Icon(_localServerRunning
+                                  ? Icons.stop
+                                  : Icons.play_arrow),
+                              label: Text(_localServerRunning
+                                  ? "Arrêter le serveur local"
+                                  : "Démarrer le serveur local"),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _localServerRunning
+                                    ? Colors.red
+                                    : Colors.green,
+                                foregroundColor: Colors.white,
+                              ),
+                              onPressed:
+                              _togglingLocalServer ? null : _toggleLocalServer,
+                            ),
+                          ),
+                          if (_localServerRunning) ...[
+                            const SizedBox(width: 8),
+                            IconButton(
+                              icon: const Icon(Icons.copy),
+                              tooltip: "Copier l'adresse pour les agents",
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(
+                                    text:
+                                    "${NetworkResolver.localHost}:${NetworkResolver.localPort}"));
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text("Adresse copiée")),
+                                );
+                              },
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
               // ==================== GÉNÉRATION DE CLÉ ====================
               Card(
                 child: Padding(
@@ -1100,9 +1293,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       const SizedBox(height: 6),
                       const Text(
                         "Le mot de passe administrateur sera demandé avant la "
-                            "génération afin de protéger l'accès aux données de "
-                            "l'école. Les données seront aussi automatiquement "
-                            "sauvegardées sur le serveur central juste après.",
+                            "génération. La clé fonctionne automatiquement en "
+                            "mode local (si le serveur local est démarré) ou "
+                            "via internet, selon ce qui est disponible sur "
+                            "cet appareil au moment de la génération.",
                         style: TextStyle(fontSize: 12, color: Colors.grey),
                       ),
                       const SizedBox(height: 16),
@@ -1137,7 +1331,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       ),
                       const SizedBox(height: 16),
 
-                      // ⚡⚡⚡ NOUVEAU — 2) Sélection MULTIPLE de sections.
+                      // ⚡⚡⚡ 2) Sélection MULTIPLE de sections.
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -1322,16 +1516,31 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       : sections.join(' + ');
                   final String classeLabel =
                   keyData['classe'] == null ? "Toutes les classes" : keyData['classe'];
+                  final bool isLocalKey = keyData['isLocal'] == true;
                   return Card(
                     margin: const EdgeInsets.only(bottom: 8),
                     child: ListTile(
                       leading: Icon(type.icon, color: Colors.amber),
-                      title: Text(
-                        keyData['key'],
-                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      title: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              keyData['key'],
+                              style:
+                              const TextStyle(fontWeight: FontWeight.bold),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (isLocalKey) ...[
+                            const SizedBox(width: 6),
+                            const Icon(Icons.wifi_tethering,
+                                size: 14, color: Colors.green),
+                          ],
+                        ],
                       ),
                       subtitle: Text(
-                        "${type.label}\nSection(s) : $sectionsLabel | Classe : $classeLabel",
+                        "${type.label}\nSection(s) : $sectionsLabel | Classe : $classeLabel"
+                            "${isLocalKey ? '\n(clé locale — sans internet)' : ''}",
                       ),
                       isThreeLine: true,
                       trailing: IconButton(
@@ -1393,8 +1602,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 ),
               const SizedBox(height: 12),
 
-              // ⚡⚡ Détail des 3 files d'attente, chacune avec
-              // son propre bouton (paiements / inscriptions / autres frais).
+              // Détail des 3 files d'attente, chacune avec son propre
+              // bouton (paiements / inscriptions / autres frais).
               Row(
                 children: [
                   Expanded(
@@ -1475,7 +1684,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         "imprimante est configurée."
                         : "Tout ce qui est envoyé par les sous-utilisateurs "
                         "(paiements, inscriptions, autres frais) apparaît "
-                        "ici en attente de validation manuelle.",
+                        "ici en attente de validation manuelle, que ce "
+                        "soit en mode local ou via internet.",
                     textAlign: TextAlign.center,
                   ),
                 ),
