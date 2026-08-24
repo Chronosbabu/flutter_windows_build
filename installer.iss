@@ -23,7 +23,7 @@ MinVersion=10.0.17763
 DisableWelcomePage=no
 
 [Languages]
-Name: "french"; MessagesFile: "compiler\Languages\French.isl"
+Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 
 [Files]
 Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -33,8 +33,8 @@ Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: 
 ; (voir windows-build.yml). C'est LA cause n°1 des applications Flutter
 ; Windows qui "ne s'ouvrent" pas ou affichent "VCRUNTIME140.dll est
 ; introuvable" sur un PC qui n'a jamais eu Visual Studio, un jeu, ou un
-; autre logiciel l'ayant déjà installé. On l'embarque directement dans
-; le setup pour ne JAMAIS dépendre d'une connexion internet à l'installation
+; autre logiciel l'ayant déjà installé. On l'embarque directement dans le
+; setup pour ne JAMAIS dépendre d'une connexion internet à l'installation
 ; chez le client.
 Source: "vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
@@ -106,14 +106,6 @@ var
 begin
   if CurStep = ssDone then
   begin
-    ShellExecAsOriginalUser(
-      'open',
-      ExpandConstant('{app}\EDUPAY-DRC-Acces.exe'),
-      '',
-      ExpandConstant('{app}'),
-      SW_SHOWNORMAL,
-      ewNoWait,
-      ErrorCode
-    );
+    ShellExecAsOriginalUser('open', ExpandConstant('{app}\EDUPAY-DRC-Acces.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ErrorCode);
   end;
 end;

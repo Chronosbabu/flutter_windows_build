@@ -1,5 +1,4 @@
 name: Windows Build Only
-
 on:
   push:
     branches:
@@ -9,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,7 +41,6 @@ jobs:
       # un PC qui n'a jamais eu ce composant installé (PC neuf, Windows
       # "allégé", entreprise avec un poste minimal...).
       # ==========================================================================
-
       - name: Download VC++ Redistributable
         shell: powershell
         run: |
@@ -56,9 +53,7 @@ jobs:
             Write-Error "Le téléchargement de vc_redist.x64.exe a échoué."
             exit 1
           }
-
           $size = (Get-Item "vc_redist.x64.exe").Length
-
           if ($size -lt 10000000) {
             Write-Error "vc_redist.x64.exe semble corrompu (taille anormale : $size octets)."
             exit 1
@@ -73,14 +68,11 @@ jobs:
         shell: powershell
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-
           if (!(Test-Path $iscc)) {
             Write-Error "Inno Setup Compiler introuvable : $iscc"
             exit 1
           }
-
           & $iscc "installer.iss"
-
           if ($LASTEXITCODE -ne 0) {
             Write-Error "La compilation Inno Setup a échoué."
             exit $LASTEXITCODE
