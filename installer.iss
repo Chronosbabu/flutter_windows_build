@@ -1,11 +1,11 @@
 [Setup]
-AppName=EDUPAY-DRC
+AppName=EDUPAY-DRC-Acces
 AppVersion=1.0.0
-AppPublisher=EDUPAY-DRC
-DefaultDirName={autopf}\EDUPAY-DRC
-DefaultGroupName=EDUPAY-DRC
+AppPublisher=EDUPAY-DRC-Acces
+DefaultDirName={autopf}\EDUPAY-DRC-Acces
+DefaultGroupName=EDUPAY-DRC-Acces
 OutputDir=.
-OutputBaseFilename=EDUPAY-DRC-Setup
+OutputBaseFilename=EDUPAY-DRC-Acces-Setup
 Compression=lzma
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -23,7 +23,7 @@ MinVersion=10.0.17763
 DisableWelcomePage=no
 
 [Languages]
-Name: "french"; MessagesFile: "compiler:Languages\French.isl"
+Name: "french"; MessagesFile: "compiler\Languages\French.isl"
 
 [Files]
 Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -33,14 +33,14 @@ Source: "assets\icons\babu.ico"; DestDir: "{app}"; DestName: "babu.ico"; Flags: 
 ; (voir windows-build.yml). C'est LA cause n°1 des applications Flutter
 ; Windows qui "ne s'ouvrent" pas ou affichent "VCRUNTIME140.dll est
 ; introuvable" sur un PC qui n'a jamais eu Visual Studio, un jeu, ou un
-; autre logiciel l'ayant déjà installé. On l'embarque directement dans le
-; setup pour ne JAMAIS dépendre d'une connexion internet à l'installation
+; autre logiciel l'ayant déjà installé. On l'embarque directement dans
+; le setup pour ne JAMAIS dépendre d'une connexion internet à l'installation
 ; chez le client.
 Source: "vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
-Name: "{commondesktop}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{app}\babu.ico"
-Name: "{group}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{app}\babu.ico"
+Name: "{commondesktop}\EDUPAY-DRC-Acces"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFilename: "{app}\babu.ico"
+Name: "{group}\EDUPAY-DRC-Acces"; Filename: "{app}\EDUPAY-DRC-Acces.exe"; IconFilename: "{app}\babu.ico"
 
 [Run]
 ; Installe le VC++ Redistributable AVANT de terminer l'installation, mais
@@ -50,7 +50,7 @@ Name: "{group}\EDUPAY-DRC"; Filename: "{app}\EDUPAY-DRC.exe"; IconFilename: "{ap
 ; un redémarrage automatique du PC.
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installation des composants requis (Visual C++)..."; Check: VCRedistNeedsInstall; Flags: waituntilterminated
 ; ⚡⚡⚡ CORRIGÉ — L'ANCIENNE ligne qui lançait directement l'app ici
-; (Filename: "{app}\EDUPAY-DRC.exe" ... Flags: postinstall) a été
+; (Filename: "{app}\EDUPAY-DRC-Acces.exe" ... Flags: postinstall) a été
 ; SUPPRIMÉE d'ici. Raison : PrivilegesRequired=admin (nécessaire pour
 ; installer vc_redist en silencieux) fait tourner TOUT l'installateur en
 ; tant qu'administrateur. Un "Filename:" placé directement dans [Run]
@@ -106,6 +106,14 @@ var
 begin
   if CurStep = ssDone then
   begin
-    ShellExecAsOriginalUser('open', ExpandConstant('{app}\EDUPAY-DRC.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ErrorCode);
+    ShellExecAsOriginalUser(
+      'open',
+      ExpandConstant('{app}\EDUPAY-DRC-Acces.exe'),
+      '',
+      ExpandConstant('{app}'),
+      SW_SHOWNORMAL,
+      ewNoWait,
+      ErrorCode
+    );
   end;
 end;
