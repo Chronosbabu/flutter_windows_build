@@ -245,6 +245,42 @@ class AdminAuditLog {
   }
 }
 
+// ==========================================================================
+// ⚡ NOUVEAU — SIGNATAIRE (personnes devant signer les rapports PDF)
+// Utilisé pour afficher, en bas des rapports PDF générés depuis l'écran
+// "Rapport PDF", un bloc de signatures professionnel (nom + fonction de
+// chaque personne, avec un espace et une ligne pour signer à la main),
+// sur le modèle des rapports financiers utilisés dans les écoles en RDC
+// (ex: Le Caissier / Le Préfet des Études / Le Chef d'Établissement).
+// Cette liste est configurée une seule fois (ajout/modification/
+// suppression depuis l'écran de génération de rapport) et réutilisée
+// automatiquement sur chaque rapport généré, comme le fait déjà
+// `config.administrations` pour la répartition.
+// ==========================================================================
+class Signataire {
+  String id;
+  String nom;
+  String fonction;
+
+  Signataire({
+    required this.id,
+    required this.nom,
+    required this.fonction,
+  });
+
+  factory Signataire.fromJson(Map<String, dynamic> json) => Signataire(
+    id: json['id'] as String? ?? '',
+    nom: json['nom'] as String? ?? '',
+    fonction: json['fonction'] as String? ?? '',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'nom': nom,
+    'fonction': fonction,
+  };
+}
+
 class FraisScolaires {
   SchoolConfig config;
   SchoolYearData currentData = SchoolYearData(eleves: []);
@@ -291,6 +327,10 @@ class FraisScolaires {
   // ⚡ NOUVEAU — journal d'audit des annulations/modifications de
   // paiements effectuées via le mode administrateur caché.
   List<AdminAuditLog> adminAuditLog = [];
+
+  // ⚡ NOUVEAU — liste des personnes devant signer les rapports PDF
+  // (voir la classe Signataire ci-dessus).
+  List<Signataire> signataires = [];
 
   // ==========================================================================
   // ⚡ NOUVEAU — MODE RÉSEAU LOCAL (sans internet, via le point d'accès
@@ -349,7 +389,172 @@ class FraisScolaires {
     'Janvier', 'Fevrier', 'Mars', 'Avril', 'Mai', 'Juin'
   ];
 
+  // ⚡ NOUVEAU — noms des jours de la semaine (pour l'affichage "date et
+  // jour de génération" demandé par les utilisateurs sur les rapports
+  // PDF). Index 0 = Lundi (DateTime.weekday commence à 1 pour Lundi).
+  static const List<String> _joursSemaine = [
+    'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'
+  ];
+
   FraisScolaires() : config = SchoolConfig(schoolName: "EduPay School RDC");
+
+  // ====================================================================
+  // ⚡ CORRIGÉ — MOIS SCOLAIRE COURANT
+  //
+  // BUG TROUVÉ : `months` est ordonné selon l'ANNÉE SCOLAIRE
+  // (Septembre → Juin, index 0 à 9), pas selon le calendrier normal
+  // (Janvier → Décembre). Le code faisait auparavant, à 3 endroits
+  // différents, `months[DateTime.now().month - 1]` en supposant que
+  // l'index 0 correspond à Janvier — ce qui est faux ici.
+  //
+  // Conséquence concrète : en Août (mois calendaire 8), l'ancien code
+  // calculait `months[7]`, qui vaut "Avril" dans cette liste. C'est
+  // exactement le symptôme décrit ("le rapport journalier affiche le
+  // mois d'Avril") : la ligne "Total ce Mois (...)" du PDF utilisait ce
+  // mauvais mapping, quel que soit le type de rapport choisi. Pire
+  // encore : en Novembre/Décembre (mois calendaire 11 ou 12), l'index
+  // calculé (10 ou 11) sortait carrément des limites du tableau (10
+  // éléments), ce qui pouvait planter `getPaidStudentsThisMonth()`.
+  //
+  // Cette méthode centralise le bon calcul : Septembre(9)->0,
+  // Octobre(10)->1, ..., Décembre(12)->3, Janvier(1)->4, ...,
+  // Juin(6)->9. Juillet et Août (grandes vacances) ne font partie
+  // d'aucune année scolaire : on renvoie -1 dans ce cas, et tous les
+  // appelants doivent gérer ce cas (pas de "mois en cours" pendant les
+  // vacances).
+  // ====================================================================
+  int _schoolMonthIndexForToday() {
+    final calendarMonth = DateTime.now().month; // 1 (Janvier)..12 (Décembre)
+    if (calendarMonth >= 9 && calendarMonth <= 12) {
+      return calendarMonth - 9; // Sept->0, Oct->1, Nov->2, Dec->3
+    } else if (calendarMonth >= 1 && calendarMonth <= 6) {
+      return calendarMonth + 3; // Jan->4, Fev->5, Mar->6, Avr->7, Mai->8, Jun->9
+    }
+    // Juillet / Août : hors année scolaire.
+    return -1;
+  }
+
+  /// Nom du mois scolaire courant (ex: "Aout" retournerait null, "Avril"
+  /// si on est en Avril), ou `null` si on est en Juillet/Août
+  /// (grandes vacances, hors année scolaire).
+  String? get currentSchoolMonthName {
+    final idx = _schoolMonthIndexForToday();
+    if (idx < 0 || idx >= months.length) return null;
+    return months[idx];
+  }
+
+  /// ⚡ NOUVEAU — date ET jour de génération, formatés pour affichage
+  /// sur les rapports PDF (demande explicite des utilisateurs). Reprend
+  /// le même style que `dateFormatee` déjà utilisé ailleurs dans ce
+  /// fichier (Depense, AutreFraisPaiement, AdminAuditLog), au lieu du
+  /// format ISO brut (`DateTime.now().toString()`) utilisé jusqu'ici
+  /// dans les rapports, qui n'indiquait pas le jour de la semaine.
+  /// Ex: "Lundi 24/08/2026 à 10:32".
+  String get _dateGenerationFormatee {
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final jour = _joursSemaine[now.weekday - 1];
+    return '$jour ${two(now.day)}/${two(now.month)}/${now.year} à '
+        '${two(now.hour)}:${two(now.minute)}';
+  }
+
+  // ====================================================================
+  // ⚡ NOUVEAU — BLOC DE SIGNATURES (bas des rapports PDF)
+  //
+  // Reprend la mise en page classique utilisée dans les rapports
+  // financiers scolaires en RDC : une ligne "Fait le ...", puis une
+  // rangée de colonnes (3 maximum par ligne, pour rester lisible sur
+  // une page A4) — chaque colonne réservant un espace vide pour la
+  // signature manuscrite, une ligne, puis le nom et la fonction de la
+  // personne imprimés en dessous. Si aucun signataire n'est configuré,
+  // ne renvoie rien (le rapport garde exactement son apparence
+  // actuelle, sans bloc vide).
+  //
+  // ⚡ NOUVEAU — cette même méthode est désormais réutilisée aussi bien
+  // par le rapport "Frais Principal" (generatePdf / _generateStudentListPdf)
+  // que par le nouveau rapport "Autres Frais de Paiement"
+  // (generateAutresFraisPdf, voir plus bas) : les deux rapports partagent
+  // donc exactement le même bloc de signatures, configuré une seule fois.
+  // ====================================================================
+  List<pw.Widget> _buildSignatureSection() {
+    if (signataires.isEmpty) return [];
+
+    final rows = <List<Signataire>>[];
+    for (var i = 0; i < signataires.length; i += 3) {
+      final end = (i + 3 > signataires.length) ? signataires.length : i + 3;
+      rows.add(signataires.sublist(i, end));
+    }
+
+    pw.Widget buildColonne(Signataire s) {
+      return pw.Expanded(
+        child: pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 14),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            children: [
+              // Espace réservé à la signature manuscrite.
+              pw.SizedBox(height: 34),
+              // Ligne de signature.
+              pw.Container(
+                decoration: const pw.BoxDecoration(
+                  border: pw.Border(
+                    top: pw.BorderSide(width: 0.8, color: PdfColors.black),
+                  ),
+                ),
+              ),
+              pw.SizedBox(height: 6),
+              pw.Text(
+                s.nom.isNotEmpty ? s.nom : ' ',
+                textAlign: pw.TextAlign.center,
+                style: pw.TextStyle(
+                    fontSize: 10, fontWeight: pw.FontWeight.bold),
+              ),
+              pw.SizedBox(height: 2),
+              pw.Text(
+                s.fonction.isNotEmpty ? s.fonction : ' ',
+                textAlign: pw.TextAlign.center,
+                style: pw.TextStyle(
+                  fontSize: 9,
+                  fontStyle: pw.FontStyle.italic,
+                  color: PdfColors.grey700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return [
+      pw.SizedBox(height: 36),
+      pw.Divider(thickness: 0.6, color: PdfColors.grey400),
+      pw.SizedBox(height: 4),
+      pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text(
+          'Fait le : $_dateGenerationFormatee',
+          style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
+        ),
+      ),
+      pw.SizedBox(height: 26),
+      ...rows.map((rowSignataires) {
+        final widgets = rowSignataires.map(buildColonne).toList();
+        // Complète la dernière rangée avec des colonnes vides pour que
+        // les lignes de signature restent alignées même si le nombre
+        // de signataires n'est pas un multiple de 3.
+        while (widgets.length < 3) {
+          widgets.add(pw.Expanded(child: pw.SizedBox()));
+        }
+        return pw.Padding(
+          padding: const pw.EdgeInsets.only(bottom: 24),
+          child: pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: widgets,
+          ),
+        );
+      }),
+    ];
+  }
 
   // ====================================================================
   // ⚡ NOUVEAU — GESTION DU CODE MASQUÉ (mode administrateur caché)
@@ -476,6 +681,54 @@ class FraisScolaires {
   }
 
   // ====================================================================
+  // ⚡ NOUVEAU — GESTION DES SIGNATAIRES (SIGNATURES SUR LES RAPPORTS PDF)
+  // ====================================================================
+
+  /// Liste des signataires actuellement configurés, dans l'ordre où ils
+  /// ont été ajoutés (ordre d'affichage sur les rapports PDF).
+  List<Signataire> getSignataires() => List<Signataire>.from(signataires);
+
+  /// Ajoute un nouveau signataire (nom + fonction, ex: "Jean Kalala" /
+  /// "Le Préfet des Études") et sauvegarde immédiatement.
+  Future<Signataire> addSignataire({
+    required String nom,
+    required String fonction,
+  }) async {
+    final signataire = Signataire(
+      id: 'SIG${DateTime.now().millisecondsSinceEpoch}',
+      nom: nom.trim(),
+      fonction: fonction.trim(),
+    );
+    signataires.add(signataire);
+    await saveData();
+    return signataire;
+  }
+
+  /// Modifie le nom et/ou la fonction d'un signataire existant.
+  Future<void> updateSignataire(
+      String id, {
+        required String nom,
+        required String fonction,
+      }) async {
+    for (var s in signataires) {
+      if (s.id == id) {
+        s.nom = nom.trim();
+        s.fonction = fonction.trim();
+        break;
+      }
+    }
+    await saveData();
+  }
+
+  /// Supprime un signataire. Les rapports déjà générés (PDF déjà
+  /// enregistrés sur le disque) ne sont évidemment pas affectés — seuls
+  /// les PROCHAINS rapports générés ne l'incluront plus.
+  Future<void> deleteSignataire(String id) async {
+    signataires.removeWhere((s) => s.id == id);
+    await saveData();
+  }
+
+  // ====================================================================
   // GÉNÉRATION D'ID LOCALE
   // ====================================================================
   String generateLocalStudentId(String nom) {
@@ -583,6 +836,8 @@ class FraisScolaires {
       'hiddenCodeHash': hiddenCodeHash,
       'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
+      // ⚡ NOUVEAU
+      'signataires': signataires.map((s) => s.toJson()).toList(),
       // Le serveur local ne protège pas /restore par mot de passe (les
       // sous-utilisateurs n'en fournissent jamais un) — ce champ reste
       // donc toujours null ici, contrairement à backupToServer qui
@@ -1273,10 +1528,16 @@ class FraisScolaires {
               currentData.eleves.fold(
                   0.0, (s, e) => s + (e.paid[m] ?? 0)));
 
+  // ⚡ CORRIGÉ — utilisait auparavant `months[DateTime.now().month - 1]`
+  // en supposant à tort que `months` suit l'ordre calendaire. Utilise
+  // maintenant `_schoolMonthIndexForToday()`, qui fait la conversion
+  // correcte vers l'ordre "année scolaire" de `months`, et renvoie 0.0
+  // pendant les grandes vacances (Juillet/Août), où il n'y a pas de
+  // "mois courant" au sens de l'année scolaire.
   double getCurrentMonthTotalCollected() {
-    final now = DateTime.now();
-    if (now.month - 1 < 0 || now.month - 1 >= months.length) return 0.0;
-    final moisCourant = months[now.month - 1];
+    final idx = _schoolMonthIndexForToday();
+    if (idx < 0 || idx >= months.length) return 0.0;
+    final moisCourant = months[idx];
     return currentData.eleves
         .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0));
   }
@@ -1288,8 +1549,15 @@ class FraisScolaires {
         .toList();
   }
 
+  // ⚡ CORRIGÉ — même bug que `getCurrentMonthTotalCollected` :
+  // `months[DateTime.now().month - 1]` pointait sur le mauvais mois
+  // (ex: "Avril" en Août), et pouvait même planter en Novembre/Décembre
+  // (index hors limites du tableau, qui n'a que 10 éléments). Utilise
+  // maintenant le bon mapping via `_schoolMonthIndexForToday()`.
   List<Eleve> getPaidStudentsThisMonth() {
-    final moisCourant = months[DateTime.now().month - 1];
+    final idx = _schoolMonthIndexForToday();
+    if (idx < 0 || idx >= months.length) return [];
+    final moisCourant = months[idx];
     return currentData.eleves
         .where((e) =>
     e.paid.containsKey(moisCourant) &&
@@ -1695,19 +1963,28 @@ class FraisScolaires {
   // ====================================================================
   // GÉNÉRATION PDF
   // ====================================================================
-  Future<void> generatePdf({
+
+  // ⚡ CORRIGÉ — cette méthode renvoie maintenant un `Map<String, dynamic>`
+  // ({'success': bool, 'error': String?, 'path': String?}) au lieu de
+  // `void`. Avant, si la sauvegarde du PDF échouait (voir `_savePdf`,
+  // qui avalait silencieusement toute exception avec `catch (_) {}`),
+  // l'écran appelant affichait quand même "Rapport PDF généré avec
+  // succès" — ce qui est trompeur pour vos utilisateurs. Les anciens
+  // appels `await fraisScolaires.generatePdf(...)` sans utiliser le
+  // retour restent parfaitement valides : ce changement est rétro-
+  // compatible.
+  Future<Map<String, dynamic>> generatePdf({
     required String filename,
     required String reportType,
     String? sectionFilter,
     String? classFilter,
   }) async {
     if (reportType == "student_list") {
-      await _generateStudentListPdf(
+      return await _generateStudentListPdf(
         filename:      filename,
         sectionFilter: sectionFilter,
         classFilter:   classFilter,
       );
-      return;
     }
 
     final pdf     = pw.Document();
@@ -1743,11 +2020,12 @@ class FraisScolaires {
     final adminDistribution         = calculateAdminDistribution(total);
     final double totalMoisEcole     = getCurrentMonthTotalCollected();
     final double totalAnneeEcole    = getYearTotalCollected();
-    final String currentMonthName   =
-    (DateTime.now().month - 1 >= 0 &&
-        DateTime.now().month - 1 < months.length)
-        ? months[DateTime.now().month - 1]
-        : "Mois en cours";
+    // ⚡ CORRIGÉ — utilisait `months[DateTime.now().month - 1]`, qui
+    // affichait le mauvais mois (ex: "Avril" en plein mois d'Août).
+    // Utilise maintenant `currentSchoolMonthName`, basé sur le bon
+    // mapping calendrier -> année scolaire.
+    final String currentMonthName =
+        currentSchoolMonthName ?? "Hors année scolaire (vacances)";
 
     final headers = [
       'ID', 'Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)',
@@ -1780,7 +2058,11 @@ class FraisScolaires {
               style: pw.TextStyle(
                   fontSize: 22, fontWeight: pw.FontWeight.bold)),
           pw.Text('${config.schoolName} - $currentYear'),
-          pw.Text('Date: ${DateTime.now().toString().split(" ")[0]}'),
+          // ⚡ CORRIGÉ — affiche maintenant la date ET le jour de
+          // génération (demande explicite des utilisateurs), au lieu
+          // du format ISO brut précédent (ex: "2026-08-24") qui
+          // n'indiquait pas le jour de la semaine.
+          pw.Text('Généré le : $_dateGenerationFormatee'),
           pw.SizedBox(height: 20),
           pw.Text(
             "Total Collecté (ce rapport) : ${total.toStringAsFixed(0)} FC",
@@ -1824,14 +2106,18 @@ class FraisScolaires {
                   "(${config.administrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}%)",
             ),
           ),
+          // ⚡ NOUVEAU — bloc de signatures (voir _buildSignatureSection).
+          ..._buildSignatureSection(),
         ],
       ),
     );
 
-    await _savePdf(pdf, filename, reportType);
+    return await _savePdf(pdf, filename, reportType);
   }
 
-  Future<void> _generateStudentListPdf({
+  // ⚡ CORRIGÉ — renvoie maintenant `Map<String, dynamic>` (voir
+  // `generatePdf` ci-dessus pour l'explication).
+  Future<Map<String, dynamic>> _generateStudentListPdf({
     required String filename,
     String? sectionFilter,
     String? classFilter,
@@ -1853,7 +2139,8 @@ class FraisScolaires {
 
     final sectionLabel = sectionFilter ?? "Toutes les sections";
     final classeLabel  = classFilter   ?? "Toutes les classes";
-    final dateStr      = DateTime.now().toString().split(' ')[0];
+    // ⚡ CORRIGÉ — date + jour, voir `_dateGenerationFormatee`.
+    final dateStr      = _dateGenerationFormatee;
 
     final rows = <List<String>>[];
     for (int i = 0; i < students.length; i++) {
@@ -1922,17 +2209,22 @@ class FraisScolaires {
             oddRowDecoration:
             const pw.BoxDecoration(color: PdfColors.indigo50),
           ),
+          // ⚡ NOUVEAU — bloc de signatures (voir _buildSignatureSection).
+          ..._buildSignatureSection(),
         ],
       ),
     );
 
-    await _savePdf(pdf, filename, "student_list");
+    return await _savePdf(pdf, filename, "student_list");
   }
 
   // ====================================================================
   // GÉNÉRATION PDF — LISTE PAR STATUT DE PAIEMENT
   // ====================================================================
-  Future<void> generateOrderStatusPdf({
+
+  // ⚡ CORRIGÉ — renvoie maintenant `Map<String, dynamic>` (voir
+  // `generatePdf` ci-dessus pour l'explication).
+  Future<Map<String, dynamic>> generateOrderStatusPdf({
     required String filename,
     required String mois,
     required bool enOrdre,
@@ -1948,7 +2240,8 @@ class FraisScolaires {
 
     final sectionLabel = sectionFilter ?? "Toutes les sections";
     final classeLabel  = classFilter   ?? "Toutes les classes";
-    final dateStr      = DateTime.now().toString().split(' ')[0];
+    // ⚡ CORRIGÉ — date + jour, voir `_dateGenerationFormatee`.
+    final dateStr      = _dateGenerationFormatee;
     final statutLabel  =
     enOrdre ? "QUI ONT DÉJÀ PAYÉ" : "QUI N'ONT PAS ENCORE PAYÉ";
 
@@ -2044,14 +2337,216 @@ class FraisScolaires {
       ),
     );
 
-    await _savePdf(
+    return await _savePdf(
       pdf,
       filename,
       enOrdre ? 'en_ordre_$mois' : 'pas_en_ordre_$mois',
     );
   }
 
-  Future<void> _savePdf(
+  // ====================================================================
+  // ⚡ NOUVEAU — GÉNÉRATION PDF — RAPPORT DES "AUTRES FRAIS DE PAIEMENT"
+  //
+  // Contrairement à `generatePdf` (réservé au frais mensuel PRINCIPAL,
+  // inchangé ci-dessus), cette méthode génère un rapport dédié aux
+  // frais additionnels/éphémères (ex: "Frais de l'État", "Frais
+  // d'Aide"...) gérés depuis l'écran `AutresFraisScreen`.
+  //
+  // Paramètres :
+  //  - `autreFraisId` : si fourni, ne reprend QUE les paiements de ce
+  //    type de frais précis. Si `null`, reprend TOUS les types de
+  //    frais additionnels confondus (utile pour un rapport global).
+  //  - `sectionFilter` / `classFilter` : mêmes filtres que le rapport
+  //    principal — l'utilisateur peut générer par classe précise, par
+  //    section (option) précise, ou sans filtre du tout (toute
+  //    l'école), exactement comme pour `generatePdf`.
+  //
+  // On repart des paiements déjà enregistrés (jamais des frais eux-
+  // mêmes) : un frais additionnel supprimé entretemps reste donc bien
+  // visible dans les rapports déjà émis, avec son nom "photographié"
+  // au moment du paiement (`AutreFraisPaiement.autreFraisNom`).
+  //
+  // Comme pour `generatePdf`, le bloc de signatures configuré dans les
+  // Paramètres (voir `_buildSignatureSection`) est automatiquement
+  // ajouté en bas du rapport.
+  //
+  // Renvoie {'success': bool, 'error': String?, 'path': String?}, au
+  // même format que les autres méthodes de génération PDF de cette
+  // classe.
+  // ====================================================================
+  Future<Map<String, dynamic>> generateAutresFraisPdf({
+    required String filename,
+    String? autreFraisId,
+    String? sectionFilter,
+    String? classFilter,
+  }) async {
+    // Retrouve le frais sélectionné (uniquement pour l'affichage du
+    // titre) — reste `null` si `autreFraisId` est `null` (rapport
+    // "tous types confondus") ou si le frais a été supprimé entretemps
+    // (le rapport reste alors possible, juste sans nom précis dans le
+    // titre : les paiements gardent de toute façon leur propre nom
+    // "photographié").
+    AutreFrais? fraisSelectionne;
+    if (autreFraisId != null) {
+      for (final f in autresFrais) {
+        if (f.id == autreFraisId) {
+          fraisSelectionne = f;
+          break;
+        }
+      }
+    }
+
+    var paiements = getAutresFraisPaiementsForYear();
+    if (autreFraisId != null) {
+      paiements =
+          paiements.where((p) => p.autreFraisId == autreFraisId).toList();
+    }
+
+    final rows = <List<String>>[];
+    double total = 0;
+
+    for (final p in paiements) {
+      Eleve? eleve;
+      for (final e in currentData.eleves) {
+        if (e.id == p.eleveId) {
+          eleve = e;
+          break;
+        }
+      }
+      final section = eleve?.section ?? '';
+      final classe  = eleve?.classe  ?? '';
+
+      // Filtres section/classe : un paiement dont l'élève est
+      // introuvable (élève supprimé entretemps) n'est inclus que si
+      // AUCUN filtre n'est demandé, pour ne jamais l'attribuer à tort
+      // à une section/classe qu'il n'a peut-être jamais eue.
+      if (sectionFilter != null && section != sectionFilter) continue;
+      if (classFilter != null && classe != classFilter) continue;
+
+      rows.add([
+        (eleve != null && eleve.id.isNotEmpty) ? eleve.id : 'N/A',
+        eleve != null
+            ? "${eleve.nom} ${eleve.postNom} ${eleve.prenom}"
+            : "Élève introuvable",
+        section.isEmpty ? '-' : section,
+        classe.isEmpty ? '-' : classe,
+        p.autreFraisNom,
+        p.montant.toStringAsFixed(0),
+        p.dateFormatee,
+      ]);
+      total += p.montant;
+    }
+
+    final adminDistribution = calculateAdminDistribution(total);
+
+    String title = "RAPPORT — AUTRES FRAIS DE PAIEMENT";
+    if (fraisSelectionne != null) {
+      title += " : ${fraisSelectionne.nom}";
+    } else if (autreFraisId != null) {
+      // Le frais existait au moment des paiements mais a depuis été
+      // supprimé de la configuration : on retombe sur le nom du
+      // premier paiement trouvé, sinon un libellé générique.
+      title += paiements.isNotEmpty
+          ? " : ${paiements.first.autreFraisNom}"
+          : "";
+    } else {
+      title += " (TOUS TYPES CONFONDUS)";
+    }
+    if (sectionFilter != null) title += " - $sectionFilter";
+    if (classFilter != null) title += " - $classFilter";
+
+    final headers = [
+      'ID', 'Nom Complet', 'Section', 'Classe', 'Type de Frais',
+      'Montant (FC)', 'Date de Paiement',
+    ];
+
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(40),
+        build: (pw.Context context) => [
+          pw.Text(
+            title,
+            style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.Text('${config.schoolName} - $currentYear'),
+          pw.Text('Généré le : $_dateGenerationFormatee'),
+          pw.SizedBox(height: 20),
+          pw.Text(
+            "Total Collecté (ce rapport) : ${total.toStringAsFixed(0)} FC",
+            style:
+            pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Text(
+            "Nombre de paiements : ${rows.length}",
+            style: const pw.TextStyle(fontSize: 11),
+          ),
+          pw.SizedBox(height: 20),
+          pw.Text(
+            "DÉTAIL DES PAIEMENTS",
+            style:
+            pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 10),
+          if (rows.isEmpty)
+            pw.Text(
+              "Aucun paiement enregistré pour ce filtre.",
+              style:
+              const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+            )
+          else
+            pw.TableHelper.fromTextArray(
+              headers: headers,
+              data: rows,
+              headerStyle:
+              pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
+              cellStyle: const pw.TextStyle(fontSize: 9),
+              cellAlignment: pw.Alignment.centerLeft,
+            ),
+          pw.SizedBox(height: 30),
+          pw.Text(
+            "RÉPARTITION GLOBALE PAR ADMINISTRATION",
+            style:
+            pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 10),
+          if (total == 0)
+            pw.Text(
+              "Aucun montant à répartir.",
+              style:
+              const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+            )
+          else
+            ...adminDistribution.entries.map(
+                  (entry) => pw.Text(
+                "${entry.key} : ${entry.value.toStringAsFixed(0)} FC "
+                    "(${config.administrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}%)",
+              ),
+            ),
+          // ⚡ NOUVEAU — même bloc de signatures que le rapport
+          // principal (voir _buildSignatureSection), demandé
+          // explicitement pour le rapport des autres frais.
+          ..._buildSignatureSection(),
+        ],
+      ),
+    );
+
+    return await _savePdf(pdf, filename, "autres_frais");
+  }
+
+  // ⚡ CORRIGÉ — BUG DE FIABILITÉ : avant, cette méthode avalait
+  // silencieusement toute erreur (`catch (_) {}`), et ne renvoyait
+  // rien (`void`). L'écran appelant (`_showReportDialog` dans
+  // school_home_screen.dart) affichait donc TOUJOURS "✅ Rapport PDF
+  // généré avec succès", même quand :
+  //  - l'écriture du fichier échouait (permissions, disque plein...),
+  //  - l'utilisateur annulait la boîte de dialogue "Enregistrer sous"
+  //    (cas desktop sans dossier Téléchargements).
+  // Renvoie maintenant {'success': bool, 'error': String?, 'path': String?}
+  // pour que l'écran puisse informer correctement l'utilisateur.
+  Future<Map<String, dynamic>> _savePdf(
       pw.Document pdf, String filename, String reportType) async {
     try {
       final bytes     = await pdf.save();
@@ -2062,6 +2557,7 @@ class FraisScolaires {
         final file = File('${directory.path}/$fileName');
         await file.writeAsBytes(bytes);
         await OpenFile.open(file.path);
+        return {'success': true, 'path': file.path};
       } else {
         final saveLocation = await getSaveLocation(
           suggestedName: '${filename}_$reportType.pdf',
@@ -2073,9 +2569,15 @@ class FraisScolaires {
           final file = File(saveLocation.path);
           await file.writeAsBytes(bytes);
           await OpenFile.open(file.path);
+          return {'success': true, 'path': file.path};
         }
+        // L'utilisateur a annulé la boîte de dialogue : ce n'est pas un
+        // succès, on ne doit pas le dire à l'écran appelant.
+        return {'success': false, 'error': 'Enregistrement annulé.'};
       }
-    } catch (_) {}
+    } catch (e) {
+      return {'success': false, 'error': e.toString()};
+    }
   }
 
   // ====================================================================
@@ -2105,6 +2607,14 @@ class FraisScolaires {
         if (data['adminAuditLog'] != null) {
           adminAuditLog = (data['adminAuditLog'] as List<dynamic>)
               .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
+
+        // ⚡ NOUVEAU — chargement des signataires (signatures sur les
+        // rapports PDF).
+        if (data['signataires'] != null) {
+          signataires = (data['signataires'] as List<dynamic>)
+              .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
               .toList();
         }
 
@@ -2276,6 +2786,8 @@ class FraisScolaires {
       'hiddenCodeHash': hiddenCodeHash,
       'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
+      // ⚡ NOUVEAU — signataires des rapports PDF
+      'signataires': signataires.map((s) => s.toJson()).toList(),
       // ⚡ NOUVEAU — mode réseau local (clés, files d'attente, présence)
       'localAccessKeys': localAccessKeys,
       'localPendingPayments': localPendingPayments,
@@ -2313,6 +2825,7 @@ class FraisScolaires {
     hiddenCodeHash = null; // ⚡ NOUVEAU
     hiddenCodeSalt = null; // ⚡ NOUVEAU
     adminAuditLog = []; // ⚡ NOUVEAU
+    signataires = []; // ⚡ NOUVEAU
     localAccessKeys = []; // ⚡ NOUVEAU
     localPendingPayments = []; // ⚡ NOUVEAU
     localPendingRegistrations = []; // ⚡ NOUVEAU
@@ -2414,6 +2927,9 @@ class FraisScolaires {
         'hiddenCodeHash': hiddenCodeHash,
         'hiddenCodeSalt': hiddenCodeSalt,
         'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
+        // ⚡ NOUVEAU — les signataires suivent aussi la sauvegarde
+        // serveur, pour rester disponibles sur les autres appareils.
+        'signataires': signataires.map((s) => s.toJson()).toList(),
         'backup_password': password,
       };
 
@@ -2683,6 +3199,20 @@ class FraisScolaires {
       for (var a in serverAudit) {
         if (!existingAuditIds.contains(a.id)) {
           adminAuditLog.add(a);
+        }
+      }
+    }
+
+    // ⚡ NOUVEAU — fusion des signataires reçus du serveur (sans
+    // doublons, en se basant sur leur id).
+    if (serverData['signataires'] != null) {
+      final serverSignataires = (serverData['signataires'] as List<dynamic>)
+          .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
+          .toList();
+      final existingSignataireIds = signataires.map((s) => s.id).toSet();
+      for (var s in serverSignataires) {
+        if (!existingSignataireIds.contains(s.id)) {
+          signataires.add(s);
         }
       }
     }

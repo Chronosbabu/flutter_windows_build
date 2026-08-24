@@ -3,13 +3,15 @@ import 'dart:io';
 import 'frais_scolaires.dart';
 import 'network_resolver.dart';
 
-/// ⚡ NOUVEAU — Serveur HTTP local, hébergé par l'app de l'admin.
+/// ⚡ Serveur HTTP local, hébergé par l'app de l'admin, + petit service
+/// de découverte UDP pour les clients qui cherchent ce serveur sur le
+/// réseau (voir network_resolver.dart du projet CLIENT).
 ///
 /// Reproduit, en local, le sous-ensemble des routes du serveur central
 /// (render.com) nécessaires pour que les sous-utilisateurs (clés
 /// PAY/DISC/INSC/AFR) puissent travailler EN PARALLÈLE sans internet,
-/// connectés uniquement au point d'accès Windows du PC principal
-/// (adresse fixe `192.168.137.1`, voir network_resolver.dart).
+/// connectés au même réseau WiFi que ce PC (point d'accès mobile
+/// Windows OU Partage Internet macOS OU simple routeur/box).
 ///
 /// Principe clé : ce serveur ne duplique AUCUNE donnée. Il lit et écrit
 /// directement sur l'instance `FraisScolaires` déjà chargée en mémoire
@@ -18,6 +20,15 @@ import 'network_resolver.dart';
 /// immédiatement dans les "paiements en attente" du Dashboard Admin,
 /// exactement comme avec le serveur central, sans étape de
 /// synchronisation intermédiaire.
+///
+/// ⚡ MODIFIÉ (compatibilité Windows + macOS) : l'ancienne version
+/// supposait une IP fixe (`192.168.137.1`, garantie uniquement par
+/// Windows ICS). Cette IP n'est pas prévisible sur macOS (Partage
+/// Internet). Cette version détecte dynamiquement sa propre IP locale
+/// (`_getLocalIPv4Address`) et démarre en plus un petit "répondeur" UDP
+/// (port `discoveryPort`) qui répond à tout client qui diffuse un
+/// broadcast "SCHOOLAPP_DISCOVER" sur le réseau, avec cette IP réelle.
+/// Fonctionne identiquement sur les deux OS, sans IP codée en dur.
 ///
 /// ⚠️ LIMITE HONNÊTE : les convocations et communiqués (module
 /// Discipline) ne peuvent pas réellement atteindre les parents en mode
@@ -29,27 +40,31 @@ import 'network_resolver.dart';
 ///
 /// Démarré/arrêté explicitement par l'admin depuis le Dashboard (bouton
 /// "Serveur local"), PAS automatiquement au lancement de l'app — comme
-/// convenu, l'activation du point d'accès Windows lui-même reste
-/// manuelle, enseignée aux utilisateurs.
+/// convenu, l'activation du partage réseau lui-même reste manuelle,
+/// enseignée aux utilisateurs.
 class LocalServerService {
+  static const int httpPort = NetworkResolver.localPort;
+  static const int discoveryPort = NetworkResolver.discoveryPort;
+  static const String _discoveryMessage = 'SCHOOLAPP_DISCOVER';
+
   static HttpServer? _server;
+  static RawDatagramSocket? _discoverySocket;
   static FraisScolaires? _frais;
 
   /// Vrai si le serveur local est actuellement démarré.
   static bool get isRunning => _server != null;
 
-  /// Démarre le serveur local sur toutes les interfaces réseau de la
-  /// machine, port `NetworkResolver.localPort`. Utiliser
-  /// `InternetAddress.anyIPv4` (et non `loopbackIPv4`) est essentiel :
-  /// c'est ce qui permet aux AUTRES appareils connectés au point d'accès
-  /// de joindre ce serveur, pas seulement le PC lui-même.
+  /// Démarre le serveur HTTP local + le répondeur de découverte UDP, sur
+  /// toutes les interfaces réseau de la machine (`InternetAddress.anyIPv4`,
+  /// PAS `loopbackIPv4`) — indispensable pour que les autres appareils du
+  /// réseau (pas seulement ce PC) puissent joindre le serveur.
   static Future<bool> start(FraisScolaires fraisScolaires) async {
     if (_server != null) return true; // déjà démarré, rien à faire
     _frais = fraisScolaires;
     try {
       _server = await HttpServer.bind(
         InternetAddress.anyIPv4,
-        NetworkResolver.localPort,
+        httpPort,
         shared: true,
       );
       _server!.listen(
@@ -57,22 +72,118 @@ class LocalServerService {
         onError: (_) {}, // une requête individuelle mal formée ne doit
         // jamais faire planter le serveur entier
       );
+
+      await _startDiscoveryResponder();
+
+      // ⚡ Branche le hook consulté par NetworkResolver.resolve() côté
+      // admin : "local" = "mon propre serveur local tourne" (l'admin
+      // s'appelle lui-même via 127.0.0.1, pas besoin de broadcast pour
+      // se découvrir lui-même).
+      NetworkResolver.isLocalServerRunning = () => isRunning;
+
       return true;
     } catch (_) {
       // Port déjà utilisé, pas de droit réseau, etc. — on ne bloque
       // jamais l'admin : il peut réessayer, ou fonctionner sans le
       // serveur local (mode internet classique).
+      await _server?.close(force: true);
       _server = null;
+      _discoverySocket?.close();
+      _discoverySocket = null;
       _frais = null;
       return false;
     }
   }
 
-  /// Arrête le serveur local proprement.
+  /// Démarre le petit répondeur UDP : écoute les demandes de découverte
+  /// des clients et leur répond avec l'IP réelle de ce PC.
+  static Future<void> _startDiscoveryResponder() async {
+    _discoverySocket = await RawDatagramSocket.bind(
+      InternetAddress.anyIPv4,
+      discoveryPort,
+    );
+    _discoverySocket!.broadcastEnabled = true;
+    _discoverySocket!.listen((event) {
+      if (event != RawSocketEvent.read) return;
+      final datagram = _discoverySocket!.receive();
+      if (datagram == null) return;
+      try {
+        final message = utf8.decode(datagram.data);
+        if (message != _discoveryMessage) return;
+      } catch (_) {
+        return; // paquet non conforme, ignoré
+      }
+
+      _getLocalIPv4Address().then((ip) {
+        if (ip == null || _discoverySocket == null) return;
+        final response = jsonEncode({
+          'service': 'schoolapp',
+          'host': ip,
+          'port': httpPort,
+        });
+        _discoverySocket!.send(
+          utf8.encode(response),
+          datagram.address,
+          datagram.port,
+        );
+      });
+    });
+  }
+
+  /// Détecte dynamiquement l'IP locale réelle de ce PC sur le réseau
+  /// (point d'accès Windows, Partage Internet macOS, ou simple WiFi/LAN
+  /// classique) — JAMAIS codée en dur, pour fonctionner sur les deux OS.
+  static Future<String?> _getLocalIPv4Address() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
+      // On privilégie une adresse de réseau privé typique (WiFi/hotspot).
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (_isLikelyLanAddress(addr.address)) {
+            return addr.address;
+          }
+        }
+      }
+      // Repli : la première IPv4 non-loopback trouvée, quelle qu'elle soit.
+      if (interfaces.isNotEmpty && interfaces.first.addresses.isNotEmpty) {
+        return interfaces.first.addresses.first.address;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static bool _isLikelyLanAddress(String ip) {
+    return ip.startsWith('192.168.') ||
+        ip.startsWith('10.') ||
+        _isIn172PrivateRange(ip);
+  }
+
+  static bool _isIn172PrivateRange(String ip) {
+    if (!ip.startsWith('172.')) return false;
+    final parts = ip.split('.');
+    if (parts.length < 2) return false;
+    final second = int.tryParse(parts[1]);
+    return second != null && second >= 16 && second <= 31;
+  }
+
+  /// ⚡ IP locale actuelle du serveur, pour affichage dans le Dashboard
+  /// (ex: bouton "Copier l'adresse pour les agents") — c'est cette
+  /// méthode que `admin_dashboard_screen.dart` appelle.
+  static Future<String?> getCurrentLocalIp() => _getLocalIPv4Address();
+
+  /// Arrête le serveur local (HTTP + découverte) proprement.
   static Future<void> stop() async {
     await _server?.close(force: true);
     _server = null;
+    _discoverySocket?.close();
+    _discoverySocket = null;
     _frais = null;
+    NetworkResolver.isLocalServerRunning = () => false;
   }
 
   static Future<void> _handleRequest(HttpRequest request) async {

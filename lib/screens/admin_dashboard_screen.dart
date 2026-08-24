@@ -118,14 +118,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   bool isValidatingAutresFrais = false;
 
   // ==========================================================================
-  // ⚡ NOUVEAU — SERVEUR LOCAL (mode réseau sans internet)
+  // ⚡ SERVEUR LOCAL (mode réseau sans internet)
   //
   // Ce serveur tourne DANS cette même app (voir local_server_service.dart)
-  // et sert les sous-utilisateurs connectés au point d'accès Windows du
-  // PC principal, sur l'adresse fixe 192.168.137.1. L'activation du
-  // point d'accès lui-même reste manuelle (enseignée aux utilisateurs) —
-  // ce toggle ne démarre QUE le petit serveur logiciel, pas le point
-  // d'accès Windows.
+  // et sert les sous-utilisateurs connectés au même réseau WiFi que ce
+  // PC (point d'accès Windows OU Partage Internet macOS OU simple
+  // routeur/box). ⚡ MODIFIÉ — l'adresse n'est plus fixe (elle dépendait
+  // auparavant de l'IP Windows 192.168.137.1) : elle est désormais
+  // détectée dynamiquement (voir LocalServerService.getCurrentLocalIp),
+  // pour fonctionner identiquement sur Windows et macOS. L'activation du
+  // point d'accès/partage lui-même reste manuelle (enseignée aux
+  // utilisateurs) — ce toggle ne démarre QUE le petit serveur logiciel.
   // ==========================================================================
   bool _localServerRunning = false;
   bool _togglingLocalServer = false;
@@ -163,7 +166,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — DÉMARRER / ARRÊTER LE SERVEUR LOCAL
+  // DÉMARRER / ARRÊTER LE SERVEUR LOCAL
   // ==========================================================================
   Future<void> _toggleLocalServer() async {
     setState(() => _togglingLocalServer = true);
@@ -182,18 +185,25 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           setState(() => _localServerRunning = ok);
           if (ok) {
             NetworkResolver.invalidateCache();
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  "✅ Serveur local démarré sur "
-                      "${NetworkResolver.localHost}:${NetworkResolver.localPort}\n"
-                      "Les sous-utilisateurs connectés au point d'accès de "
-                      "ce PC peuvent maintenant travailler sans internet.",
+            // ⚡ MODIFIÉ — l'adresse affichée est désormais détectée
+            // dynamiquement (fonctionne sur Windows comme sur macOS),
+            // au lieu de l'ancienne IP fixe Windows.
+            final ip = await LocalServerService.getCurrentLocalIp();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    "✅ Serveur local démarré sur "
+                        "${ip ?? '?'}:${NetworkResolver.localPort}\n"
+                        "Les sous-utilisateurs connectés au même réseau "
+                        "WiFi que ce PC peuvent maintenant travailler "
+                        "sans internet.",
+                  ),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 5),
                 ),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 5),
-              ),
-            );
+              );
+            }
           } else {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -274,7 +284,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — RAFRAÎCHISSEMENT : bascule automatiquement entre serveur
+  // ⚡ RAFRAÎCHISSEMENT : bascule automatiquement entre serveur
   // local et serveur internet selon ce qui est joignable maintenant (voir
   // NetworkResolver). En mode local, il n'y a rien à "restaurer" : les
   // données sont déjà celles de cette même instance qui héberge le
@@ -1092,7 +1102,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               SnackBar(
                 content: Text(
                     "$keyMsg\n📶 Mode local — utilisable immédiatement par "
-                        "les appareils connectés au point d'accès de ce PC"),
+                        "les appareils connectés au même réseau WiFi que "
+                        "ce PC"),
                 backgroundColor: Colors.green,
                 duration: const Duration(seconds: 4),
               ),
@@ -1186,7 +1197,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ==================== ⚡ NOUVEAU — SERVEUR LOCAL ====================
+              // ==================== ⚡ SERVEUR LOCAL ====================
               Card(
                 color: _localServerRunning
                     ? Colors.green.shade50
@@ -1213,17 +1224,19 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         ],
                       ),
                       const SizedBox(height: 8),
+                      // ⚡ MODIFIÉ — texte générique (Windows OU macOS),
+                      // plus de référence à une IP fixe.
                       Text(
                         _localServerRunning
-                            ? "Actif — les appareils connectés au point "
-                            "d'accès de ce PC (${NetworkResolver.localHost}) "
-                            "peuvent travailler avec les clés d'accès, "
-                            "sans internet."
-                            : "Inactif. Étapes : 1) activez le \"Point "
-                            "d'accès mobile\" de Windows sur ce PC, "
+                            ? "Actif — les appareils connectés au même réseau WiFi "
+                            "que ce PC peuvent travailler avec les clés d'accès, "
+                            "sans internet (détection automatique, aucune IP à saisir)."
+                            : "Inactif. Étapes : 1) partagez votre connexion "
+                            "(\"Point d'accès mobile\" sur Windows ou "
+                            "\"Partage Internet\" sur macOS) depuis ce PC, "
                             "2) démarrez le serveur ci-dessous, 3) "
                             "connectez les autres appareils au WiFi "
-                            "créé par Windows.",
+                            "créé par ce partage.",
                         style: const TextStyle(fontSize: 12.5, color: Colors.black87),
                       ),
                       const SizedBox(height: 12),
@@ -1256,17 +1269,25 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                           ),
                           if (_localServerRunning) ...[
                             const SizedBox(width: 8),
+                            // ⚡ MODIFIÉ — l'adresse copiée est désormais
+                            // détectée dynamiquement via
+                            // LocalServerService.getCurrentLocalIp() au
+                            // lieu de l'ancienne IP fixe Windows.
                             IconButton(
                               icon: const Icon(Icons.copy),
                               tooltip: "Copier l'adresse pour les agents",
-                              onPressed: () {
+                              onPressed: () async {
+                                final ip =
+                                await LocalServerService.getCurrentLocalIp();
                                 Clipboard.setData(ClipboardData(
                                     text:
-                                    "${NetworkResolver.localHost}:${NetworkResolver.localPort}"));
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text("Adresse copiée")),
-                                );
+                                    "${ip ?? '?'}:${NetworkResolver.localPort}"));
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text("Adresse copiée")),
+                                  );
+                                }
                               },
                             ),
                           ],

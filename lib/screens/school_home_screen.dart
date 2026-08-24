@@ -14,6 +14,9 @@ import 'liste_ordre_screen.dart';
 import 'discipline_registre_screen.dart';
 // ⚡ NOUVEAU — Autres Frais de Paiement (éphémères)
 import 'autres_frais_screen.dart';
+// ⚡ NOUVEAU — Écran dédié à la génération de rapport PDF (remplace
+// l'ancienne boîte de dialogue) : filtres + gestion des signataires.
+import 'report_generation_screen.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -174,10 +177,19 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                     ),
                   ),
                 ),
+                // ⚡ CORRIGÉ — ouvre désormais une vraie page dédiée
+                // (ReportGenerationScreen) au lieu d'une boîte de
+                // dialogue, avec gestion des signataires du rapport.
                 _buildCard(
                   Icons.picture_as_pdf,
                   "Rapport PDF",
-                      () => _showReportDialog(context),
+                      () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ReportGenerationScreen(
+                          fraisScolaires: fraisScolaires),
+                    ),
+                  ),
                 ),
                 _buildCard(
                   Icons.share,
@@ -267,111 +279,6 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  // ==================== DIALOGUE RAPPORT PDF ====================
-  void _showReportDialog(BuildContext context) {
-    String? selectedSection;
-    String? selectedClass;
-    String reportType = "annual";
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            title: const Text("Générer Rapport PDF"),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text("Type de Rapport"),
-                  DropdownButton<String>(
-                    value: reportType,
-                    isExpanded: true,
-                    items: const [
-                      DropdownMenuItem(
-                          value: "daily", child: Text("Journalier")),
-                      DropdownMenuItem(
-                          value: "monthly", child: Text("Mensuel")),
-                      DropdownMenuItem(
-                          value: "annual", child: Text("Annuel")),
-                    ],
-                    onChanged: (val) =>
-                        setDialogState(() => reportType = val!),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text("Filtrer par Section (optionnel)"),
-                  DropdownButton<String>(
-                    value: selectedSection,
-                    hint: const Text("Toutes les sections"),
-                    isExpanded: true,
-                    items: [
-                      const DropdownMenuItem(
-                          value: null,
-                          child: Text("Toutes les sections")),
-                      ...fraisScolaires.config.sections.map(
-                            (s) => DropdownMenuItem(value: s, child: Text(s)),
-                      ),
-                    ],
-                    onChanged: (val) =>
-                        setDialogState(() => selectedSection = val),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text("Filtrer par Classe (optionnel)"),
-                  DropdownButton<String>(
-                    value: selectedClass,
-                    hint: const Text("Toutes les classes"),
-                    isExpanded: true,
-                    items: [
-                      const DropdownMenuItem(
-                          value: null,
-                          child: Text("Toutes les classes")),
-                      ...fraisScolaires.currentData.eleves
-                          .map((e) => e.classe)
-                          .toSet()
-                          .map(
-                            (c) =>
-                            DropdownMenuItem(value: c, child: Text(c)),
-                      ),
-                    ],
-                    onChanged: (val) =>
-                        setDialogState(() => selectedClass = val),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text("Annuler"),
-              ),
-              ElevatedButton(
-                onPressed: () async {
-                  Navigator.pop(ctx);
-                  final filename =
-                      "Rapport_${reportType}_${DateTime.now().toString().split(' ')[0]}";
-                  await fraisScolaires.generatePdf(
-                    filename: filename,
-                    reportType: reportType,
-                    sectionFilter: selectedSection,
-                    classFilter: selectedClass,
-                  );
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text("✅ Rapport PDF généré avec succès"),
-                      ),
-                    );
-                  }
-                },
-                child: const Text("Générer PDF"),
-              ),
-            ],
-          );
-        },
       ),
     );
   }
