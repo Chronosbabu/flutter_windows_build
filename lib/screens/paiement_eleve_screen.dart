@@ -1,16 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
-import '../services/epson_printer_service.dart';
 
 class PaiementEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -32,25 +27,13 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   bool _loadingMobile = false;
 
   // ==========================================================================
-  // ⚡ NOUVEAU — MODE ADMINISTRATEUR CACHÉ
-  //
-  // Aucun bouton visible n'existe nulle part dans cet écran. Le point
-  // d'entrée est un triple-tap sur le titre de l'AppBar ("Paiements des
-  // Élèves"), un geste qui ne ressemble à rien de particulier pour un
-  // caissier qui ne connaît pas son existence.
-  //
-  // - Si aucun code masqué n'est encore configuré (première fois) :
-  //   on demande à l'admin de le définir.
-  // - Sinon : on demande de saisir le code masqué pour déverrouiller
-  //   le mode administrateur pour la durée de cette session d'écran
-  //   uniquement (jamais persisté).
+  // MODE ADMINISTRATEUR CACHÉ
   // ==========================================================================
   int _secretTapCount = 0;
   DateTime? _lastSecretTap;
   bool _adminModeUnlocked = false;
   Timer? _adminAutoLockTimer;
 
-  // Anti-brute-force simple : après 5 essais faux, blocage 60 secondes.
   int _failedAttempts = 0;
   DateTime? _lockedUntil;
 
@@ -63,6 +46,26 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     searchController.addListener(_filterEleves);
     // Vérifier les paiements mobile en attente
     _fetchMobilePendingPayments();
+    // ⚡ NOUVEAU — vide la file d'attente des reçus non encore imprimés à
+    // l'ouverture de cet écran de paiement (voir
+    // FraisScolaires.flushReceiptQueue). Fonctionne même après un
+    // redémarrage complet de l'application ou de l'ordinateur, puisque
+    // cette file est persistée dans le fichier JSON local.
+    _flushPendingReceipts();
+  }
+
+  // ⚡ NOUVEAU
+  Future<void> _flushPendingReceipts() async {
+    final count = await widget.fraisScolaires.flushReceiptQueue();
+    if (mounted && count > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              "🖨️ $count reçu(s) en attente ont été imprimés automatiquement."),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
   }
 
   // ==================== BADGE MOBILE MONEY ====================
@@ -195,7 +198,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
-        // Recharger les données depuis le serveur
         final appState = Provider.of<AppState>(context, listen: false);
         if (appState.backupPassword != null) {
           await widget.fraisScolaires.restoreFromServer(
@@ -241,7 +243,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — DÉCLENCHEUR SECRET (triple-tap sur le titre de l'AppBar)
+  // DÉCLENCHEUR SECRET (triple-tap sur le titre de l'AppBar)
   // ==========================================================================
   void _handleSecretTap() {
     final now = DateTime.now();
@@ -260,8 +262,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   void _onSecretTriggered() {
     if (_adminModeUnlocked) {
-      // Déjà déverrouillé pour cette session : on ignore, pour ne pas
-      // redemander le code inutilement.
       return;
     }
     if (widget.fraisScolaires.hiddenCodeIsConfigured) {
@@ -271,7 +271,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
   }
 
-  // ---- Première configuration du code masqué ----
   void _showSetupHiddenCodeDialog() {
     final codeController = TextEditingController();
     final confirmController = TextEditingController();
@@ -361,7 +360,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     );
   }
 
-  // ---- Saisie du code masqué existant ----
   void _showEnterHiddenCodeDialog() {
     if (_lockedUntil != null && DateTime.now().isBefore(_lockedUntil!)) {
       final remaining = _lockedUntil!.difference(DateTime.now()).inSeconds;
@@ -449,9 +447,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     );
   }
 
-  /// Verrouillage automatique du mode admin après 10 minutes d'inactivité
-  /// dans cet écran, pour éviter qu'il reste actif trop longtemps si
-  /// l'appareil change de main.
   void _startAdminAutoLockTimer() {
     _adminAutoLockTimer?.cancel();
     _adminAutoLockTimer = Timer(const Duration(minutes: 10), () {
@@ -459,9 +454,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     });
   }
 
-  /// Synchronise vers le serveur après une annulation/modification, pour
-  /// que les autres appareils (app admin desktop, app parent) voient la
-  /// correction dès que possible.
   Future<void> _syncAfterAdminChange() async {
     final schoolCode = widget.fraisScolaires.schoolCode;
     if (schoolCode == null || schoolCode.isEmpty) return;
@@ -471,12 +463,10 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       await widget.fraisScolaires
           .backupToServer(schoolCode, appState.backupPassword!);
     } catch (_) {
-      // Silencieux — la sauvegarde locale est déjà faite ; la synchro
-      // se refera à la prochaine sauvegarde/restauration manuelle.
+      // Silencieux
     }
   }
 
-  // ---- Options admin sur une transaction (annuler / modifier) ----
   void _showAdminTransactionOptions(
       Eleve eleve, Map<String, dynamic> transaction, String mois) {
     showModalBottomSheet(
@@ -638,18 +628,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — PAIEMENT SÉQUENTIEL DES MOIS
-  // Règle : un mois ne peut être payé (même partiellement) que si tous les
-  // mois qui le précèdent (dans l'ordre `fraisScolaires.months`, c'est-à-
-  // dire Septembre → Juin) sont déjà intégralement soldés pour cet élève.
-  // Ces deux petits utilitaires sont purement des helpers d'affichage/
-  // validation dans l'écran : ils ne modifient rien, ils se contentent de
-  // lire `eleve.paid` et les montants requis via `getRequiredForMonth`.
+  // PAIEMENT SÉQUENTIEL DES MOIS
   // ==========================================================================
-
-  /// Retourne le premier mois (dans l'ordre chronologique) qui n'est pas
-  /// encore intégralement payé par l'élève, ou `null` si tous les mois
-  /// sont soldés.
   String? _premierMoisNonPaye(Eleve eleve) {
     for (final m in widget.fraisScolaires.months) {
       final required = widget.fraisScolaires
@@ -660,12 +640,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return null;
   }
 
-  /// Vrai si l'élève est autorisé à effectuer un paiement pour `mois` :
-  /// cela n'est possible que si `mois` est exactement le premier mois non
-  /// encore soldé (donc tous les mois précédents sont déjà complets).
   bool _peutPayerCeMois(Eleve eleve, String mois) {
     final premierNonPaye = _premierMoisNonPaye(eleve);
-    if (premierNonPaye == null) return false; // tout est déjà payé
+    if (premierNonPaye == null) return false;
     return mois == premierNonPaye;
   }
 
@@ -786,6 +763,35 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                       postNomController.text.trim().isNotEmpty &&
                       selectedClasseNumeroEdit != null &&
                       selectedSectionEdit != null) {
+                    // ==========================================================
+                    // ⚡ NOUVEAU — UNICITÉ STRICTE NOM + POST-NOM + PRÉNOM,
+                    // vérifiée aussi lors d'une MODIFICATION (et pas
+                    // seulement à la création). `excludeId` permet de ne
+                    // jamais comparer l'élève à lui-même.
+                    // ==========================================================
+                    final duplicateEleve =
+                    widget.fraisScolaires.findDuplicateFullName(
+                      nom: nomController.text.trim(),
+                      postNom: postNomController.text.trim(),
+                      prenom: prenomController.text.trim(),
+                      excludeId: eleve.id,
+                    );
+                    if (duplicateEleve != null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            "⚠️ Un autre élève (${duplicateEleve.classe} - "
+                                "ID: ${duplicateEleve.id}) a déjà exactement "
+                                "ce Nom, Post-nom et Prénom. Modifiez au "
+                                "moins un des trois champs pour continuer.",
+                          ),
+                          backgroundColor: Colors.red,
+                          duration: const Duration(seconds: 5),
+                        ),
+                      );
+                      return;
+                    }
+
                     eleve.nom = nomController.text.trim();
                     eleve.postNom = postNomController.text.trim();
                     eleve.prenom = prenomController.text.trim();
@@ -834,17 +840,12 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        // ⚡ NOUVEAU — le titre sert de déclencheur secret (triple-tap).
-        // Aucune indication visuelle particulière n'est ajoutée : pour
-        // un caissier, ce titre est un simple texte comme n'importe où
-        // ailleurs dans l'application.
         title: GestureDetector(
           onTap: _handleSecretTap,
           behavior: HitTestBehavior.opaque,
           child: const Text("Paiements des Élèves"),
         ),
         actions: [
-          // ⚡ Badge Mobile Money
           GestureDetector(
             onTap: _showMobilePaymentsDialog,
             child: Padding(
@@ -992,18 +993,13 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                           'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
                           'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC',
                     ),
+                    // ⚡ CORRIGÉ — le bouton de réimpression manuelle a été
+                    // retiré (sur demande de la direction). Seule
+                    // l'impression automatique, juste après un paiement,
+                    // reste possible.
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // ⚡ NOUVEAU — réimpression manuelle : ouvre un
-                        // dialogue listant TOUT l'historique de paiements
-                        // de l'élève, avec sélection (un seul, plusieurs,
-                        // ou tout) pour imprimer UN SEUL reçu regroupé.
-                        IconButton(
-                          icon: const Icon(Icons.print, color: Colors.teal),
-                          tooltip: "Réimprimer un reçu",
-                          onPressed: () => _showReprintHistoryDialog(eleve),
-                        ),
                         IconButton(
                           icon: const Icon(Icons.edit, color: Colors.blue),
                           onPressed: () => _showEditStudentDialog(eleve),
@@ -1040,11 +1036,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     .getRequiredForMonth(mois, eleve.section, eleve.classe);
                 final paid = eleve.paid[mois] ?? 0;
                 final isFullyPaid = paid >= required;
-                // ⚡ NOUVEAU — un mois non payé mais qui n'est pas encore
-                // "ouvert" (car un mois précédent n'est pas soldé) est
-                // affiché avec un cadenas plutôt qu'un simple avertissement,
-                // pour indiquer clairement qu'il faut d'abord régler les
-                // mois précédents.
                 final estOuvert =
                     isFullyPaid || _peutPayerCeMois(eleve, mois);
                 final nbPaiements = eleve.transactions
@@ -1094,8 +1085,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               .getRequiredForMonth(mois, eleve.section, eleve.classe);
           final paid = eleve.paid[mois] ?? 0;
           final isFullyPaid = paid >= required;
-          // ⚡ NOUVEAU — n'autorise l'ajout d'un paiement que si ce mois
-          // est bien le premier mois non encore soldé de l'élève.
           final peutPayer = !isFullyPaid && _peutPayerCeMois(eleve, mois);
           final premierNonPaye = _premierMoisNonPaye(eleve);
           final historique = eleve.transactions
@@ -1118,8 +1107,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                         "Déjà payé : ${paid.toStringAsFixed(0)} FC",
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  // ⚡ NOUVEAU — message d'avertissement si ce mois n'est
-                  // pas encore payable car un mois antérieur reste dû.
                   if (!isFullyPaid && !peutPayer && premierNonPaye != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 10),
@@ -1194,34 +1181,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                                   color: Colors.green),
                             )
                                 : null,
-                            // ⚡ NOUVEAU — le montant est accompagné d'un
-                            // bouton d'impression pour réimprimer UNIQUEMENT
-                            // ce paiement précis (reçu perdu, par exemple).
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  "${montant.toStringAsFixed(0)} FC",
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.print,
-                                      color: Colors.teal, size: 18),
-                                  tooltip: "Réimprimer ce paiement",
-                                  onPressed: () =>
-                                      _printTransactionsForStudent(
-                                          eleve, [t]),
-                                ),
-                              ],
+                            // ⚡ CORRIGÉ — le bouton de réimpression
+                            // manuelle par paiement a été retiré (sur
+                            // demande de la direction) : seul le montant
+                            // reste affiché.
+                            trailing: Text(
+                              "${montant.toStringAsFixed(0)} FC",
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold),
                             ),
-                            // ⚡ NOUVEAU — en mode administrateur
-                            // déverrouillé, un tap sur un paiement déjà
-                            // enregistré propose de l'annuler ou de le
-                            // modifier. En mode normal (caissier), ce
-                            // onTap est simplement absent (null) : rien
-                            // ne change visuellement, aucune trace de
-                            // cette fonctionnalité n'apparaît.
                             onTap: _adminModeUnlocked
                                 ? () {
                               Navigator.pop(ctx);
@@ -1240,10 +1208,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               TextButton(
                   onPressed: () => Navigator.pop(ctx),
                   child: const Text("Fermer")),
-              // ⚡ NOUVEAU — le bouton "Ajouter un paiement" n'apparaît
-              // que si le mois est réellement payable (premier mois non
-              // soldé de l'élève). Sinon, seul le message d'avertissement
-              // ci-dessus est visible.
               if (peutPayer)
                 ElevatedButton.icon(
                   icon: const Icon(Icons.add),
@@ -1262,9 +1226,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   void _showPaymentDialog(
       BuildContext context, Eleve eleve, String mois) {
-    // ⚡ NOUVEAU — double sécurité : même si ce dialogue venait à être
-    // appelé depuis un autre endroit du code, on revérifie ici que le
-    // mois est bien payable avant d'accepter le moindre montant.
     if (!_peutPayerCeMois(eleve, mois)) {
       final premierNonPaye = _premierMoisNonPaye(eleve);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1299,11 +1260,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             onPressed: () async {
               final amount = double.tryParse(controller.text);
               if (amount != null && amount > 0) {
-                // ⚡ NOUVEAU — dernière vérification juste avant
-                // l'enregistrement effectif du paiement, au cas où l'état
-                // de l'élève aurait changé entre l'ouverture du dialogue
-                // et la confirmation (ex: paiement mobile reçu entre-
-                // temps).
                 if (!_peutPayerCeMois(eleve, mois)) {
                   Navigator.pop(ctx);
                   final premierNonPaye = _premierMoisNonPaye(eleve);
@@ -1331,305 +1287,46 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                         content:
                         Text("✅ Paiement enregistré avec succès")),
                   );
-                  await _printReceiptAfterPayment(
-                      eleve: eleve, mois: mois, montantPaye: amount);
+                  // ==========================================================
+                  // ⚡ CORRIGÉ — L'IMPRESSION PASSE DÉSORMAIS PAR LE SYSTÈME
+                  // CENTRALISÉ ANTI-DOUBLON + FILE D'ATTENTE DE
+                  // FraisScolaires (`printOrQueuePrincipalReceipt`), au lieu
+                  // d'imprimer directement depuis cet écran. Un reçu déjà
+                  // imprimé pour cet élève et ce mois ne sera plus jamais
+                  // réimprimé automatiquement, et si aucune imprimante
+                  // n'est branchée, le reçu reste en attente et sortira
+                  // automatiquement dès qu'une imprimante redevient
+                  // disponible (même après extinction complète de
+                  // l'ordinateur ou de l'application) — voir
+                  // `flushReceiptQueue`, appelée à l'ouverture de cet écran.
+                  // ==========================================================
+                  final printed = await widget.fraisScolaires
+                      .printOrQueuePrincipalReceipt(
+                    eleve: eleve,
+                    mois: mois,
+                    montantPaye: amount,
+                  );
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          printed
+                              ? "🖨️ Reçu imprimé avec succès"
+                              : "📥 Aucune imprimante disponible — le reçu "
+                              "sortira automatiquement dès qu'une "
+                              "imprimante sera branchée",
+                        ),
+                        backgroundColor:
+                        printed ? Colors.green : Colors.orange,
+                      ),
+                    );
+                  }
                 }
               }
             },
             child: const Text("Confirmer"),
           ),
         ],
-      ),
-    );
-  }
-
-  // ⚡ NOUVEAU — Recharge le logo depuis le disque, exactement comme le
-  // fait SettingsScreen (même clé SharedPreferences 'has_logo', même
-  // chemin de fichier 'school_logo.png' dans getApplicationDocumentsDirectory).
-  // C'est ce qui manquait : cet écran n'avait jamais accès au logo,
-  // donc il l'envoyait toujours comme "null" à l'impression.
-  // On ne le garde pas dans un champ d'état permanent : on le relit à
-  // chaque impression, pour être sûr d'avoir toujours la version la
-  // plus récente même si l'admin vient de le changer dans les Paramètres.
-  Future<Uint8List?> _loadLogoBytesFromDisk() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final hasLogo = prefs.getBool('has_logo') ?? false;
-      if (!hasLogo) return null;
-
-      final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/school_logo.png');
-      if (await file.exists()) {
-        return await file.readAsBytes();
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  // ⚡ CORRIGÉ — utilise EscPosPrinterService (imprimante Epson TM-T20III
-  // en USB, ciblée par son nom Windows) au lieu de l'ancien
-  // BluetoothPrinterService (port COM Bluetooth), qui n'existe plus.
-  // ⚡ CORRIGÉ (bug logo) — charge maintenant le logo depuis le disque
-  // (comme SettingsScreen) et le transmet à printReceipt, alors qu'avant
-  // logoBytes n'était jamais fourni et restait donc "null" à l'impression.
-  Future<void> _printReceiptAfterPayment({
-    required Eleve eleve,
-    required String mois,
-    required double montantPaye,
-  }) async {
-    final prefs = await SharedPreferences.getInstance();
-    // ⚡ CORRIGÉ — la clé de préférence stocke maintenant le NOM de
-    // l'imprimante Windows (ex: "EPSON TM-T20III Receipt"), et non plus
-    // un port COM ('printer_com_port' est obsolète).
-    final printerName = prefs.getString('printer_name') ?? '';
-    if (printerName.isEmpty) return;
-
-    // ⚡ NOUVEAU — chargement du logo AVANT l'impression du reçu.
-    final logoBytes = await _loadLogoBytesFromDisk();
-
-    final double montantRequis = widget.fraisScolaires
-        .getRequiredForMonth(mois, eleve.section, eleve.classe);
-    final double totalPaye =
-    widget.fraisScolaires.getStudentTotalPaid(eleve);
-    final double totalRequis =
-        widget.fraisScolaires.getStudentPending(eleve) + totalPaye;
-    final double resteAPayerMois =
-        montantRequis - (eleve.paid[mois] ?? 0);
-
-    final bool ok = await EscPosPrinterService.printReceipt(
-      printerName: printerName,
-      schoolName: widget.fraisScolaires.config.schoolName,
-      currentYear: widget.fraisScolaires.currentYear,
-      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
-      studentId: eleve.id,
-      classe: eleve.classe,
-      section: eleve.section,
-      moisPaye: mois,
-      montantPaye: montantPaye,
-      montantRequis: montantRequis,
-      resteAPayerMois: resteAPayerMois < 0 ? 0 : resteAPayerMois,
-      totalDejaPayeAnnee: totalPaye,
-      totalRequis: totalRequis,
-      historiqueTransactions: eleve.transactions
-          .map((t) => Map<String, dynamic>.from(t))
-          .toList(),
-      logoBytes: logoBytes, // ⚡ NOUVEAU — le logo est maintenant transmis
-    );
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ok
-              ? "🖨️ Reçu imprimé avec succès"
-              : "⚠️ Reçu non imprimé — vérifiez l'imprimante"),
-          backgroundColor: ok ? Colors.green : Colors.orange,
-        ),
-      );
-    }
-  }
-
-  // ==========================================================================
-  // ⚡ NOUVEAU — RÉIMPRESSION MANUELLE (reçus perdus / mémoire d'impression
-  // perdue si l'ordinateur s'éteint avant que l'imprimante ne soit
-  // rebranchée).
-  //
-  // Contrairement à `_printReceiptAfterPayment` (impression AUTOMATIQUE
-  // d'un seul mois juste après le paiement, inchangée ci-dessus), ce qui
-  // suit permet de réimprimer, à tout moment, un reçu regroupant UN SEUL
-  // paiement déjà enregistré, une SÉLECTION de plusieurs paiements, ou
-  // TOUT l'historique d'un élève — toujours en UN SEUL reçu.
-  // ==========================================================================
-
-  /// Vérifie qu'une imprimante est configurée ; sinon prévient l'utilisateur
-  /// et renvoie `null`.
-  Future<String?> _requirePrinterName() async {
-    final prefs = await SharedPreferences.getInstance();
-    final printerName = prefs.getString('printer_name') ?? '';
-    if (printerName.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-                "Aucune imprimante configurée. Allez dans Paramètres pour en choisir une."),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-      return null;
-    }
-    return printerName;
-  }
-
-  /// Imprime UN SEUL reçu regroupant les `transactions` fournies (un seul
-  /// paiement, une sélection, ou tout l'historique) pour `eleve`.
-  Future<void> _printTransactionsForStudent(
-      Eleve eleve, List<Map<String, dynamic>> transactions) async {
-    if (transactions.isEmpty) return;
-    final printerName = await _requirePrinterName();
-    if (printerName == null) return;
-
-    final logoBytes = await _loadLogoBytesFromDisk();
-
-    final bool ok = await EscPosPrinterService.printTransactionsReceipt(
-      printerName: printerName,
-      schoolName: widget.fraisScolaires.config.schoolName,
-      currentYear: widget.fraisScolaires.currentYear,
-      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
-      studentId: eleve.id,
-      classe: eleve.classe,
-      section: eleve.section,
-      transactions: transactions,
-      logoBytes: logoBytes,
-      duplicata: true,
-    );
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ok
-              ? "🖨️ Reçu réimprimé avec succès"
-              : "⚠️ Impression impossible — vérifiez l'imprimante"),
-          backgroundColor: ok ? Colors.green : Colors.orange,
-        ),
-      );
-    }
-  }
-
-  /// ⚡ NOUVEAU — Dialogue de réimpression : liste TOUT l'historique de
-  /// paiements de l'élève (tous mois confondus), avec sélection multiple.
-  /// Permet de réimprimer un seul paiement perdu, une sélection de
-  /// plusieurs paiements, ou la totalité de l'historique — en UN SEUL
-  /// reçu, comme demandé (ex: un élève qui a payé son mois en plusieurs
-  /// coupures).
-  void _showReprintHistoryDialog(Eleve eleve) {
-    final historique = List<Map<String, dynamic>>.from(eleve.transactions)
-      ..sort((a, b) => (a['date'] ?? '')
-          .toString()
-          .compareTo((b['date'] ?? '').toString()));
-
-    if (historique.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("Aucun paiement enregistré pour cet élève.")),
-      );
-      return;
-    }
-
-    final Set<int> selected = {
-      for (int i = 0; i < historique.length; i++) i
-    };
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) {
-          final allSelected = selected.length == historique.length;
-          return AlertDialog(
-            title: Text(
-                "Réimprimer un reçu — ${eleve.nom} ${eleve.prenom}"),
-            content: SizedBox(
-              width: double.maxFinite,
-              height: 440,
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text("${historique.length} paiement(s) au total",
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.grey)),
-                      TextButton.icon(
-                        icon: Icon(
-                            allSelected ? Icons.deselect : Icons.select_all,
-                            size: 16),
-                        label: Text(
-                          allSelected
-                              ? "Tout désélectionner"
-                              : "Tout sélectionner",
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        onPressed: () {
-                          setStateDialog(() {
-                            if (allSelected) {
-                              selected.clear();
-                            } else {
-                              selected
-                                ..clear()
-                                ..addAll(List.generate(
-                                    historique.length, (i) => i));
-                            }
-                          });
-                        },
-                      ),
-                    ],
-                  ),
-                  const Divider(),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: historique.length,
-                      itemBuilder: (context, i) {
-                        final t = historique[i];
-                        final montant =
-                            (t['amount'] as num?)?.toDouble() ?? 0;
-                        final mois = t['mois']?.toString() ?? '-';
-                        final date =
-                            t['date']?.toString() ?? "Date inconnue";
-                        return CheckboxListTile(
-                          dense: true,
-                          value: selected.contains(i),
-                          onChanged: (val) {
-                            setStateDialog(() {
-                              if (val == true) {
-                                selected.add(i);
-                              } else {
-                                selected.remove(i);
-                              }
-                            });
-                          },
-                          title:
-                          Text("$mois — ${montant.toStringAsFixed(0)} FC"),
-                          subtitle:
-                          Text(date, style: const TextStyle(fontSize: 11)),
-                          secondary: IconButton(
-                            icon: const Icon(Icons.print,
-                                color: Colors.teal, size: 20),
-                            tooltip: "Imprimer uniquement ce paiement",
-                            onPressed: () {
-                              Navigator.pop(ctx);
-                              _printTransactionsForStudent(eleve, [t]);
-                            },
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text("Fermer"),
-              ),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.print),
-                label: Text("Imprimer (${selected.length})"),
-                onPressed: selected.isEmpty
-                    ? null
-                    : () {
-                  Navigator.pop(ctx);
-                  final chosen = selected.toList()..sort();
-                  _printTransactionsForStudent(
-                    eleve,
-                    chosen.map((i) => historique[i]).toList(),
-                  );
-                },
-              ),
-            ],
-          );
-        },
       ),
     );
   }

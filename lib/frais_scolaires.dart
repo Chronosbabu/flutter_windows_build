@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -8,7 +9,9 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:open_file/open_file.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
+import 'services/epson_printer_service.dart';
 
 const String serverUrl = "https://jsinf.onrender.com";
 
@@ -341,6 +344,30 @@ class FraisScolaires {
   // texte "Fait à ..., le ..." imprimé au bas des rapports PDF (voir
   // `_buildSignatureSection`).
   String? lastReportCity;
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — IMPRESSION DES REÇUS : ANTI-DOUBLON + FILE D'ATTENTE
+  // PERSISTANTE
+  //
+  // `printedReceiptKeys` retient, de façon DÉFINITIVE, la clé de chaque
+  // reçu déjà imprimé avec succès (frais principal : un par élève et par
+  // mois ; autre frais : un par élève et par type de frais) — dès
+  // qu'une clé y figure, plus aucune impression n'est jamais retentée
+  // pour elle, quel que soit l'écran d'où la demande provient.
+  //
+  // `receiptQueue` retient les reçus dont l'impression a été demandée
+  // mais n'a pas encore abouti (imprimante débranchée/non configurée
+  // au moment du paiement) — chaque entrée contient tout ce qu'il faut
+  // pour imprimer plus tard EXACTEMENT le même reçu, sans redemander
+  // quoi que ce soit. Les deux listes vivent dans le MÊME fichier JSON
+  // que le reste (voir loadData/saveData) : elles survivent donc aussi
+  // bien à la fermeture de l'application qu'à l'extinction complète de
+  // l'ordinateur — rien n'est perdu, et rien n'est jamais imprimé deux
+  // fois. Voir la section "IMPRESSION DES REÇUS" plus bas pour le
+  // détail des méthodes.
+  // ==========================================================================
+  List<String> printedReceiptKeys = [];
+  List<Map<String, dynamic>> receiptQueue = [];
 
   // ==========================================================================
   // ⚡ NOUVEAU — MODE RÉSEAU LOCAL (sans internet, via le point d'accès
@@ -800,6 +827,304 @@ class FraisScolaires {
   }
 
   // ====================================================================
+  // ⚡ NOUVEAU — IMPRESSION DES REÇUS : ANTI-DOUBLON + FILE D'ATTENTE
+  // PERSISTANTE (voir aussi les champs `printedReceiptKeys` et
+  // `receiptQueue` déclarés plus haut)
+  //
+  // Toute la logique d'impression des reçus de paiement (frais
+  // principal ET autres frais) passe désormais PAR ICI, et seulement
+  // par ici — sur demande explicite de la direction, aucun écran ne
+  // propose plus de bouton d'impression manuelle/réimpression : le
+  // personnel s'y perdait entre plusieurs reçus imprimés à des moments
+  // différents pour le même paiement. La seule impression possible est
+  // donc automatique, immédiatement après un paiement, et garantie
+  // UNIQUE.
+  //
+  // PRINCIPE GÉNÉRAL :
+  //  - Chaque reçu potentiel a une clé stable et unique :
+  //      • Frais principal : "principal|<eleveId>|<mois>"
+  //        (un seul reçu par élève et par mois, même si ce mois a été
+  //        soldé en plusieurs paiements différents)
+  //      • Autre frais     : "autre_frais|<eleveId>|<autreFraisId>"
+  //        (un seul reçu par élève et par type de frais additionnel —
+  //        cohérent avec le fait qu'un autre frais ne peut de toute
+  //        façon être payé qu'une seule fois, voir `hasPaidAutreFrais`)
+  //  - Si cette clé figure déjà dans `printedReceiptKeys`, AUCUNE
+  //    tentative d'impression n'est faite : le reçu a déjà été imprimé
+  //    avec succès une fois, il ne le sera plus jamais, d'où que vienne
+  //    la demande (paiement direct, inscription...).
+  //  - Sinon, si une imprimante est configurée : on imprime
+  //    immédiatement. En cas de succès, la clé est ajoutée à
+  //    `printedReceiptKeys` (définitif) et sauvegardée.
+  //  - Si aucune imprimante n'est configurée (ou si l'impression
+  //    échoue), le reçu est mis dans `receiptQueue` avec toutes les
+  //    données nécessaires pour le réimprimer plus tard, à l'IDENTIQUE,
+  //    sans rien redemander à l'utilisateur.
+  //  - `flushReceiptQueue()` doit être appelée à l'ouverture des écrans
+  //    de paiement (Paiements des Élèves / Autres Frais / Inscription) :
+  //    elle tente d'imprimer tout ce qui est encore en attente. Dès que
+  //    l'imprimante redevient joignable, tous les reçus accumulés
+  //    pendant qu'elle était débranchée sortent automatiquement, dans
+  //    leur ordre d'ajout — même si l'application ou l'ordinateur a été
+  //    complètement éteint entretemps, puisque `receiptQueue` est
+  //    persistée dans le même fichier JSON que le reste (voir
+  //    loadData/saveData).
+  // ====================================================================
+
+  bool isReceiptPrinted(String key) => printedReceiptKeys.contains(key);
+
+  Future<Uint8List?> _loadLogoBytesForPrinting() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final hasLogo = prefs.getBool('has_logo') ?? false;
+      if (!hasLogo) return null;
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/school_logo.png');
+      if (await file.exists()) {
+        return await file.readAsBytes();
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String> _currentPrinterName() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('printer_name') ?? '';
+  }
+
+  /// Marque une clé comme définitivement imprimée, et la retire de la
+  /// file d'attente si elle s'y trouvait.
+  Future<void> _markReceiptPrinted(String key) async {
+    if (!printedReceiptKeys.contains(key)) {
+      printedReceiptKeys.add(key);
+    }
+    receiptQueue.removeWhere((r) => r['key'] == key);
+    await saveData();
+  }
+
+  /// Ajoute (ou met à jour si déjà en attente) un reçu dans la file
+  /// d'attente. La mise à jour conserve toujours les données les PLUS
+  /// RÉCENTES pour cette clé, au cas où d'autres paiements seraient
+  /// intervenus pour le même mois/frais avant que l'impression n'ait
+  /// pu aboutir.
+  Future<void> _enqueueReceipt({
+    required String key,
+    required String type,
+    required String eleveId,
+    required Map<String, dynamic> data,
+  }) async {
+    final existingIndex = receiptQueue.indexWhere((r) => r['key'] == key);
+    final entry = <String, dynamic>{
+      'key': key,
+      'type': type,
+      'eleveId': eleveId,
+      'data': data,
+      'dateAjout': DateTime.now().toIso8601String(),
+    };
+    if (existingIndex != -1) {
+      receiptQueue[existingIndex] = entry;
+    } else {
+      receiptQueue.add(entry);
+    }
+    await saveData();
+  }
+
+  /// ⚡ NOUVEAU — Reçu du FRAIS PRINCIPAL : imprime immédiatement si une
+  /// imprimante est configurée et joignable, sinon met en file
+  /// d'attente pour impression automatique ultérieure (voir
+  /// `flushReceiptQueue`). Ne fait STRICTEMENT RIEN si un reçu a déjà
+  /// été imprimé avec succès pour ce même élève et ce même mois.
+  /// Renvoie `true` si le reçu a été imprimé À L'INSTANT, `false` s'il
+  /// a été mis en attente (ou ignoré car déjà imprimé auparavant).
+  Future<bool> printOrQueuePrincipalReceipt({
+    required Eleve eleve,
+    required String mois,
+    required double montantPaye,
+  }) async {
+    final key = 'principal|${eleve.id}|$mois';
+    if (isReceiptPrinted(key)) return false;
+
+    final double montantRequis =
+    getRequiredForMonth(mois, eleve.section, eleve.classe);
+    final double totalPaye = getStudentTotalPaid(eleve);
+    final double totalRequis = getStudentPending(eleve) + totalPaye;
+    final double resteAPayerMoisBrut = montantRequis - (eleve.paid[mois] ?? 0);
+    final double resteAPayerMois =
+    resteAPayerMoisBrut < 0 ? 0.0 : resteAPayerMoisBrut;
+
+    final data = <String, dynamic>{
+      'studentName': '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      'studentId': eleve.id,
+      'classe': eleve.classe,
+      'section': eleve.section,
+      'moisPaye': mois,
+      'montantPaye': montantPaye,
+      'montantRequis': montantRequis,
+      'resteAPayerMois': resteAPayerMois,
+      'totalDejaPayeAnnee': totalPaye,
+      'totalRequis': totalRequis,
+      'historiqueTransactions':
+      eleve.transactions.map((t) => Map<String, dynamic>.from(t)).toList(),
+    };
+
+    final printerName = await _currentPrinterName();
+    if (printerName.isNotEmpty) {
+      final logoBytes = await _loadLogoBytesForPrinting();
+      final bool ok = await EscPosPrinterService.printReceipt(
+        printerName: printerName,
+        schoolName: config.schoolName,
+        currentYear: currentYear,
+        studentName: data['studentName'] as String,
+        studentId: data['studentId'] as String,
+        classe: data['classe'] as String,
+        section: data['section'] as String,
+        moisPaye: mois,
+        montantPaye: montantPaye,
+        montantRequis: montantRequis,
+        resteAPayerMois: resteAPayerMois,
+        totalDejaPayeAnnee: totalPaye,
+        totalRequis: totalRequis,
+        historiqueTransactions: List<Map<String, dynamic>>.from(
+            data['historiqueTransactions'] as List),
+        logoBytes: logoBytes,
+      );
+      if (ok) {
+        await _markReceiptPrinted(key);
+        return true;
+      }
+    }
+
+    await _enqueueReceipt(
+      key: key,
+      type: 'principal',
+      eleveId: eleve.id,
+      data: data,
+    );
+    return false;
+  }
+
+  /// ⚡ NOUVEAU — Reçu d'un AUTRE FRAIS : même principe que
+  /// `printOrQueuePrincipalReceipt` ci-dessus, avec une clé unique par
+  /// élève + type de frais.
+  Future<bool> printOrQueueAutreFraisReceipt({
+    required Eleve eleve,
+    required AutreFrais frais,
+  }) async {
+    final key = 'autre_frais|${eleve.id}|${frais.id}';
+    if (isReceiptPrinted(key)) return false;
+
+    final data = <String, dynamic>{
+      'titreFrais': frais.nom,
+      'studentName': '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      'classe': eleve.classe,
+      'section': eleve.section,
+      'montant': frais.montant,
+    };
+
+    final printerName = await _currentPrinterName();
+    if (printerName.isNotEmpty) {
+      final bool ok = await EscPosPrinterService.printAutreFraisReceipt(
+        printerName: printerName,
+        schoolName: config.schoolName,
+        titreFrais: data['titreFrais'] as String,
+        studentName: data['studentName'] as String,
+        classe: data['classe'] as String,
+        section: data['section'] as String,
+        montant: data['montant'] as double,
+      );
+      if (ok) {
+        await _markReceiptPrinted(key);
+        return true;
+      }
+    }
+
+    await _enqueueReceipt(
+      key: key,
+      type: 'autre_frais',
+      eleveId: eleve.id,
+      data: data,
+    );
+    return false;
+  }
+
+  /// ⚡ NOUVEAU — Tente d'imprimer tous les reçus encore en attente
+  /// (voir `receiptQueue`). À appeler à l'ouverture de chaque écran de
+  /// paiement : dès que l'imprimante redevient configurée/joignable,
+  /// tout ce qui s'est accumulé pendant qu'elle était débranchée sort
+  /// automatiquement, un par un, dans l'ordre d'ajout — y compris après
+  /// un redémarrage complet de l'application ou de l'ordinateur, grâce
+  /// à la persistance de `receiptQueue`. Chaque tentative revérifie
+  /// `isReceiptPrinted` juste avant d'imprimer, pour ne jamais
+  /// réimprimer un reçu qui aurait entretemps déjà été marqué comme
+  /// imprimé (ex: restauration depuis le serveur central après
+  /// impression sur un autre appareil de la même école).
+  Future<int> flushReceiptQueue() async {
+    if (receiptQueue.isEmpty) return 0;
+    final printerName = await _currentPrinterName();
+    if (printerName.isEmpty) return 0;
+
+    final logoBytes = await _loadLogoBytesForPrinting();
+    int printedCount = 0;
+    final items = List<Map<String, dynamic>>.from(receiptQueue);
+
+    for (final item in items) {
+      final key = item['key']?.toString() ?? '';
+      if (key.isEmpty) continue;
+      if (isReceiptPrinted(key)) {
+        receiptQueue.removeWhere((r) => r['key'] == key);
+        continue;
+      }
+      final type = item['type']?.toString() ?? '';
+      final data = Map<String, dynamic>.from(item['data'] as Map? ?? {});
+      bool ok = false;
+
+      if (type == 'principal') {
+        ok = await EscPosPrinterService.printReceipt(
+          printerName: printerName,
+          schoolName: config.schoolName,
+          currentYear: currentYear,
+          studentName: data['studentName'] as String? ?? '',
+          studentId: data['studentId'] as String? ?? '',
+          classe: data['classe'] as String? ?? '',
+          section: data['section'] as String? ?? '',
+          moisPaye: data['moisPaye'] as String? ?? '',
+          montantPaye: (data['montantPaye'] as num?)?.toDouble() ?? 0.0,
+          montantRequis: (data['montantRequis'] as num?)?.toDouble() ?? 0.0,
+          resteAPayerMois:
+          (data['resteAPayerMois'] as num?)?.toDouble() ?? 0.0,
+          totalDejaPayeAnnee:
+          (data['totalDejaPayeAnnee'] as num?)?.toDouble() ?? 0.0,
+          totalRequis: (data['totalRequis'] as num?)?.toDouble() ?? 0.0,
+          historiqueTransactions:
+          ((data['historiqueTransactions'] as List?) ?? [])
+              .map((t) => Map<String, dynamic>.from(t as Map))
+              .toList(),
+          logoBytes: logoBytes,
+        );
+      } else if (type == 'autre_frais') {
+        ok = await EscPosPrinterService.printAutreFraisReceipt(
+          printerName: printerName,
+          schoolName: config.schoolName,
+          titreFrais: data['titreFrais'] as String? ?? '',
+          studentName: data['studentName'] as String? ?? '',
+          classe: data['classe'] as String? ?? '',
+          section: data['section'] as String? ?? '',
+          montant: (data['montant'] as num?)?.toDouble() ?? 0.0,
+        );
+      }
+
+      if (ok) {
+        await _markReceiptPrinted(key);
+        printedCount++;
+      }
+    }
+
+    return printedCount;
+  }
+
+  // ====================================================================
   // GÉNÉRATION D'ID LOCALE
   // ====================================================================
   String generateLocalStudentId(String nom) {
@@ -882,6 +1207,53 @@ class FraisScolaires {
   }
 
   // ====================================================================
+  // ⚡ NOUVEAU — UNICITÉ STRICTE DU TRIPLET NOM + POST-NOM + PRÉNOM
+  //
+  // Consigne explicite de la direction : deux élèves peuvent très bien
+  // partager DEUX de ces trois informations (même nom et même
+  // post-nom, ou même nom et même prénom, ou même post-nom et même
+  // prénom...), mais JAMAIS les TROIS en même temps. Ce triplet complet
+  // doit rester unique pour toute l'école (année en cours), afin
+  // d'éliminer tout risque de confusion entre deux élèves strictement
+  // homonymes — l'utilisateur est alors obligé de corriger au moins un
+  // des trois champs (typiquement le prénom) avant de pouvoir
+  // continuer.
+  //
+  // Comparaison insensible à la casse et aux espaces superflus, sur le
+  // même principe que `findStudentByFullName` ci-dessus.
+  //
+  // Volontairement limité à `currentData.eleves` (l'année scolaire en
+  // cours) : c'est la seule liste où deux élèves peuvent réellement se
+  // côtoyer au quotidien (mêmes listes, mêmes paiements) ; un élève
+  // promu d'une année à l'autre conserve de toute façon son ID (voir
+  // `promoteStudents`), ce n'est donc jamais une "nouvelle" inscription
+  // à valider ici.
+  //
+  // `excludeId` permet d'exclure l'élève en cours de modification
+  // lorsqu'on vérifie après une MODIFICATION (et non une création) —
+  // sinon un élève entrerait toujours en conflit avec lui-même.
+  // ====================================================================
+  Eleve? findDuplicateFullName({
+    required String nom,
+    required String postNom,
+    required String prenom,
+    String? excludeId,
+  }) {
+    final nomN = nom.trim().toLowerCase();
+    final postNomN = postNom.trim().toLowerCase();
+    final prenomN = prenom.trim().toLowerCase();
+    for (final e in currentData.eleves) {
+      if (excludeId != null && e.id == excludeId) continue;
+      if (e.nom.trim().toLowerCase() == nomN &&
+          e.postNom.trim().toLowerCase() == postNomN &&
+          e.prenom.trim().toLowerCase() == prenomN) {
+        return e;
+      }
+    }
+    return null;
+  }
+
+  // ====================================================================
   // ⚡ NOUVEAU — EXPORT "SNAPSHOT" (utilisé par le serveur local pour
   // répondre à GET /restore exactement comme le fait le serveur central,
   // sans passer par le réseau puisque c'est la même instance qui sert
@@ -909,6 +1281,10 @@ class FraisScolaires {
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
       // ⚡ NOUVEAU
       'signataires': signataires.map((s) => s.toJson()).toList(),
+      // ⚡ NOUVEAU — reçus déjà imprimés + file d'attente (anti-double
+      // impression, voir plus haut).
+      'printedReceiptKeys': printedReceiptKeys,
+      'receiptQueue': receiptQueue,
       // Le serveur local ne protège pas /restore par mot de passe (les
       // sous-utilisateurs n'en fournissent jamais un) — ce champ reste
       // donc toujours null ici, contrairement à backupToServer qui
@@ -1069,32 +1445,51 @@ class FraisScolaires {
     return entry;
   }
 
-  /// Valide un lot d'inscriptions : crée un élève par inscription
-  /// valide (nom + section + classe renseignés), avec un ID généré
-  /// localement, puis retire l'entrée de la file d'attente.
+  // ⚡ CORRIGÉ — refuse désormais toute inscription en attente qui
+  // créerait un doublon strict (nom + post-nom + prénom identiques à un
+  // élève déjà existant) : voir `findDuplicateFullName`. Une telle
+  // inscription reste dans la file d'attente (elle n'est ni créée, ni
+  // supprimée) pour que l'admin la corrige manuellement — un doublon
+  // homonyme ne doit jamais être créé silencieusement.
   Future<int> validateLocalPendingRegistrations(List<String> ids) async {
     int count = 0;
     final toValidate = localPendingRegistrations
         .where((r) => ids.contains(r['id']))
         .toList();
+    final processedIds = <String>[];
     for (final r in toValidate) {
       final nom = (r['nom'] ?? '').toString().trim();
       final section = (r['section'] ?? '').toString().trim();
       final classe = (r['classe'] ?? '').toString().trim();
-      if (nom.isEmpty || section.isEmpty || classe.isEmpty) continue;
+      final postNom = (r['postNom'] ?? '').toString().trim();
+      final prenom = (r['prenom'] ?? '').toString().trim();
+      if (nom.isEmpty || section.isEmpty || classe.isEmpty) {
+        processedIds.add(r['id'] as String);
+        continue;
+      }
+
+      // ⚡ NOUVEAU — refus des doublons stricts (voir
+      // `findDuplicateFullName`) : l'entrée reste en attente, elle
+      // n'est ni créée ni retirée de la file.
+      if (findDuplicateFullName(nom: nom, postNom: postNom, prenom: prenom) !=
+          null) {
+        continue;
+      }
 
       final id = generateLocalStudentId(nom);
       currentData.eleves.add(Eleve(
         id: id,
         nom: nom,
-        postNom: (r['postNom'] ?? '').toString().trim(),
-        prenom: (r['prenom'] ?? '').toString().trim(),
+        postNom: postNom,
+        prenom: prenom,
         classe: classe,
         section: section,
       ));
       count++;
+      processedIds.add(r['id'] as String);
     }
-    localPendingRegistrations.removeWhere((r) => ids.contains(r['id']));
+    localPendingRegistrations
+        .removeWhere((r) => processedIds.contains(r['id']));
     await saveData();
     return count;
   }
@@ -2866,6 +3261,19 @@ class FraisScolaires {
                   .toList();
         }
 
+        // ⚡ NOUVEAU — chargement des reçus déjà imprimés et de la file
+        // d'attente d'impression (anti-double impression, persistant).
+        if (data['printedReceiptKeys'] != null) {
+          printedReceiptKeys = (data['printedReceiptKeys'] as List<dynamic>)
+              .map((e) => e.toString())
+              .toList();
+        }
+        if (data['receiptQueue'] != null) {
+          receiptQueue = (data['receiptQueue'] as List<dynamic>)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+        }
+
         await _assignMissingIds();
       } catch (_) {
         _initDefaultData();
@@ -2951,6 +3359,9 @@ class FraisScolaires {
       'localPendingAutresFraisPayments': localPendingAutresFraisPayments,
       'localAttendance': localAttendance,
       'localCommunicationsLog': localCommunicationsLog,
+      // ⚡ NOUVEAU — reçus déjà imprimés + file d'attente d'impression.
+      'printedReceiptKeys': printedReceiptKeys,
+      'receiptQueue': receiptQueue,
     };
     await file.writeAsString(json.encode(data));
   }
@@ -2989,6 +3400,8 @@ class FraisScolaires {
     localPendingAutresFraisPayments = []; // ⚡ NOUVEAU
     localAttendance = {}; // ⚡ NOUVEAU
     localCommunicationsLog = []; // ⚡ NOUVEAU
+    printedReceiptKeys = []; // ⚡ NOUVEAU
+    receiptQueue = []; // ⚡ NOUVEAU
   }
 
   Future<void> changeYear(String newYear) async {
@@ -3087,6 +3500,12 @@ class FraisScolaires {
         // ⚡ NOUVEAU — les signataires suivent aussi la sauvegarde
         // serveur, pour rester disponibles sur les autres appareils.
         'signataires': signataires.map((s) => s.toJson()).toList(),
+        // ⚡ NOUVEAU — les reçus déjà imprimés et la file d'attente
+        // suivent aussi la sauvegarde serveur, pour qu'aucun reçu ne
+        // soit réimprimé en double si l'école utilise plusieurs
+        // appareils (ex: caisse + bureau de la direction).
+        'printedReceiptKeys': printedReceiptKeys,
+        'receiptQueue': receiptQueue,
         'backup_password': password,
       };
 
@@ -3370,6 +3789,34 @@ class FraisScolaires {
       for (var s in serverSignataires) {
         if (!existingSignataireIds.contains(s.id)) {
           signataires.add(s);
+        }
+      }
+    }
+
+    // ⚡ NOUVEAU — fusion des reçus déjà imprimés (union simple, sans
+    // jamais retirer une clé locale) et de la file d'attente (on
+    // n'ajoute que les clés qui ne sont ni déjà imprimées, ni déjà en
+    // attente localement) — pour ne jamais réimprimer, sur cet
+    // appareil, un reçu déjà sorti sur un autre appareil de la même
+    // école.
+    if (serverData['printedReceiptKeys'] != null) {
+      final serverKeys = (serverData['printedReceiptKeys'] as List<dynamic>)
+          .map((e) => e.toString());
+      for (var k in serverKeys) {
+        if (!printedReceiptKeys.contains(k)) {
+          printedReceiptKeys.add(k);
+        }
+      }
+    }
+    if (serverData['receiptQueue'] != null) {
+      final serverQueue = (serverData['receiptQueue'] as List<dynamic>)
+          .map((e) => Map<String, dynamic>.from(e as Map));
+      for (var item in serverQueue) {
+        final key = item['key']?.toString() ?? '';
+        if (key.isEmpty || printedReceiptKeys.contains(key)) continue;
+        final alreadyQueued = receiptQueue.any((r) => r['key'] == key);
+        if (!alreadyQueued) {
+          receiptQueue.add(item);
         }
       }
     }

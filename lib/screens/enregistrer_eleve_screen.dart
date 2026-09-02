@@ -1,13 +1,9 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_selector/file_selector.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
-import '../services/epson_printer_service.dart';
 
 class EnregistrerEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -34,15 +30,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   bool _isSaving = false;
 
   // ==========================================================================
-  // ⚡ NOUVEAU — AUTRES INFORMATIONS SUR L'IDENTITÉ DE L'ÉLÈVE (OPTIONNEL)
+  // AUTRES INFORMATIONS SUR L'IDENTITÉ DE L'ÉLÈVE (OPTIONNEL)
   // ==========================================================================
-  // Champs par défaut toujours proposés (mais jamais obligatoires) : nom du
-  // père, nom de la mère, adresse, date de naissance, photo. En plus de ça,
-  // l'utilisateur peut ajouter librement ses propres questions
-  // personnalisées via customFieldsControllers (question -> contrôleur de
-  // réponse). Toutes ces données sont saisies dans une boîte de dialogue
-  // dédiée (_showAutresInfosDialog) ouverte depuis le bouton tout en bas du
-  // formulaire.
   final pereNomController = TextEditingController();
   final mereNomController = TextEditingController();
   final adresseController = TextEditingController();
@@ -51,35 +40,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   final Map<String, TextEditingController> customFieldsControllers = {};
 
   // ==========================================================================
-  // ⚡ CORRIGÉ — PAIEMENT OPTIONNEL DÈS L'INSCRIPTION (demande explicite de
-  // la direction), maintenant CUMULABLE.
-  //
-  // AVANT : un unique SegmentedButton ("principal" xor "autres") empêchait
-  // l'utilisateur de payer les DEUX en même temps lors de l'inscription —
-  // c'était le bug signalé : il fallait choisir l'un OU l'autre, jamais les
-  // deux à la fois.
-  //
-  // MAINTENANT : deux interrupteurs totalement INDÉPENDANTS,
-  // `_payerPrincipal` et `_payerAutreFrais`. Chacun peut être activé seul,
-  // les deux ensemble, ou aucun des deux (comportement par défaut,
-  // inchangé). Chaque bloc affiche son propre champ de saisie une fois
-  // activé, exactement comme avant, mais sans qu'activer l'un désactive
-  // l'autre.
-  //
-  // Le paiement est appliqué à l'élève APRÈS sa création (une fois qu'il
-  // existe réellement dans `currentData.eleves`), en réutilisant EXACTEMENT
-  // les mêmes méthodes que les écrans dédiés :
-  //   - Frais Principal -> `fs.handlePayment(...)`, la même méthode que
-  //     `PaiementEleveScreen` : l'élève apparaîtra donc immédiatement, avec
-  //     son paiement déjà à jour, dans l'écran "Paiements des Élèves".
-  //   - Autre Frais -> `fs.payAutreFrais(...)`, la même méthode que
-  //     `AutresFraisScreen` : l'élève apparaîtra donc immédiatement, marqué
-  //     "Payé", dans l'écran "Autres Frais de Paiement".
-  // Si les DEUX interrupteurs sont activés, les DEUX méthodes sont appelées
-  // l'une après l'autre pour le même élève, et les DEUX reçus sont imprimés
-  // (si une imprimante est configurée). Aucune nouvelle logique de calcul
-  // n'est inventée ici — uniquement une interface qui appelle les mêmes
-  // méthodes, indépendamment l'une de l'autre.
+  // PAIEMENT OPTIONNEL DÈS L'INSCRIPTION, CUMULABLE.
   // ==========================================================================
   bool _payerPrincipal = false;
   final _montantPrincipalController = TextEditingController();
@@ -93,6 +54,27 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     if (widget.fraisScolaires.config.sections.isNotEmpty) {
       selectedSection = widget.fraisScolaires.config.sections.first;
     }
+    // ⚡ NOUVEAU — à l'ouverture de cet écran de paiement/inscription, on
+    // tente de vider la file d'attente des reçus non encore imprimés (ex:
+    // paiements faits pendant que l'imprimante était débranchée). Cela
+    // fonctionne même après un redémarrage complet de l'application ou de
+    // l'ordinateur, puisque cette file est persistée dans le fichier JSON
+    // local (voir FraisScolaires.receiptQueue / flushReceiptQueue).
+    _flushPendingReceipts();
+  }
+
+  // ⚡ NOUVEAU
+  Future<void> _flushPendingReceipts() async {
+    final count = await widget.fraisScolaires.flushReceiptQueue();
+    if (mounted && count > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              "🖨️ $count reçu(s) en attente ont été imprimés automatiquement."),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
   }
 
   @override
@@ -103,14 +85,12 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     nomFocus.dispose();
     postNomFocus.dispose();
     prenomFocus.dispose();
-    // ⚡ NOUVEAU
     pereNomController.dispose();
     mereNomController.dispose();
     adresseController.dispose();
     for (var c in customFieldsControllers.values) {
       c.dispose();
     }
-    // ⚡ NOUVEAU — paiement à l'inscription
     _montantPrincipalController.dispose();
     super.dispose();
   }
@@ -119,9 +99,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     nomController.clear();
     postNomController.clear();
     prenomController.clear();
-    // ⚡ NOUVEAU — on vide les valeurs saisies pour cet élève, mais on garde
-    // les QUESTIONS personnalisées déjà créées (elles restent proposées
-    // pour l'élève suivant, très utile lors d'une saisie en série).
     pereNomController.clear();
     mereNomController.clear();
     adresseController.clear();
@@ -132,12 +109,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       selectedClasseNumero = null;
       selectedSousClasse = null;
       // On garde la section sélectionnée pour accélérer la saisie en série
-      // ⚡ NOUVEAU
       selectedDateNaissance = null;
       photoBytes = null;
-      // ⚡ CORRIGÉ — on réinitialise les DEUX paiements à chaque nouvel
-      // élève : un paiement ne doit jamais être appliqué par erreur à
-      // l'élève suivant lors d'une saisie en série.
       _payerPrincipal = false;
       _montantPrincipalController.clear();
       _payerAutreFrais = false;
@@ -147,28 +120,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   }
 
   // ==================== GÉNÉRATION D'ID 100% LOCALE ====================
-  //
-  // Avant : l'ID était demandé au serveur via une requête HTTP, ce qui
-  // bloquait totalement l'ajout d'un élève sans connexion internet.
-  //
-  // Maintenant : l'ID est généré instantanément en local, à partir des
-  // initiales de l'école + l'année scolaire + un numéro de séquence. On
-  // vérifie qu'il n'existe déjà nulle part (année courante + tout
-  // l'historique) pour garantir qu'il est toujours unique, même hors ligne.
-  // La synchronisation avec le serveur se fait plus tard, uniquement quand
-  // l'utilisateur appuie sur "Sauvegarder sur le Serveur" dans les Paramètres.
-  //
-  // ⚡ CORRIGÉ : les initiales de l'école sont désormais extraites
-  // uniquement à partir des caractères alphanumériques (lettres et
-  // chiffres) du nom de l'école. Avant, un nom d'école commençant par
-  // un symbole (ex: "####") produisait un ID contenant ce symbole
-  // (ex: "BB27#1"). Certains symboles comme '#' sont des caractères
-  // RÉSERVÉS dans une URL : '#' marque le début d'un "fragment" et tout
-  // ce qui le suit est tronqué silencieusement par Uri.parse() côté
-  // client, avant même que la requête n'atteigne le serveur. Résultat :
-  // le parent tape l'ID exact donné par l'école, le serveur ne reçoit
-  // que la partie avant le '#', et répond "élève introuvable" alors que
-  // les données existent bel et bien côté serveur.
   String _generateLocalStudentId() {
     final config = widget.fraisScolaires.config;
 
@@ -185,8 +136,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
     final yearPart = widget.fraisScolaires.currentYear.split('-').first;
 
-    // Rassemble tous les IDs déjà utilisés, toutes années confondues,
-    // pour être absolument certain de ne jamais avoir de doublon.
     final existingIds = <String>{};
     for (var yearData in widget.fraisScolaires.history.values) {
       for (var e in yearData.eleves) {
@@ -208,8 +157,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   }
 
   // ==================== AJOUT MANUEL D'UN NUMÉRO DE CLASSE ====================
-  // Utile surtout pour une section personnalisée qui n'a pas de classes
-  // générées automatiquement.
   Future<void> _addClasseNumeroDialog() async {
     if (selectedSection == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -240,8 +187,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                   setState(() {
                     selectedClasseNumero = value;
                     selectedSousClasse = null;
-                    // ⚡ NOUVEAU — la classe change, l'éligibilité aux
-                    // autres frais aussi : on réinitialise le choix.
                     _selectedAutreFraisPaiement = null;
                   });
                 }
@@ -290,7 +235,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                 if (mounted) {
                   setState(() {
                     selectedSousClasse = value;
-                    // ⚡ NOUVEAU
                     _selectedAutreFraisPaiement = null;
                   });
                 }
@@ -305,24 +249,14 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — HELPERS POUR LE PAIEMENT À L'INSCRIPTION
+  // HELPERS POUR LE PAIEMENT À L'INSCRIPTION
   // ==========================================================================
-
-  /// Nom complet de la classe telle que sélectionnée dans le formulaire
-  /// (numéro + sous-classe), ou `null` si le numéro de classe n'est pas
-  /// encore choisi. Utilisé uniquement pour prévisualiser le montant requis
-  /// et pour filtrer les "autres frais" éligibles AVANT que l'élève
-  /// n'existe réellement (donc sans pouvoir utiliser
-  /// `autreFraisAppliesToStudent`, qui a besoin d'un `Eleve`).
   String? get _classeCompleteSelectionnee {
     if (selectedClasseNumero == null) return null;
     return widget.fraisScolaires
         .buildFullClasseName(selectedClasseNumero!, selectedSousClasse);
   }
 
-  /// Montant mensuel requis pour la section/classe actuellement
-  /// sélectionnée (affiché à titre indicatif à côté du champ "Montant" du
-  /// frais principal, pour éviter les erreurs de saisie).
   double? get _montantMensuelIndicatif {
     if (selectedSection == null) return null;
     return widget.fraisScolaires.getRequiredForMonth(
@@ -332,10 +266,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     );
   }
 
-  /// "Autres Frais" applicables à la section/classe actuellement
-  /// sélectionnée dans le formulaire, selon le même principe que
-  /// `FraisScolaires.autreFraisAppliesToStudent` (reproduit ici car
-  /// l'élève n'existe pas encore au moment où ce filtre est affiché).
   List<AutreFrais> get _autresFraisEligibles {
     if (selectedSection == null) return [];
     final classeComplete = _classeCompleteSelectionnee;
@@ -352,99 +282,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     }).toList();
   }
 
-  // ⚡ NOUVEAU — recharge le logo depuis le disque, comme les autres écrans
-  // de paiement (PaiementEleveScreen / AutresFraisScreen), pour que le
-  // reçu imprimé ici utilise le même logo que partout ailleurs.
-  Future<Uint8List?> _loadLogoBytesFromDisk() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final hasLogo = prefs.getBool('has_logo') ?? false;
-      if (!hasLogo) return null;
-      final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/school_logo.png');
-      if (await file.exists()) {
-        return await file.readAsBytes();
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Imprime le reçu du paiement de frais principal effectué à
-  /// l'inscription — reprend exactement la même logique que
-  /// `PaiementEleveScreen._printReceiptAfterPayment`. Silencieux (ne fait
-  /// rien) si aucune imprimante n'est configurée : l'inscription elle-même
-  /// n'est jamais bloquée par l'impression.
-  Future<void> _imprimerRecuPrincipalSiPossible(
-      Eleve eleve, String mois, double montantPaye) async {
-    final prefs = await SharedPreferences.getInstance();
-    final printerName = prefs.getString('printer_name') ?? '';
-    if (printerName.isEmpty) return;
-
-    final logoBytes = await _loadLogoBytesFromDisk();
-    final double montantRequis = widget.fraisScolaires
-        .getRequiredForMonth(mois, eleve.section, eleve.classe);
-    final double totalPaye = widget.fraisScolaires.getStudentTotalPaid(eleve);
-    final double totalRequis =
-        widget.fraisScolaires.getStudentPending(eleve) + totalPaye;
-    final double resteAPayerMois = montantRequis - (eleve.paid[mois] ?? 0);
-
-    await EscPosPrinterService.printReceipt(
-      printerName: printerName,
-      schoolName: widget.fraisScolaires.config.schoolName,
-      currentYear: widget.fraisScolaires.currentYear,
-      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
-      studentId: eleve.id,
-      classe: eleve.classe,
-      section: eleve.section,
-      moisPaye: mois,
-      montantPaye: montantPaye,
-      montantRequis: montantRequis,
-      resteAPayerMois: resteAPayerMois < 0 ? 0 : resteAPayerMois,
-      totalDejaPayeAnnee: totalPaye,
-      totalRequis: totalRequis,
-      historiqueTransactions: eleve.transactions
-          .map((t) => Map<String, dynamic>.from(t))
-          .toList(),
-      logoBytes: logoBytes,
-    );
-  }
-
-  /// Imprime le reçu d'un "autre frais" payé à l'inscription — reprend
-  /// exactement la même logique que `AutresFraisScreen._imprimerRecu`.
-  /// Silencieux si aucune imprimante n'est configurée.
-  Future<void> _imprimerRecuAutreFraisSiPossible(
-      Eleve eleve, AutreFrais frais) async {
-    final prefs = await SharedPreferences.getInstance();
-    final printerName = prefs.getString('printer_name') ?? '';
-    if (printerName.isEmpty) return;
-
-    await EscPosPrinterService.printAutreFraisReceipt(
-      printerName: printerName,
-      schoolName: widget.fraisScolaires.config.schoolName,
-      titreFrais: frais.nom,
-      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
-      classe: eleve.classe,
-      section: eleve.section,
-      montant: frais.montant,
-    );
-  }
-
   // ==========================================================================
-  // ⚡ NOUVEAU — BOÎTE DE DIALOGUE "AUTRES INFORMATIONS" (OPTIONNEL)
+  // BOÎTE DE DIALOGUE "AUTRES INFORMATIONS" (OPTIONNEL)
   // ==========================================================================
-  // Ouverte depuis le bouton tout en bas du formulaire. Contient :
-  //   - Photo de l'élève (sélection depuis le PC via file_selector)
-  //   - Nom du père / Nom de la mère / Adresse / Date de naissance
-  //   - Un bouton "Ajouter une Question Personnalisée" qui permet à
-  //     l'utilisateur de créer autant de champs libres qu'il le souhaite ;
-  //     chaque question ajoutée fait apparaître immédiatement son propre
-  //     champ de saisie dans la boîte de dialogue.
-  // Toutes les valeurs vivent dans les contrôleurs de l'écran parent (pas
-  // seulement dans la boîte de dialogue), donc rien n'est perdu si
-  // l'utilisateur ferme puis rouvre la boîte de dialogue avant d'enregistrer
-  // l'élève.
   Future<void> _showAutresInfosDialog() async {
     await showDialog(
       context: context,
@@ -540,7 +380,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // ---- Photo ----
                     Center(
                       child: Column(
                         children: [
@@ -665,12 +504,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         },
       ),
     );
-    // Rafraîchit l'écran principal (ex: le résumé sous le bouton).
     if (mounted) setState(() {});
   }
 
-  // ⚡ NOUVEAU — Nombre de champs optionnels actuellement remplis, affiché
-  // en résumé sous le bouton "Autres Informations".
   int _countFilledExtras() {
     int count = 0;
     if (pereNomController.text.trim().isNotEmpty) count++;
@@ -697,11 +533,37 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     }
 
     // ==========================================================================
-    // ⚡ CORRIGÉ — VALIDATION DES DEUX PAIEMENTS OPTIONNELS, INDÉPENDAMMENT
-    // L'UN DE L'AUTRE (avant toute création d'élève, pour ne jamais
-    // inscrire un élève à moitié à cause d'une erreur de saisie sur l'un
-    // des deux paiements).
+    // ⚡ NOUVEAU — UNICITÉ STRICTE NOM + POST-NOM + PRÉNOM
+    //
+    // Deux élèves peuvent partager deux de ces trois informations (même nom
+    // et même post-nom, ou même nom et même prénom, etc.), mais JAMAIS les
+    // TROIS à la fois. On vérifie ici via `findDuplicateFullName` (méthode
+    // déjà présente dans FraisScolaires) avant toute création : si un
+    // élève strictement homonyme existe déjà, l'inscription est bloquée et
+    // l'utilisateur doit corriger au moins un des trois champs (typiquement
+    // le prénom).
     // ==========================================================================
+    final duplicateEleve = widget.fraisScolaires.findDuplicateFullName(
+      nom: nomController.text.trim(),
+      postNom: postNomController.text.trim(),
+      prenom: prenomController.text.trim(),
+    );
+    if (duplicateEleve != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "⚠️ Un élève avec exactement le même Nom, Post-nom et Prénom "
+                "existe déjà (${duplicateEleve.classe} - ID: ${duplicateEleve.id}). "
+                "Veuillez corriger au moins un des trois champs (par exemple "
+                "le prénom) pour continuer.",
+          ),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+      return;
+    }
+
     double? montantPrincipalAPayer;
     if (_payerPrincipal) {
       montantPrincipalAPayer =
@@ -733,16 +595,13 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
     setState(() => _isSaving = true);
     try {
-      // Génération de l'ID 100% locale et instantanée (aucune connexion requise)
       String generatedId = _generateLocalStudentId();
 
-      // Construction du nom final de classe : numéro + sous-classe (si choisie)
       String classeFinale = widget.fraisScolaires.buildFullClasseName(
         selectedClasseNumero!,
         selectedSousClasse,
       );
 
-      // ⚡ NOUVEAU — formatage de la date de naissance en "JJ/MM/AAAA"
       String dateNaissanceStr = '';
       if (selectedDateNaissance != null) {
         final d = selectedDateNaissance!;
@@ -750,8 +609,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         dateNaissanceStr = "${two(d.day)}/${two(d.month)}/${d.year}";
       }
 
-      // ⚡ NOUVEAU — construction de la carte des questions personnalisées
-      // (on ne garde que celles qui ont réellement une réponse remplie)
       final Map<String, String> customFieldsMap = {
         for (var entry in customFieldsControllers.entries)
           entry.key: entry.value.text.trim(),
@@ -764,7 +621,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         prenom: prenomController.text.trim(),
         classe: classeFinale,
         section: selectedSection!,
-        // ⚡ NOUVEAU
         pereNom: pereNomController.text.trim(),
         mereNom: mereNomController.text.trim(),
         adresse: adresseController.text.trim(),
@@ -776,27 +632,10 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       widget.fraisScolaires.currentData.eleves.add(nouvelEleve);
 
       // ==========================================================================
-      // ⚡ CORRIGÉ — APPLICATION DES DEUX PAIEMENTS OPTIONNELS, DE MANIÈRE
-      // CUMULABLE.
-      //
-      // On réutilise ici EXACTEMENT les mêmes méthodes que les écrans dédiés
-      // (`fs.handlePayment` pour le frais principal, `fs.payAutreFrais` pour
-      // un autre frais), maintenant que `nouvelEleve` existe réellement dans
-      // `currentData.eleves`. Les deux blocs ci-dessous sont indépendants :
-      // si les DEUX interrupteurs sont activés, les DEUX paiements sont
-      // enregistrés l'un après l'autre pour le même élève — c'est le point
-      // qui était bloqué avant (un seul des deux pouvait être choisi).
-      // C'est ce qui garantit que l'élève apparaîtra avec son paiement déjà
-      // à jour dans "Paiements des Élèves" ET/OU "Autres Frais de Paiement",
-      // sans logique de calcul dupliquée.
+      // APPLICATION DES DEUX PAIEMENTS OPTIONNELS, DE MANIÈRE CUMULABLE.
       // ==========================================================================
       String? moisPrincipalPaye;
       if (_payerPrincipal && montantPrincipalAPayer != null) {
-        // Un élève qui vient d'être inscrit n'a évidemment aucun mois déjà
-        // payé : on démarre donc toujours sur le premier mois de l'année
-        // scolaire (Septembre) — `handlePayment` répartit ensuite
-        // automatiquement sur les mois suivants si le montant les
-        // dépasse, exactement comme dans "Paiements des Élèves".
         moisPrincipalPaye = widget.fraisScolaires.months.first;
         widget.fraisScolaires.handlePayment(
           nouvelEleve,
@@ -818,32 +657,53 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
       await widget.fraisScolaires.saveData(); // Sauvegarde locale (fichier sur l'appareil)
 
-      // ⚡ CORRIGÉ — impression des DEUX reçus correspondants, si une
-      // imprimante est configurée (comportement silencieux sinon, comme
-      // partout ailleurs). Avant, seul un des deux pouvait être imprimé
-      // (else if) ; maintenant chaque paiement réellement effectué
-      // déclenche sa propre impression, indépendamment de l'autre.
+      // ==========================================================================
+      // ⚡ CORRIGÉ — IMPRESSION DÉSORMAIS GÉRÉE EXCLUSIVEMENT PAR LE SYSTÈME
+      // CENTRALISÉ DE FraisScolaires (anti-doublon + file d'attente
+      // persistante) : voir `printOrQueuePrincipalReceipt` et
+      // `printOrQueueAutreFraisReceipt`. Avant, cet écran imprimait
+      // directement lui-même (méthodes locales désormais supprimées), sans
+      // jamais vérifier si un reçu identique avait déjà été imprimé
+      // ailleurs, et sans jamais mettre en file d'attente si l'imprimante
+      // était débranchée. Maintenant :
+      //   - Si un reçu identique (même élève + même mois, ou même élève +
+      //     même frais additionnel) a déjà été imprimé une fois, peu importe
+      //     depuis quel écran, il ne sera JAMAIS réimprimé.
+      //   - Si aucune imprimante n'est branchée, le reçu est mis en attente
+      //     et sortira automatiquement dès qu'une imprimante redevient
+      //     disponible (même après extinction complète de l'ordinateur ou
+      //     de l'application), voir `flushReceiptQueue`.
+      // ==========================================================================
+      bool principalRecuImprimeMaintenant = false;
       if (moisPrincipalPaye != null && montantPrincipalAPayer != null) {
-        await _imprimerRecuPrincipalSiPossible(
-            nouvelEleve, moisPrincipalPaye, montantPrincipalAPayer);
+        principalRecuImprimeMaintenant =
+        await widget.fraisScolaires.printOrQueuePrincipalReceipt(
+          eleve: nouvelEleve,
+          mois: moisPrincipalPaye,
+          montantPaye: montantPrincipalAPayer,
+        );
       }
+      bool autreFraisRecuImprimeMaintenant = false;
       if (autreFraisPaye != null) {
-        await _imprimerRecuAutreFraisSiPossible(nouvelEleve, autreFraisPaye);
+        autreFraisRecuImprimeMaintenant =
+        await widget.fraisScolaires.printOrQueueAutreFraisReceipt(
+          eleve: nouvelEleve,
+          frais: autreFraisPaye,
+        );
       }
 
       if (!mounted) return;
 
-      // ⚡ CORRIGÉ — message de confirmation enrichi du détail des DEUX
-      // paiements, le cas échéant (chacun sur sa propre ligne, si les deux
-      // ont été effectués).
       String messagePaiement = '';
       if (moisPrincipalPaye != null && montantPrincipalAPayer != null) {
         messagePaiement +=
-        "\n💰 Frais Principal : ${montantPrincipalAPayer.toStringAsFixed(0)} FC";
+        "\n💰 Frais Principal : ${montantPrincipalAPayer.toStringAsFixed(0)} FC"
+            "${principalRecuImprimeMaintenant ? '' : ' (reçu en attente d\'impression)'}";
       }
       if (autreFraisPaye != null) {
         messagePaiement +=
-        "\n💰 ${autreFraisPaye.nom} : ${autreFraisPaye.montant.toStringAsFixed(0)} FC";
+        "\n💰 ${autreFraisPaye.nom} : ${autreFraisPaye.montant.toStringAsFixed(0)} FC"
+            "${autreFraisRecuImprimeMaintenant ? '' : ' (reçu en attente d\'impression)'}";
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -853,7 +713,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
           duration: const Duration(seconds: 3),
         ),
       );
-      _clearFields(); // Prépare pour l'élève suivant
+      _clearFields();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -866,13 +726,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     }
   }
 
-  // ==========================================================================
-  // ⚡ CORRIGÉ — BLOC "PAIEMENT À L'INSCRIPTION (OPTIONNEL)"
-  //
-  // Remplace l'ancien SegmentedButton exclusif par DEUX cartes/interrupteurs
-  // totalement indépendants : "Payer le Frais Principal" et "Payer un Autre
-  // Frais". Chacun peut être activé seul ou en même temps que l'autre.
-  // ==========================================================================
   Widget _buildPaiementInscriptionSection() {
     final montantMensuel = _montantMensuelIndicatif;
     final autresFraisEligibles = _autresFraisEligibles;
@@ -893,7 +746,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         ),
         const SizedBox(height: 12),
 
-        // ---- BLOC 1 : FRAIS PRINCIPAL (indépendant du bloc 2) ----
         Card(
           elevation: 2,
           color: Colors.indigo.withAlpha(12),
@@ -958,7 +810,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
         const SizedBox(height: 14),
 
-        // ---- BLOC 2 : AUTRE FRAIS (indépendant du bloc 1) ----
         Card(
           elevation: 2,
           color: Colors.teal.withAlpha(12),
@@ -1031,9 +882,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
           ),
         ),
 
-        // ⚡ NOUVEAU — petit récapitulatif visuel si les deux sont activés,
-        // pour rassurer l'utilisateur que les deux seront bien enregistrés
-        // ensemble au moment de l'ajout.
         if (_payerPrincipal && _payerAutreFrais) ...[
           const SizedBox(height: 10),
           Container(
@@ -1072,7 +920,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
         ? widget.fraisScolaires.getSubClassesFor(selectedSection!, selectedClasseNumero!)
         : <String>[];
 
-    // ⚡ NOUVEAU
     final extrasCount = _countFilledExtras();
 
     return Scaffold(
@@ -1133,7 +980,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             ),
             const SizedBox(height: 20),
 
-            // ---- Section (Maternelle / Primaire / Secondaire / ...) ----
             DropdownButtonFormField<String>(
               value: selectedSection,
               decoration: const InputDecoration(
@@ -1149,15 +995,12 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                   selectedSection = value;
                   selectedClasseNumero = null;
                   selectedSousClasse = null;
-                  // ⚡ NOUVEAU — la section change, l'éligibilité aux
-                  // autres frais aussi.
                   _selectedAutreFraisPaiement = null;
                 });
               },
             ),
             const SizedBox(height: 20),
 
-            // ---- Numéro de classe (automatique selon la section) ----
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1175,7 +1018,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                       setState(() {
                         selectedClasseNumero = value;
                         selectedSousClasse = null;
-                        // ⚡ NOUVEAU
                         _selectedAutreFraisPaiement = null;
                       });
                     },
@@ -1191,7 +1033,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             ),
             const SizedBox(height: 20),
 
-            // ---- Sous-classe (toujours manuelle, optionnelle) ----
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1209,7 +1050,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                     onChanged: (value) {
                       setState(() {
                         selectedSousClasse = value;
-                        // ⚡ NOUVEAU
                         _selectedAutreFraisPaiement = null;
                       });
                     },
@@ -1224,12 +1064,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
               ],
             ),
 
-            // ==========================================================================
-            // ⚡ CORRIGÉ — PAIEMENT À L'INSCRIPTION (OPTIONNEL, CUMULABLE),
-            // placé après le choix de la section/classe (nécessaire pour
-            // connaître le montant mensuel indicatif et les "autres frais"
-            // éligibles) et avant le bouton d'ajout.
-            // ==========================================================================
             const SizedBox(height: 24),
             _buildPaiementInscriptionSection(),
 
@@ -1270,9 +1104,6 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
               ),
             ),
 
-            // ==========================================================================
-            // ⚡ NOUVEAU — BOUTON "AUTRES INFORMATIONS" (TOUT EN BAS)
-            // ==========================================================================
             const SizedBox(height: 15),
             SizedBox(
               width: double.infinity,
