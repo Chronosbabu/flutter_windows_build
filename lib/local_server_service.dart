@@ -30,6 +30,24 @@ import 'network_resolver.dart';
 /// broadcast "SCHOOLAPP_DISCOVER" sur le réseau, avec cette IP réelle.
 /// Fonctionne identiquement sur les deux OS, sans IP codée en dur.
 ///
+/// ⚡ CORRIGÉ — DURÉE DE TRAVAIL DES CLÉS D'ACCÈS LOCALES (et non
+/// durée d'expiration de la clé elle-même) :
+///
+/// `/generate_key` accepte toujours deux champs optionnels envoyés par
+/// l'admin, `duration_value` (nombre) et `duration_unit` ('days' ou
+/// 'minutes'), transmis tels quels à `FraisScolaires.generateLocalKey`.
+/// Ces valeurs sont de simples métadonnées de la clé — elles NE la
+/// rendent PAS inutilisable pour se connecter après un certain temps :
+/// la clé reste valable indéfiniment pour l'entrée, jusqu'à révocation
+/// manuelle.
+///
+/// `/verify_key` renvoie désormais `duration_value`/`duration_unit` à
+/// CHAQUE connexion réussie (et plus de date d'expiration calculée) :
+/// c'est à l'application cliente de démarrer, à partir de CE moment
+/// précis, une fenêtre de travail de cette durée exacte, et de se
+/// déconnecter elle-même automatiquement une fois ce temps écoulé —
+/// même en cours d'utilisation, pas seulement au prochain lancement.
+///
 /// ⚠️ LIMITE HONNÊTE : les convocations et communiqués (module
 /// Discipline) ne peuvent pas réellement atteindre les parents en mode
 /// local — il n'existe aucun canal de notification (SMS/push) qui
@@ -233,7 +251,7 @@ class LocalServerService {
           break;
 
         case '/verify_key':
-          _handleVerifyKey(body, response, frais);
+          await _handleVerifyKey(body, response, frais);
           break;
 
         case '/record_payment':
@@ -314,26 +332,50 @@ class LocalServerService {
 
   // ==================== CLÉS D'ACCÈS ====================
 
+  /// ⚡ CORRIGÉ — accepte `duration_value` (nombre) et `duration_unit`
+  /// ('days' | 'minutes') envoyés par l'admin depuis le Dashboard, et
+  /// les transmet tels quels à `generateLocalKey`. Ces champs
+  /// définissent la durée de TRAVAIL après connexion, pas une date
+  /// d'expiration de la clé — la réponse ne contient donc plus
+  /// `expires_at`.
   static Future<void> _handleGenerateKey(
       Map<String, dynamic> body, HttpResponse response, FraisScolaires frais) async {
     final sections =
     (body['sections'] as List? ?? []).map((e) => e.toString()).toList();
     final type = (body['type'] ?? 'PAY').toString();
     final classe = body['classe']?.toString();
-    final entry =
-    await frais.generateLocalKey(sections: sections, type: type, classe: classe);
+    final durationValue = (body['duration_value'] as num?)?.toInt() ?? 30;
+    final durationUnit = (body['duration_unit'] ?? 'days').toString();
+
+    final entry = await frais.generateLocalKey(
+      sections: sections,
+      type: type,
+      classe: classe,
+      durationValue: durationValue,
+      durationUnit: durationUnit,
+    );
     _write(response, 200, {
       'key': entry['key'],
       'sections': entry['sections'],
       'type': entry['type'],
       'classe': entry['classe'],
+      // ⚡ Durée de TRAVAIL après connexion (pas d'expiration de la
+      // clé), renvoyée pour affichage immédiat côté Dashboard.
+      'duration_value': entry['durationValue'],
+      'duration_unit': entry['durationUnit'],
     });
   }
 
-  static void _handleVerifyKey(
-      Map<String, dynamic> body, HttpResponse response, FraisScolaires frais) {
+  /// ⚡ CORRIGÉ — ne vérifie plus/ne retire plus de clé "expirée" : la
+  /// clé reste valable pour se CONNECTER indéfiniment. La réponse
+  /// renvoie désormais `duration_value`/`duration_unit` à CHAQUE
+  /// connexion réussie (au lieu d'une `expires_at` calculée à la
+  /// génération) : c'est à partir de CE moment-là que l'app cliente
+  /// doit compter la durée de travail autorisée.
+  static Future<void> _handleVerifyKey(
+      Map<String, dynamic> body, HttpResponse response, FraisScolaires frais) async {
     final key = (body['key'] ?? '').toString().trim();
-    final entry = frais.verifyLocalKey(key);
+    final entry = await frais.verifyLocalKey(key);
     if (entry == null) {
       _write(response, 200, {'valid': false});
       return;
@@ -346,6 +388,10 @@ class LocalServerService {
       'type': entry['type'],
       'classe': entry['classe'],
       'current_year': frais.currentYear,
+      // ⚡ CORRIGÉ — durée de TRAVAIL, à partir de MAINTENANT (cette
+      // connexion précise), choisie par l'admin à la génération.
+      'duration_value': entry['durationValue'],
+      'duration_unit': entry['durationUnit'],
     });
   }
 

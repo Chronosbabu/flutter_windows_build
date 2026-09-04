@@ -98,6 +98,32 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   bool isAutoBackingUp = false;
   List<Map<String, dynamic>> generatedKeys = [];
 
+  // ==========================================================================
+  // ⚡ CORRIGÉ — DURÉE DE TRAVAIL AUTORISÉE APRÈS CONNEXION
+  //
+  // ⚠️ Important : ce délai ne limite PAS la possibilité de se
+  // CONNECTER avec la clé — celle-ci reste utilisable à tout moment,
+  // jusqu'à révocation manuelle. Il limite le temps que le sous-
+  // utilisateur pourra ensuite passer à TRAVAILLER dans l'application
+  // (payer des frais, inscrire des élèves, gérer la discipline...) à
+  // partir du moment précis où il se connecte avec cette clé.
+  //
+  // L'admin choisit un nombre (ex: 1, 30...) puis une unité — "Jours"
+  // ou "Minutes". Si "Jours" est choisi et que l'admin entre 1, le
+  // sous-utilisateur pourra travailler 1 jour à partir de sa
+  // connexion ; s'il entre 30, il pourra travailler 30 jours. Si
+  // "Minutes" est choisi et qu'il entre 1, il ne pourra travailler
+  // qu'une minute, et ainsi de suite. Cette information est envoyée au
+  // serveur (local ou internet) à la génération, puis renvoyée par ce
+  // même serveur à CHAQUE connexion du sous-utilisateur (voir
+  // `/verify_key`), pour que l'application cliente démarre une
+  // nouvelle fenêtre de travail de cette durée à chaque fois.
+  // ==========================================================================
+  final TextEditingController keyDurationController =
+  TextEditingController(text: '30');
+  int keyDurationValue = 30;
+  String keyDurationUnit = 'days'; // 'days' | 'minutes'
+
   List<String> connectedUsers = [
     "Utilisateur Primaire 1",
     "Utilisateur Secondaire 1"
@@ -150,6 +176,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     _localServerRunning = LocalServerService.isRunning;
   }
 
+  @override
+  void dispose() {
+    keyDurationController.dispose();
+    super.dispose();
+  }
+
   void _toggleSection(String section, bool selected) {
     setState(() {
       if (selected) {
@@ -163,6 +195,35 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         selectedClasseForKey = null;
       }
     });
+  }
+
+  // ==========================================================================
+  // ⚡ Libellé lisible de la durée choisie (ex: "1 jour", "30 jours",
+  // "1 minute", "45 minutes"), utilisé à la fois sous le champ de
+  // saisie et sur les cartes de clés déjà générées.
+  // ==========================================================================
+  String _formatDurationLabel(int value, String unit) {
+    final bool isMinutes = unit == 'minutes';
+    final String noun = isMinutes
+        ? (value <= 1 ? 'minute' : 'minutes')
+        : (value <= 1 ? 'jour' : 'jours');
+    return '$value $noun';
+  }
+
+  /// ⚡ CORRIGÉ — texte affiché sur une carte de clé déjà générée,
+  /// reformulé pour bien préciser qu'il s'agit d'un temps de TRAVAIL
+  /// après connexion, et non d'une date d'expiration de la clé elle-
+  /// même (la clé reste utilisable pour se connecter à tout moment).
+  String _durationTextForGeneratedKey(Map<String, dynamic> keyData) {
+    final int? value = keyData['durationValue'] is int
+        ? keyData['durationValue'] as int
+        : int.tryParse(keyData['durationValue']?.toString() ?? '');
+    final String? unit = keyData['durationUnit']?.toString();
+    if (value == null || unit == null) {
+      return "Durée de travail non confirmée par le serveur";
+    }
+    return "Temps de travail autorisé : ${_formatDurationLabel(value, unit)} "
+        "à chaque connexion avec cette clé";
   }
 
   // ==========================================================================
@@ -1040,6 +1101,22 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       return;
     }
 
+    // ⚡ Valide la durée saisie juste avant de générer, au cas où
+    // l'admin aurait laissé le champ vide ou tapé une valeur non
+    // numérique sans que `onChanged` ait pu la corriger à temps.
+    final int? parsedDuration = int.tryParse(keyDurationController.text.trim());
+    if (parsedDuration == null || parsedDuration < 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              "Entrez un nombre valide (1 ou plus) pour le temps de travail"),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    keyDurationValue = parsedDuration;
+
     final bool authorized = await _verifyAdminPassword();
     if (!authorized) return;
 
@@ -1067,6 +1144,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           'sections': sectionsToSend,
           'type': selectedKeyType.code,
           'classe': classeToSend,
+          // ⚡ Durée de TRAVAIL après connexion (pas d'expiration de la
+          // clé elle-même) choisie par l'admin.
+          'duration_value': keyDurationValue,
+          'duration_unit': keyDurationUnit,
         }),
       )
           .timeout(const Duration(seconds: 15));
@@ -1077,6 +1158,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ?.map((s) => s.toString())
             .toList() ??
             sectionsToSend;
+        // ⚡ La durée renvoyée par le serveur prime sur ce que l'admin a
+        // choisi localement ; sinon on retombe sur son choix, pour
+        // toujours afficher quelque chose de cohérent.
+        final int confirmedDurationValue =
+            (data['duration_value'] as num?)?.toInt() ?? keyDurationValue;
+        final String confirmedDurationUnit =
+        (data['duration_unit'] ?? keyDurationUnit).toString();
+
         setState(() {
           generatedKeys.add({
             'key': data['key'],
@@ -1084,6 +1173,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             'type': data['type'] ?? selectedKeyType.code,
             'classe': data['classe'], // null = toutes les classes
             'isLocal': isLocal,
+            // ⚡ Durée de TRAVAIL après connexion (pas d'expiration).
+            'durationValue': confirmedDurationValue,
+            'durationUnit': confirmedDurationUnit,
           });
         });
 
@@ -1094,7 +1186,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         final String keyMsg =
             "✅ Clé générée (${selectedKeyType.label}) pour "
             "$sectionsLabel"
-            "${classeToSend != null ? ' - $classeToSend' : ' - toutes les classes'}";
+            "${classeToSend != null ? ' - $classeToSend' : ' - toutes les classes'}"
+            "\n⏳ Temps de travail alloué à chaque connexion : "
+            "${_formatDurationLabel(confirmedDurationValue, confirmedDurationUnit)}"
+            "\nℹ️ La clé elle-même reste utilisable pour se connecter à "
+            "tout moment (jusqu'à révocation).";
 
         if (isLocal) {
           if (mounted) {
@@ -1105,7 +1201,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         "les appareils connectés au même réseau WiFi que "
                         "ce PC"),
                 backgroundColor: Colors.green,
-                duration: const Duration(seconds: 4),
+                duration: const Duration(seconds: 6),
               ),
             );
           }
@@ -1119,7 +1215,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   content: Text(
                       "$keyMsg\n💾 Données également sauvegardées sur le serveur"),
                   backgroundColor: Colors.green,
-                  duration: const Duration(seconds: 4),
+                  duration: const Duration(seconds: 6),
                 ),
               );
             } else {
@@ -1128,7 +1224,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   content: Text(
                       "$keyMsg\n⚠️ Sauvegarde automatique impossible : $backupError"),
                   backgroundColor: Colors.orange,
-                  duration: const Duration(seconds: 6),
+                  duration: const Duration(seconds: 7),
                 ),
               );
             }
@@ -1479,6 +1575,99 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         ),
                       const SizedBox(height: 16),
 
+                      // ⚡ CORRIGÉ — 4) Temps de travail autorisé APRÈS
+                      // connexion (et non expiration de la clé).
+                      const Text("4. Pendant combien de temps peut-il travailler ?",
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      const Text(
+                        "⚠️ Ce délai ne bloque PAS la connexion avec cette "
+                            "clé : elle reste utilisable à tout moment, "
+                            "jusqu'à ce que vous la révoquiez vous-même. Il "
+                            "limite uniquement le temps que le sous-"
+                            "utilisateur pourra passer à travailler dans "
+                            "l'application UNE FOIS connecté. Entrez un "
+                            "nombre puis choisissez l'unité : Jours (ex: 1 "
+                            "= 1 jour, 30 = 30 jours) ou Minutes (ex: 1 = "
+                            "1 minute).",
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            flex: 2,
+                            child: TextField(
+                              controller: keyDurationController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: "Durée",
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                              onChanged: (val) {
+                                final parsed = int.tryParse(val.trim());
+                                setState(() {
+                                  keyDurationValue =
+                                  (parsed != null && parsed > 0)
+                                      ? parsed
+                                      : keyDurationValue;
+                                });
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            flex: 3,
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                ChoiceChip(
+                                  label: const Text("Jours"),
+                                  selected: keyDurationUnit == 'days',
+                                  selectedColor: Colors.deepPurple,
+                                  labelStyle: TextStyle(
+                                    color: keyDurationUnit == 'days'
+                                        ? Colors.white
+                                        : Colors.black87,
+                                    fontSize: 12,
+                                  ),
+                                  onSelected: (_) =>
+                                      setState(() => keyDurationUnit = 'days'),
+                                ),
+                                ChoiceChip(
+                                  label: const Text("Minutes"),
+                                  selected: keyDurationUnit == 'minutes',
+                                  selectedColor: Colors.deepPurple,
+                                  labelStyle: TextStyle(
+                                    color: keyDurationUnit == 'minutes'
+                                        ? Colors.white
+                                        : Colors.black87,
+                                    fontSize: 12,
+                                  ),
+                                  onSelected: (_) => setState(
+                                          () => keyDurationUnit = 'minutes'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        "Aperçu : le sous-utilisateur pourra travailler "
+                            "${_formatDurationLabel(keyDurationValue, keyDurationUnit)} "
+                            "à chaque fois qu'il se connecte avec cette clé.",
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontStyle: FontStyle.italic,
+                            color: Colors.deepPurple),
+                      ),
+                      const SizedBox(height: 16),
+
                       ElevatedButton.icon(
                         icon: generateButtonBusy
                             ? const SizedBox(
@@ -1560,7 +1749,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         ],
                       ),
                       subtitle: Text(
-                        "${type.label}\nSection(s) : $sectionsLabel | Classe : $classeLabel"
+                        "${type.label}\nSection(s) : $sectionsLabel | Classe : $classeLabel\n"
+                            "${_durationTextForGeneratedKey(keyData)}"
                             "${isLocalKey ? '\n(clé locale — sans internet)' : ''}",
                       ),
                       isThreeLine: true,
