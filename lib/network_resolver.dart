@@ -1,29 +1,47 @@
+import 'dart:async';
 import 'dart:io';
 
-/// ⚡ MODIFIÉ — l'admin s'appelle lui-même en HTTP pour ses propres
-/// routes (/generate_key, /validate_payments, etc.) : "local" signifie
-/// ici simplement "mon propre serveur local tourne", donc on cible la
-/// boucle locale (127.0.0.1) au lieu d'une IP fixe Windows. Le choix
-/// entre local et internet se fait en vérifiant si le serveur local de
-/// CETTE app est démarré, sans test réseau — c'est instantané et fiable
-/// puisque l'admin sait directement s'il a démarré son propre serveur.
+/// ⚡ NOUVEAU — Résolveur d'adresse serveur côté application CLIENT
+/// (sous-utilisateur), strictement symétrique du NetworkResolver côté
+/// admin (voir lib/network_resolver.dart du projet admin).
+///
+/// Contexte : le PC principal (admin) peut activer manuellement le
+/// "Point d'accès mobile" de Windows. Windows attribue TOUJOURS la même
+/// adresse IP de passerelle à ce point d'accès : `192.168.137.1` (c'est
+/// une constante du système d'exploitation — technologie ICS — pas une
+/// IP de routeur, elle ne change donc jamais). Un appareil client
+/// connecté à ce même WiFi peut donc toujours essayer cette IP en
+/// premier, sans qu'aucune saisie manuelle d'adresse ne soit nécessaire.
+///
+/// Stratégie : un test de connexion TCP (pas une requête HTTP complète)
+/// vers `192.168.137.1:8089` avec un délai court (600 ms). Si ça
+/// répond, on est sur le réseau local du point d'accès de l'admin — on
+/// l'utilise en priorité. Sinon, on bascule sur le serveur internet.
+///
+/// TOUT appel HTTP de l'app cliente doit désormais passer par
+/// `await NetworkResolver.resolve()` au lieu d'utiliser directement la
+/// constante `serverUrl` codée en dur.
 class NetworkResolver {
-  static const int localPort = 8089;
-  static const int discoveryPort = 8090;
+  /// IP fixe et permanente du PC hébergeant le point d'accès Windows.
+  static const String localHost = '192.168.137.1';
 
-  static const String localBaseUrl = 'http://127.0.0.1:$localPort';
+  /// Port du petit serveur local embarqué dans l'app admin (voir
+  /// local_server_service.dart du projet admin).
+  static const int localPort = 8089;
+
+  static const String localBaseUrl = 'http://$localHost:$localPort';
   static const String internetBaseUrl = 'https://jsinf.onrender.com';
 
   static String? _cachedBase;
   static DateTime? _cachedAt;
   static const Duration _cacheTtl = Duration(seconds: 15);
 
-  /// Fonction injectée par l'app au démarrage pour savoir si LE SERVEUR
-  /// LOCAL DE CETTE APP tourne (voir LocalServerService.isRunning) —
-  /// évite un import circulaire entre network_resolver.dart et
-  /// local_server_service.dart.
-  static bool Function() isLocalServerRunning = () => false;
-
+  /// Renvoie la base d'URL à utiliser MAINTENANT pour un appel HTTP,
+  /// par exemple : `'${await NetworkResolver.resolve()}/verify_key'`.
+  ///
+  /// `forceRefresh: true` ignore le cache et refait le test tout de
+  /// suite — à utiliser après une action explicite (bouton
+  /// "Rafraîchir") où on veut la situation la plus récente.
   static Future<String> resolve({bool forceRefresh = false}) async {
     if (!forceRefresh &&
         _cachedBase != null &&
@@ -31,56 +49,38 @@ class NetworkResolver {
         DateTime.now().difference(_cachedAt!) < _cacheTtl) {
       return _cachedBase!;
     }
-    final base =
-    isLocalServerRunning() ? localBaseUrl : internetBaseUrl;
+    final base = await _detect();
     _cachedBase = base;
     _cachedAt = DateTime.now();
     return base;
   }
 
-  static bool get lastResolvedWasLocal => _cachedBase == localBaseUrl;
-
-  static void invalidateCache() {
-    _cachedBase = null;
-    _cachedAt = null;
+  static Future<String> _detect() async {
+    if (await _canReachLocal()) return localBaseUrl;
+    return internetBaseUrl;
   }
 
-  /// Détecte dynamiquement l'IP locale réelle de ce PC sur le réseau
-  /// (partage Windows ou macOS) — utilisée uniquement pour AFFICHER
-  /// l'adresse aux agents, jamais pour les appels HTTP internes de
-  /// l'admin (qui utilisent 127.0.0.1). Fonctionne identiquement sur
-  /// Windows et macOS.
-  static Future<String?> getLocalIPv4() async {
+  static Future<bool> _canReachLocal() async {
     try {
-      final interfaces = await NetworkInterface.list(
-        includeLoopback: false,
-        type: InternetAddressType.IPv4,
+      final socket = await Socket.connect(
+        localHost,
+        localPort,
+        timeout: const Duration(milliseconds: 600),
       );
-      for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          if (_isLikelyLanAddress(addr.address)) {
-            return addr.address;
-          }
-        }
-      }
-      if (interfaces.isNotEmpty && interfaces.first.addresses.isNotEmpty) {
-        return interfaces.first.addresses.first.address;
-      }
-      return null;
+      socket.destroy();
+      return true;
     } catch (_) {
-      return null;
+      return false;
     }
   }
 
-  static bool _isLikelyLanAddress(String ip) {
-    return ip.startsWith('192.168.') || ip.startsWith('10.') || _isIn172(ip);
-  }
+  /// Vrai si la dernière résolution a choisi le serveur local — utile
+  /// pour afficher un petit badge "Mode local" dans les écrans.
+  static bool get lastResolvedWasLocal => _cachedBase == localBaseUrl;
 
-  static bool _isIn172(String ip) {
-    if (!ip.startsWith('172.')) return false;
-    final parts = ip.split('.');
-    if (parts.length < 2) return false;
-    final second = int.tryParse(parts[1]);
-    return second != null && second >= 16 && second <= 31;
+  /// Force une nouvelle détection au prochain appel de `resolve()`.
+  static void invalidateCache() {
+    _cachedBase = null;
+    _cachedAt = null;
   }
 }
