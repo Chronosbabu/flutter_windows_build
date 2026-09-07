@@ -31,13 +31,13 @@ jobs:
         run: |
           rename-Item `
             "build\windows\x64\runner\Release\c_schollapp.exe" `
-            "ADUPAY-DRC.exe"
+            "EDUPAY-DRC-Acces.exe"
 
       # ==========================================================================
       # Télécharge le Visual C++ Redistributable officiel Microsoft (lien
       # permanent aka.ms, toujours pointé vers la dernière version 2015-2022
       # x64). C'est ce fichier qui sera embarqué DANS l'installateur
-      # ADUPAY-DRC-Setup.exe, pour que l'application fonctionne même sur
+      # EDUPAY-DRC-Acces-Setup.exe, pour que l'application fonctionne même sur
       # un PC qui n'a jamais eu ce composant installé (PC neuf, Windows
       # "allégé", entreprise avec un poste minimal...).
       # ==========================================================================
@@ -81,14 +81,14 @@ jobs:
       - name: Verify installer
         shell: powershell
         run: |
-          if (!(Test-Path "ADUPAY-DRC-Setup.exe")) {
-            Write-Error "ADUPAY-DRC-Setup.exe n'a pas été créé."
+          if (!(Test-Path "EDUPAY-DRC-Acces-Setup.exe")) {
+            Write-Error "EDUPAY-DRC-Acces-Setup.exe n'a pas été créé."
             exit 1
           }
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: ADUPAY-DRC-Setup
-          path: ADUPAY-DRC-Setup.exe
+          name: EDUPAY-DRC-Acces-Setup
+          path: EDUPAY-DRC-Acces-Setup.exe
           if-no-files-found: error

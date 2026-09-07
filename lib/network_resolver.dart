@@ -1,29 +1,51 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'package:shared_preferences/shared_preferences.dart';
 
-/// ⚡ MODIFIÉ — l'admin s'appelle lui-même en HTTP pour ses propres
-/// routes (/generate_key, /validate_payments, etc.) : "local" signifie
-/// ici simplement "mon propre serveur local tourne", donc on cible la
-/// boucle locale (127.0.0.1) au lieu d'une IP fixe Windows. Le choix
-/// entre local et internet se fait en vérifiant si le serveur local de
-/// CETTE app est démarré, sans test réseau — c'est instantané et fiable
-/// puisque l'admin sait directement s'il a démarré son propre serveur.
+/// ⚡ CORRIGÉ — Résolveur d'adresse serveur côté application CLIENT
+/// (sous-utilisateur).
+///
+/// Auparavant : ce fichier testait une IP FIXE codée en dur
+/// (192.168.137.1, garantie uniquement par le partage de connexion
+/// Windows). Cela cassait dès que le réseau local n'était plus fourni
+/// par ce mécanisme précis (par exemple un point d'accès ESP32 dédié).
+///
+/// Maintenant : découverte AUTOMATIQUE par diffusion UDP. Le serveur
+/// admin (voir local_server_service.dart, méthode
+/// `_startDiscoveryResponder`) répond déjà à toute demande de
+/// découverte avec SA vraie adresse IP actuelle, quel que soit le
+/// matériel qui fournit le réseau (PC en partage de connexion, ESP32,
+/// routeur classique...). Ce fichier n'a donc plus besoin de connaître
+/// une IP à l'avance : il la demande au réseau.
+///
+/// Ordre de résolution, du plus rapide/fiable au plus lent :
+/// 1. Dernière IP locale qui a fonctionné (reconnexion instantanée).
+/// 2. Découverte automatique par diffusion UDP (cas normal).
+/// 3. Adresse IP saisie manuellement par l'utilisateur, UNIQUEMENT si
+///    les deux étapes précédentes ont échoué (filet de sécurité pour
+///    les rares réseaux qui bloquent les diffusions UDP).
+/// 4. Serveur internet, en dernier recours.
 class NetworkResolver {
   static const int localPort = 8089;
   static const int discoveryPort = 8090;
+  static const String _discoveryMessage = 'SCHOOLAPP_DISCOVER';
 
-  static const String localBaseUrl = 'http://127.0.0.1:$localPort';
   static const String internetBaseUrl = 'https://jsinf.onrender.com';
+
+  static const String _kManualIpPrefKey = 'sub_manual_server_ip';
+  static const String _kLastKnownHostPrefKey = 'sub_last_known_local_host';
 
   static String? _cachedBase;
   static DateTime? _cachedAt;
   static const Duration _cacheTtl = Duration(seconds: 15);
 
-  /// Fonction injectée par l'app au démarrage pour savoir si LE SERVEUR
-  /// LOCAL DE CETTE APP tourne (voir LocalServerService.isRunning) —
-  /// évite un import circulaire entre network_resolver.dart et
-  /// local_server_service.dart.
-  static bool Function() isLocalServerRunning = () => false;
-
+  /// Renvoie la base d'URL à utiliser MAINTENANT pour un appel HTTP,
+  /// par exemple : `'${await NetworkResolver.resolve()}/verify_key'`.
+  ///
+  /// `forceRefresh: true` ignore le cache et refait la détection tout
+  /// de suite — à utiliser après une action explicite (bouton
+  /// "Rafraîchir") où on veut la situation la plus récente.
   static Future<String> resolve({bool forceRefresh = false}) async {
     if (!forceRefresh &&
         _cachedBase != null &&
@@ -31,56 +53,149 @@ class NetworkResolver {
         DateTime.now().difference(_cachedAt!) < _cacheTtl) {
       return _cachedBase!;
     }
-    final base =
-    isLocalServerRunning() ? localBaseUrl : internetBaseUrl;
+    final base = await _detect();
     _cachedBase = base;
     _cachedAt = DateTime.now();
     return base;
   }
 
-  static bool get lastResolvedWasLocal => _cachedBase == localBaseUrl;
+  static Future<String> _detect() async {
+    // 1) Reconnexion rapide : on retente d'abord la dernière adresse
+    // qui fonctionnait, sans attendre la diffusion UDP.
+    final lastHost = await _getLastKnownHost();
+    if (lastHost != null &&
+        await _canReachTcp(lastHost, localPort, timeoutMs: 500)) {
+      return 'http://$lastHost:$localPort';
+    }
 
-  static void invalidateCache() {
-    _cachedBase = null;
-    _cachedAt = null;
+    // 2) Découverte automatique — le cas normal, sans aucune saisie.
+    final discovered = await _discoverViaUdp();
+    if (discovered != null) {
+      await _rememberLastKnownHost(discovered);
+      return 'http://$discovered:$localPort';
+    }
+
+    // 3) Filet de sécurité : adresse indiquée manuellement par
+    // l'utilisateur dans les Paramètres, si la découverte a échoué.
+    final manualIp = await getManualIp();
+    if (manualIp != null && manualIp.isNotEmpty) {
+      if (await _canReachTcp(manualIp, localPort, timeoutMs: 700)) {
+        await _rememberLastKnownHost(manualIp);
+        return 'http://$manualIp:$localPort';
+      }
+    }
+
+    // 4) Rien de local trouvé : serveur internet.
+    return internetBaseUrl;
   }
 
-  /// Détecte dynamiquement l'IP locale réelle de ce PC sur le réseau
-  /// (partage Windows ou macOS) — utilisée uniquement pour AFFICHER
-  /// l'adresse aux agents, jamais pour les appels HTTP internes de
-  /// l'admin (qui utilisent 127.0.0.1). Fonctionne identiquement sur
-  /// Windows et macOS.
-  static Future<String?> getLocalIPv4() async {
+  static Future<bool> _canReachTcp(String host, int port,
+      {int timeoutMs = 600}) async {
     try {
-      final interfaces = await NetworkInterface.list(
-        includeLoopback: false,
-        type: InternetAddressType.IPv4,
-      );
-      for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          if (_isLikelyLanAddress(addr.address)) {
-            return addr.address;
-          }
-        }
-      }
-      if (interfaces.isNotEmpty && interfaces.first.addresses.isNotEmpty) {
-        return interfaces.first.addresses.first.address;
-      }
-      return null;
+      final socket = await Socket.connect(host, port,
+          timeout: Duration(milliseconds: timeoutMs));
+      socket.destroy();
+      return true;
     } catch (_) {
-      return null;
+      return false;
     }
   }
 
-  static bool _isLikelyLanAddress(String ip) {
-    return ip.startsWith('192.168.') || ip.startsWith('10.') || _isIn172(ip);
+  /// Diffuse une demande de découverte sur le réseau local et attend
+  /// la réponse du serveur admin (voir local_server_service.dart côté
+  /// admin, qui répond déjà à ce message avec sa vraie IP actuelle).
+  static Future<String?> _discoverViaUdp() async {
+    RawDatagramSocket? socket;
+    StreamSubscription? sub;
+    try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      final completer = Completer<String?>();
+      final payload = utf8.encode(_discoveryMessage);
+
+      sub = socket.listen((event) {
+        if (event != RawSocketEvent.read) return;
+        final datagram = socket?.receive();
+        if (datagram == null) return;
+        try {
+          final message = utf8.decode(datagram.data);
+          final decoded = jsonDecode(message) as Map<String, dynamic>;
+          if (decoded['service'] == 'schoolapp' && decoded['host'] != null) {
+            if (!completer.isCompleted) {
+              completer.complete(decoded['host'].toString());
+            }
+          }
+        } catch (_) {
+          // Paquet non conforme — ignoré, ce n'est pas notre serveur.
+        }
+      });
+
+      void broadcast() {
+        try {
+          socket?.send(
+              payload, InternetAddress('255.255.255.255'), discoveryPort);
+        } catch (_) {}
+      }
+
+      // Deux envois successifs : un paquet UDP isolé se perd parfois
+      // sur WiFi, ce petit doublon rend la découverte plus fiable sans
+      // ralentir sensiblement le cas où tout fonctionne du premier coup.
+      broadcast();
+      Future.delayed(const Duration(milliseconds: 300), broadcast);
+
+      final result = await completer.future.timeout(
+        const Duration(milliseconds: 1200),
+        onTimeout: () => null,
+      );
+      return result;
+    } catch (_) {
+      return null;
+    } finally {
+      await sub?.cancel();
+      socket?.close();
+    }
   }
 
-  static bool _isIn172(String ip) {
-    if (!ip.startsWith('172.')) return false;
-    final parts = ip.split('.');
-    if (parts.length < 2) return false;
-    final second = int.tryParse(parts[1]);
-    return second != null && second >= 16 && second <= 31;
+  static Future<void> _rememberLastKnownHost(String host) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kLastKnownHostPrefKey, host);
+  }
+
+  static Future<String?> _getLastKnownHost() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_kLastKnownHostPrefKey);
+  }
+
+  /// ⚡ NOUVEAU — Adresse IP de secours, saisie manuellement par
+  /// l'utilisateur dans les Paramètres. N'est utilisée QUE si la
+  /// découverte automatique échoue (voir `_detect()`), jamais en
+  /// priorité — pour les rares réseaux qui bloquent les diffusions UDP
+  /// (certains routeurs avec "isolation des clients").
+  static Future<String?> getManualIp() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getString(_kManualIpPrefKey);
+    return (v == null || v.trim().isEmpty) ? null : v.trim();
+  }
+
+  static Future<void> setManualIp(String? ip) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (ip == null || ip.trim().isEmpty) {
+      await prefs.remove(_kManualIpPrefKey);
+    } else {
+      await prefs.setString(_kManualIpPrefKey, ip.trim());
+    }
+    invalidateCache();
+  }
+
+  /// Vrai si la dernière résolution a choisi une adresse locale
+  /// (découverte, reconnexion rapide, ou secours manuel) plutôt que le
+  /// serveur internet.
+  static bool get lastResolvedWasLocal =>
+      _cachedBase != null && _cachedBase != internetBaseUrl;
+
+  /// Force une nouvelle détection au prochain appel de `resolve()`.
+  static void invalidateCache() {
+    _cachedBase = null;
+    _cachedAt = null;
   }
 }
