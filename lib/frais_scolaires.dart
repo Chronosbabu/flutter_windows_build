@@ -1722,6 +1722,14 @@ class FraisScolaires {
   // JAMAIS modifié par cette fonction : il reste une trace fidèle de ce qui
   // a réellement été perçu, jour par jour. Seule la répartition "combien
   // pour quel mois" (eleve.paid) est recalculée.
+  //
+  // ⚡ NOUVEAU — Ce recalcul "intelligent" reste le comportement PAR DÉFAUT
+  // et n'a pas changé. Il existe désormais, juste après, une ALTERNATIVE
+  // appelée mode "constant" (voir `recalculerPaiementsPourModeConstant`
+  // plus bas), proposée UNIQUEMENT depuis les Paramètres et UNIQUEMENT
+  // quand le nouveau montant d'un frais/exception est plus bas que
+  // l'ancien, pour les écoles qui ne veulent PAS que l'argent déjà payé se
+  // reporte automatiquement sur les mois suivants dans ce cas précis.
   // ==========================================================================
 
   /// Recalcule la répartition mois par mois du total déjà payé par [eleve],
@@ -1823,6 +1831,114 @@ class FraisScolaires {
     }
     await saveData();
     return count;
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MODE "CONSTANT" DE RECALCUL (ALTERNATIVE AU RECALCUL
+  // INTELLIGENT, UNIQUEMENT UTILISABLE QUAND LE NOUVEAU MONTANT EST PLUS BAS)
+  // ==========================================================================
+  // Le recalcul "intelligent" ci-dessus est parfait dans la grande majorité
+  // des cas : il reprend le total réellement payé par l'élève et le
+  // redistribue mois par mois selon les montants requis actuels, sans
+  // jamais perdre un centime. MAIS certaines écoles ne veulent PAS de cet
+  // effet de "report automatique" dans un cas précis : quand elles baissent
+  // le montant d'UN mois précis (ou d'une classe/section entière) pour que
+  // les élèves paient moins ce mois-là, elles ne veulent pas que
+  // l'excédent déjà payé aille se reporter tout seul sur les mois suivants
+  // (ce qui marquerait les mois suivants comme "partiellement payés" alors
+  // que l'élève n'a strictement rien versé pour eux).
+  //
+  // Le mode "constant" répond exactement à ce besoin, et UNIQUEMENT à
+  // celui-là : il ne doit être proposé/utilisé que lorsque le nouveau
+  // montant requis est STRICTEMENT INFÉRIEUR à l'ancien (voir les écrans de
+  // Paramètres, qui ne proposent ce choix que dans ce cas précis — pour une
+  // hausse de tarif, le mode intelligent habituel s'applique directement
+  // sans rien demander).
+  //
+  // Pour chaque mois présent dans [anciensRequisParMois] :
+  //   - Si le nouveau montant requis pour ce mois est plus bas que
+  //     l'ancien montant fourni, ET que l'élève avait déjà payé plus que ce
+  //     nouveau montant pour ce mois (que ce soit tout ou une partie), son
+  //     paiement enregistré pour ce mois est simplement RAMENÉ au nouveau
+  //     montant. Le mois reste donc directement coché comme "payé"
+  //     (puisque paid == nouveau requis), SANS qu'aucun report automatique
+  //     ne soit fait vers un autre mois.
+  //   - Si l'élève avait payé MOINS que le nouveau montant (le mois
+  //     n'était de toute façon pas encore soldé), rien ne change : il
+  //     devra simplement compléter jusqu'au nouveau montant, plus bas,
+  //     comme avant.
+  //   - Si le montant n'a PAS baissé pour un mois donné (égal ou en
+  //     hausse), ce mois est ignoré : le mode "constant" n'agit jamais à
+  //     la hausse.
+  //   - Tous les autres mois de l'élève (ceux absents de
+  //     [anciensRequisParMois]) ne sont JAMAIS touchés par ce mode : pas de
+  //     cascade, pas de report, pas de compensation croisée entre mois.
+  //
+  // [anciensRequisParMois] doit contenir, pour chaque mois à examiner, le
+  // montant qui était requis AVANT le changement de configuration (donc
+  // calculé juste avant de modifier le frais ou l'exception — voir
+  // `snapshotRequisTousMoisPour` ci-dessous). Seuls les mois présents dans
+  // cette carte sont examinés.
+  //
+  // ⚡ Fonctionnalité volontairement discrète et peu mise en avant : elle
+  // n'est proposée à l'utilisateur que lorsque le nouveau montant est
+  // effectivement plus bas que l'ancien, et reste invisible le reste du
+  // temps pour ne pas alourdir l'usage courant de l'application.
+  Future<int> recalculerPaiementsPourModeConstant({
+    String? section,
+    String? classeNumero,
+    required Map<String, double> anciensRequisParMois,
+  }) async {
+    int count = 0;
+    for (final eleve in currentData.eleves) {
+      if (section != null && eleve.section != section) continue;
+      if (classeNumero != null &&
+          classeNumeroFromFullClasse(eleve.classe) != classeNumero) {
+        continue;
+      }
+
+      bool modifie = false;
+      for (final mois in anciensRequisParMois.keys) {
+        final double? ancienRequis = anciensRequisParMois[mois];
+        if (ancienRequis == null) continue;
+
+        final double nouveauRequis =
+        getRequiredForMonth(mois, eleve.section, eleve.classe);
+
+        // On n'agit que si le montant a réellement baissé pour ce mois ;
+        // sinon on laisse ce mois totalement intact.
+        if (nouveauRequis >= ancienRequis) continue;
+
+        final double paidActuel = eleve.paid[mois] ?? 0;
+        if (paidActuel > nouveauRequis) {
+          // On ramène le paiement enregistré pour ce mois au nouveau
+          // montant requis (le mois reste "payé"), sans reporter le reste
+          // vers un autre mois.
+          eleve.paid[mois] = nouveauRequis;
+          modifie = true;
+        }
+      }
+
+      if (modifie) {
+        count++;
+        _rafraichirRecusEnAttentePourEleve(eleve);
+      }
+    }
+    await saveData();
+    return count;
+  }
+
+  /// Calcule, pour [section] et [classeNumero] (optionnel), le montant
+  /// requis ACTUEL pour chaque mois de l'année scolaire. À utiliser pour
+  /// prendre un "instantané" des montants requis AVANT d'appliquer un
+  /// changement de frais ou d'exception, afin de pouvoir ensuite proposer
+  /// et exécuter le mode "constant" si le nouveau montant s'avère plus bas
+  /// (voir `recalculerPaiementsPourModeConstant` ci-dessus).
+  Map<String, double> snapshotRequisTousMoisPour(
+      String section, String? classeNumero) {
+    return {
+      for (final m in months) m: getRequiredForMonth(m, section, classeNumero),
+    };
   }
 
   // ==========================================================================

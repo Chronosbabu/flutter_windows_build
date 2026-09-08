@@ -133,6 +133,63 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ====================================================================
+  // ⚡ NOUVEAU — CHOIX DU MODE DE RECALCUL (INTELLIGENT vs CONSTANT)
+  // ====================================================================
+  // Affiché UNIQUEMENT quand le nouveau montant d'un frais ou d'une
+  // exception est plus bas que l'ancien pour au moins un des mois
+  // concernés (voir les appels dans le bouton "Enregistrer" des Frais
+  // Mensuel, le bouton "Retirer l'exception" et `_editExceptionForSection`
+  // plus bas). Volontairement discret : dans tous les autres cas (montant
+  // égal ou en hausse), le recalcul intelligent habituel s'applique
+  // directement, sans jamais rien demander à l'utilisateur.
+  //
+  // - "Intelligent" (comportement historique, inchangé) : reprend le total
+  //   réellement payé par chaque élève sur toute l'année et le redistribue
+  //   selon les nouveaux montants — un éventuel excédent peut compléter
+  //   automatiquement les mois suivants.
+  // - "Constant" (nouveau) : n'ajuste QUE le(s) mois dont le montant a
+  //   baissé. Si un élève avait déjà payé plus que le nouveau montant pour
+  //   ce mois, son paiement est simplement ramené à ce nouveau montant (le
+  //   mois reste coché comme payé) — rien n'est reporté vers les autres
+  //   mois. C'est le mode à utiliser quand on veut baisser le prix d'un
+  //   seul mois sans que l'argent déjà versé "déborde" sur les mois
+  //   suivants.
+  Future<String?> _askRecalculMode(BuildContext context) async {
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Comment recalculer les paiements ?"),
+        content: const Text(
+          "Le nouveau montant est plus bas que l'ancien pour au moins un "
+              "mois concerné.\n\n"
+              "• Intelligent (habituel) : reprend le total déjà payé par "
+              "chaque élève sur toute l'année et le redistribue selon les "
+              "nouveaux montants — un éventuel excédent peut compléter "
+              "automatiquement les mois suivants.\n\n"
+              "• Constant : ne touche QUE le(s) mois dont le montant a "
+              "baissé. Si un élève avait déjà payé plus que le nouveau "
+              "montant pour ce mois, son paiement est simplement ramené à "
+              "ce nouveau montant (le mois reste coché comme payé) — le "
+              "reste n'est PAS reporté automatiquement sur les autres "
+              "mois.",
+          style: TextStyle(fontSize: 12.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'intelligent'),
+            child: const Text("Intelligent"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, 'constant'),
+            child: const Text("Constant"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ====================================================================
   // NOM DE L'ÉCOLE
   // ====================================================================
   void _saveSchoolName() async {
@@ -1244,6 +1301,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (await _verifyBackupPassword()) {
                   final amount = double.tryParse(feeController.text);
                   if (amount != null) {
+                    // ⚡ NOUVEAU — instantané des montants requis, mois par
+                    // mois, AVANT d'appliquer le changement, pour pouvoir
+                    // ensuite proposer le mode "constant" si le nouveau
+                    // montant s'avère plus bas (voir _askRecalculMode et
+                    // FraisScolaires.recalculerPaiementsPourModeConstant).
+                    final Map<String, double> anciensRequis =
+                    widget.fraisScolaires.snapshotRequisTousMoisPour(
+                      selectedSectionForFee!,
+                      selectedClasseScopeForFee,
+                    );
+
                     if (selectedClasseScopeForFee == null) {
                       widget.fraisScolaires.config
                           .feesBySection[selectedSectionForFee!] =
@@ -1255,16 +1323,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           .feesByClasse[key] = amount;
                     }
                     await widget.fraisScolaires.saveData();
+
+                    // ⚡ NOUVEAU — le nouveau montant est-il plus bas que
+                    // l'ancien pour AU MOINS un des mois concernés ? Si
+                    // oui, on propose le choix du mode de recalcul ;
+                    // sinon (montant égal ou plus élevé), on garde
+                    // directement le comportement intelligent habituel,
+                    // sans rien demander à l'utilisateur.
+                    final bool unMoisEstPlusBas = anciensRequis.entries.any(
+                            (e) =>
+                        widget.fraisScolaires.getRequiredForMonth(
+                            e.key,
+                            selectedSectionForFee!,
+                            selectedClasseScopeForFee) <
+                            e.value);
+
+                    String mode = 'intelligent';
+                    if (unMoisEstPlusBas && mounted) {
+                      final choix = await _askRecalculMode(context);
+                      if (choix != null) mode = choix;
+                    }
+
                     // ⚡ NOUVEAU — Après un changement de frais, on
                     // recalcule automatiquement la répartition mois par
-                    // mois de tous les élèves concernés, pour que les
-                    // mois "déjà payés" reflètent vraiment le nouveau
-                    // montant (report automatique de l'excédent ou du
-                    // manque sur les mois suivants, sans jamais perdre
-                    // un seul FC déjà payé). Les reçus non encore
-                    // imprimés sont aussi mis à jour automatiquement.
-                    final int nbRecalcules =
-                    await widget.fraisScolaires.recalculerPaiementsPour(
+                    // mois des élèves concernés. Par défaut (mode
+                    // "intelligent"), toute l'année est redistribuée à
+                    // partir du total réellement payé (report automatique
+                    // de l'excédent ou du manque sur les mois suivants,
+                    // sans jamais perdre un seul FC déjà payé). En mode
+                    // "constant" (disponible uniquement pour une baisse de
+                    // montant), seuls les mois dont le montant a baissé
+                    // sont ajustés, sans aucun report vers les autres
+                    // mois. Les reçus non encore imprimés sont aussi mis
+                    // à jour automatiquement dans les deux cas.
+                    final int nbRecalcules = mode == 'constant'
+                        ? await widget.fraisScolaires
+                        .recalculerPaiementsPourModeConstant(
+                      section: selectedSectionForFee,
+                      classeNumero: selectedClasseScopeForFee,
+                      anciensRequisParMois: anciensRequis,
+                    )
+                        : await widget.fraisScolaires
+                        .recalculerPaiementsPour(
                       section: selectedSectionForFee,
                       classeNumero: selectedClasseScopeForFee,
                     );
@@ -1272,10 +1372,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       setState(() {});
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
-                          content: Text(
-                              "✅ Frais mis à jour — $nbRecalcules élève(s) "
-                                  "recalculé(s) automatiquement pour rester "
-                                  "cohérents avec le nouveau montant"),
+                          content: Text(mode == 'constant'
+                              ? "✅ Frais mis à jour (mode constant) — "
+                              "$nbRecalcules élève(s) ajusté(s) "
+                              "uniquement sur le(s) mois concerné(s), "
+                              "sans report vers les autres mois"
+                              : "✅ Frais mis à jour — $nbRecalcules élève(s) "
+                              "recalculé(s) automatiquement pour rester "
+                              "cohérents avec le nouveau montant"),
                           backgroundColor: Colors.green,
                           duration: const Duration(seconds: 4),
                         ),
@@ -1302,13 +1406,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 onPressed: () async {
                   if (!await _verifyBackupPassword()) return;
+
+                  // ⚡ NOUVEAU — instantané avant de retirer l'exception,
+                  // pour pouvoir proposer le mode "constant" si le retour
+                  // au tarif de la section fait baisser le montant requis.
+                  final Map<String, double> anciensRequis =
+                  widget.fraisScolaires.snapshotRequisTousMoisPour(
+                    selectedSectionForFee!,
+                    selectedClasseScopeForFee,
+                  );
+
                   widget.fraisScolaires.config.feesByClasse
                       .remove(
                       "${selectedSectionForFee}|${selectedClasseScopeForFee}");
                   await widget.fraisScolaires.saveData();
-                  // ⚡ NOUVEAU — même recalcul automatique qu'au-dessus.
-                  final int nbRecalcules =
-                  await widget.fraisScolaires.recalculerPaiementsPour(
+
+                  final bool unMoisEstPlusBas = anciensRequis.entries.any(
+                          (e) =>
+                      widget.fraisScolaires.getRequiredForMonth(
+                          e.key,
+                          selectedSectionForFee!,
+                          selectedClasseScopeForFee) <
+                          e.value);
+
+                  String mode = 'intelligent';
+                  if (unMoisEstPlusBas && mounted) {
+                    final choix = await _askRecalculMode(context);
+                    if (choix != null) mode = choix;
+                  }
+
+                  // ⚡ NOUVEAU — même recalcul automatique qu'au-dessus,
+                  // avec le choix du mode "intelligent" ou "constant".
+                  final int nbRecalcules = mode == 'constant'
+                      ? await widget.fraisScolaires
+                      .recalculerPaiementsPourModeConstant(
+                    section: selectedSectionForFee,
+                    classeNumero: selectedClasseScopeForFee,
+                    anciensRequisParMois: anciensRequis,
+                  )
+                      : await widget.fraisScolaires
+                      .recalculerPaiementsPour(
                     section: selectedSectionForFee,
                     classeNumero: selectedClasseScopeForFee,
                   );
@@ -1316,9 +1453,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     setState(() {});
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
-                        content: Text(
-                            "Exception retirée — $nbRecalcules élève(s) "
-                                "recalculé(s) automatiquement"),
+                        content: Text(mode == 'constant'
+                            ? "Exception retirée (mode constant) — "
+                            "$nbRecalcules élève(s) ajusté(s) uniquement "
+                            "sur le(s) mois concerné(s)"
+                            : "Exception retirée — $nbRecalcules élève(s) "
+                            "recalculé(s) automatiquement"),
                       ),
                     );
                   }
@@ -2034,6 +2174,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onPressed: () async {
               final amount =
               double.tryParse(controller.text);
+
+              // ⚡ NOUVEAU — montant requis pour CE mois précis, capturé
+              // AVANT toute modification, pour pouvoir ensuite proposer
+              // le mode "constant" si le nouveau montant s'avère plus
+              // bas.
+              final double ancienRequisPourCeMois =
+              widget.fraisScolaires.getRequiredForMonth(
+                selectedMonthForException!,
+                selectedSectionForException!,
+                selectedClasseScopeForException,
+              );
+
               if (selectedClasseScopeForException == null) {
                 if (amount != null) {
                   widget.fraisScolaires.config
@@ -2062,13 +2214,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 }
               }
               await widget.fraisScolaires.saveData();
+
+              Navigator.pop(ctx);
+
+              // ⚡ NOUVEAU — montant requis pour ce même mois APRÈS la
+              // modification, pour savoir s'il a réellement baissé.
+              final double nouveauRequisPourCeMois =
+              widget.fraisScolaires.getRequiredForMonth(
+                selectedMonthForException!,
+                selectedSectionForException!,
+                selectedClasseScopeForException,
+              );
+              final bool montantEstPlusBas =
+                  nouveauRequisPourCeMois < ancienRequisPourCeMois;
+
+              // ⚡ NOUVEAU — le choix du mode n'est proposé que si le
+              // montant a baissé pour ce mois précis ; sinon on garde
+              // directement le comportement intelligent habituel.
+              String mode = 'intelligent';
+              if (montantEstPlusBas && mounted) {
+                final choix = await _askRecalculMode(context);
+                if (choix != null) mode = choix;
+              }
+
               // ⚡ NOUVEAU — même logique de recalcul automatique que
-              // pour un changement de frais mensuel classique : on
-              // redistribue les paiements déjà effectués selon les
-              // montants requis actuels (donc l'exception qu'on vient
-              // de modifier).
-              final int nbRecalcules =
-              await widget.fraisScolaires.recalculerPaiementsPour(
+              // pour un changement de frais mensuel classique : par
+              // défaut on redistribue intelligemment sur toute l'année
+              // (mode "intelligent"), ou, si l'utilisateur l'a choisi
+              // pour une baisse de montant, on ajuste UNIQUEMENT ce mois
+              // précis sans rien reporter sur les mois suivants (mode
+              // "constant").
+              final int nbRecalcules = mode == 'constant'
+                  ? await widget.fraisScolaires
+                  .recalculerPaiementsPourModeConstant(
+                section: selectedSectionForException,
+                classeNumero: selectedClasseScopeForException,
+                anciensRequisParMois: {
+                  selectedMonthForException!: ancienRequisPourCeMois,
+                },
+              )
+                  : await widget.fraisScolaires
+                  .recalculerPaiementsPour(
                 section: selectedSectionForException,
                 classeNumero: selectedClasseScopeForException,
               );
@@ -2076,13 +2262,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 setState(() {});
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content: Text(
-                        "Exception enregistrée — $nbRecalcules élève(s) "
-                            "recalculé(s) automatiquement"),
+                    content: Text(mode == 'constant'
+                        ? "Exception enregistrée (mode constant) — "
+                        "$nbRecalcules élève(s) ajusté(s) uniquement "
+                        "pour $selectedMonthForException, sans report "
+                        "vers les autres mois"
+                        : "Exception enregistrée — $nbRecalcules élève(s) "
+                        "recalculé(s) automatiquement"),
                   ),
                 );
               }
-              Navigator.pop(ctx);
             },
             child: const Text("Enregistrer"),
           ),
