@@ -21,6 +21,25 @@ import 'package:image/image.dart' as img;
 /// ce qui évite de devoir remplacer le pilote Epson par un pilote WinUSB
 /// générique (qui casserait l'impression normale de l'imprimante).
 ///
+/// ⚡ NOUVEAU — CONFIRMATION RÉELLE DE L'IMPRESSION (anti faux-positif)
+/// PROBLÈME RÉSOLU : `WritePrinter()` qui répond "succès" signifie
+/// uniquement que Windows a bien reçu les octets et les a mis en file — PAS
+/// que le papier est réellement sorti de l'imprimante. Si le câble USB
+/// bouge ou se déconnecte juste après l'envoi, `WritePrinter` pouvait
+/// répondre "succès" alors que le reçu ressortait à moitié, ou pas du tout,
+/// ET l'application marquait quand même ce reçu comme "imprimé avec
+/// succès" de façon définitive (plus aucune tentative automatique possible
+/// ensuite pour ce paiement).
+/// SOLUTION : après l'envoi, on interroge le VRAI statut du job auprès du
+/// spouleur Windows (`Get-PrintJob`, même job id que celui renvoyé par
+/// `StartDocPrinter`) jusqu'à ce qu'il soit confirmé traité, en erreur
+/// (hors-ligne, bourrage, papier épuisé...), ou que le délai soit dépassé.
+/// Le booléen retourné par toutes les méthodes `print...` de cette classe
+/// (`printReceipt`, `printTransactionsReceipt`,
+/// `printAutreFraisReceipt`, `printAutresFraisTransactionsReceipt`)
+/// reflète donc désormais ce statut RÉEL, et non plus une simple
+/// acceptation par le spouleur.
+///
 /// ⚡ ÉCONOMIE DE PAPIER (reçu plus court)
 /// À la demande de l'employeur : le reçu doit occuper le MOINS de papier
 /// possible, sans qu'aucune information n'y soit retirée. Pour y arriver :
@@ -47,7 +66,7 @@ import 'package:image/image.dart' as img;
 ///      (police normale + retour à la ligne si besoin) reprend
 ///      automatiquement, pour ne jamais rien couper.
 ///
-/// ⚡ NOUVEAU — RÉIMPRESSION MANUELLE (reçus perdus / mémoire d'impression
+/// ⚡ RÉIMPRESSION MANUELLE (reçus perdus / mémoire d'impression
 /// perdue si l'ordinateur s'éteint avant que l'imprimante ne soit
 /// rebranchée)
 /// En plus de `printReceipt` (impression AUTOMATIQUE d'UN SEUL mois juste
@@ -112,6 +131,8 @@ class EscPosPrinterService {
     Pointer<DOC_INFO_1> docInfo = nullptr;
     Pointer<Uint8> dataPtr = nullptr;
     Pointer<Uint32> bytesWritten = nullptr;
+    int docId = 0;
+    bool sentOk = false;
 
     try {
       final opened = OpenPrinter(printerNamePtr, phPrinter, nullptr);
@@ -126,7 +147,7 @@ class EscPosPrinterService {
         ..pOutputFile = nullptr
         ..pDatatype = dataTypePtr;
 
-      final docId = StartDocPrinter(hPrinter, 1, docInfo.cast());
+      docId = StartDocPrinter(hPrinter, 1, docInfo.cast());
       if (docId == 0) {
         ClosePrinter(hPrinter);
         return false;
@@ -149,7 +170,7 @@ class EscPosPrinterService {
       EndDocPrinter(hPrinter);
       ClosePrinter(hPrinter);
 
-      return writeOk != 0 && bytesWritten.value == data.length;
+      sentOk = writeOk != 0 && bytesWritten.value == data.length;
     } catch (_) {
       return false;
     } finally {
@@ -161,10 +182,84 @@ class EscPosPrinterService {
       if (dataPtr != nullptr) calloc.free(dataPtr);
       if (bytesWritten != nullptr) calloc.free(bytesWritten);
     }
+
+    if (!sentOk) return false;
+
+    // ⚡ NOUVEAU — on ne s'arrête plus au retour de WritePrinter : on
+    // vérifie le VRAI statut du job auprès du spouleur Windows avant de
+    // considérer l'impression comme réussie.
+    return await _confirmJobPrinted(printerName, docId);
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — PRÉPARATION DU LOGO POUR UNE IMPRESSION NETTE
+  // ⚡ NOUVEAU — CONFIRMATION RÉELLE DU STATUT D'UN JOB D'IMPRESSION
+  // ====================================================================
+  // `jobId` correspond à l'identifiant renvoyé par `StartDocPrinter`, qui
+  // est le même identifiant que celui utilisé par le spouleur Windows en
+  // interne (visible aussi via `Get-PrintJob`/le Gestionnaire
+  // d'impression). On interroge ce statut en boucle, jusqu'à :
+  //   - constater que le job a disparu de la file -> le spouleur l'a
+  //     traité et retiré après l'avoir transmis avec succès à
+  //     l'imprimante -> on considère l'impression réussie.
+  //   - détecter un statut d'erreur explicite (hors-ligne, bourrage,
+  //     papier épuisé, intervention utilisateur requise, job supprimé...)
+  //     -> on considère l'impression échouée.
+  //   - dépasser le délai [timeout] sans certitude -> par sécurité, on
+  //     considère l'impression NON confirmée (mieux vaut proposer une
+  //     réimpression inutile de temps en temps que cacher un vrai échec).
+  static Future<bool> _confirmJobPrinted(
+      String printerName,
+      int jobId, {
+        Duration timeout = const Duration(seconds: 6),
+      }) async {
+    if (!Platform.isWindows) return false;
+    final deadline = DateTime.now().add(timeout);
+    try {
+      while (DateTime.now().isBefore(deadline)) {
+        final result = await Process.run(
+          'powershell',
+          [
+            '-NoProfile',
+            '-Command',
+            'Get-PrintJob -PrinterName "$printerName" '
+                '-ErrorAction SilentlyContinue '
+                '| Where-Object { \$_.Id -eq $jobId } '
+                '| Select-Object -ExpandProperty JobStatus',
+          ],
+          runInShell: true,
+        );
+
+        final output = result.stdout.toString().trim();
+
+        if (output.isEmpty) {
+          // Le job n'apparaît plus dans la file d'attente : le spouleur
+          // l'a retiré après l'avoir transmis avec succès à l'imprimante.
+          return true;
+        }
+
+        final lower = output.toLowerCase();
+        final hasErrorState = lower.contains('error') ||
+            lower.contains('offline') ||
+            lower.contains('paperout') ||
+            lower.contains('paper out') ||
+            lower.contains('usernotified') ||
+            lower.contains('userintervention') ||
+            lower.contains('blocked') ||
+            lower.contains('deleted');
+        if (hasErrorState) return false;
+
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
+      // Toujours présent dans la file après le délai : impossible de
+      // confirmer avec certitude que le papier est réellement sorti.
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ====================================================================
+  // ⚡ PRÉPARATION DU LOGO POUR UNE IMPRESSION NETTE
   // ====================================================================
   // Une imprimante thermique n'a que 2 niveaux (noir/blanc). Envoyer une
   // image en niveaux de gris ou en couleur oblige le générateur ESC/POS à
@@ -225,11 +320,11 @@ class EscPosPrinterService {
   // bitmap (logo dupliqué à gauche et à droite, nom du texte dessiné
   // dessus, bien centré), qu'on imprime ensuite comme un seul bloc image.
   //
-  // ⚡ NOUVEAU — le nom de l'école est dessiné en gras simulé (traits
-  // épaissis) avec une police nettement plus grande (arial48) quand il
-  // tient sur la ligne du logo (cas normal) — sans agrandir la hauteur
-  // de l'en-tête, puisque logoBox (60px) est déjà suffisant pour cette
-  // police. Si le nom est trop long pour tenir à cette taille, on repasse
+  // Le nom de l'école est dessiné en gras simulé (traits épaissis) avec
+  // une police nettement plus grande (arial48) quand il tient sur la
+  // ligne du logo (cas normal) — sans agrandir la hauteur de l'en-tête,
+  // puisque logoBox (60px) est déjà suffisant pour cette police. Si le
+  // nom est trop long pour tenir à cette taille, on repasse
   // automatiquement à l'ancien comportement (police normale, retour à la
   // ligne si nécessaire), pour ne jamais perdre une partie du nom.
   static const int _headerWidth = 380;
@@ -356,11 +451,11 @@ class EscPosPrinterService {
     return canvas;
   }
 
-  /// ⚡ NOUVEAU — Dessine un texte en gras simulé : les polices bitmap
-  /// intégrées à la librairie `image` n'ont pas de variante grasse, donc
-  /// on superpose le même texte à quelques pixels de décalage pour
-  /// épaissir artificiellement chaque trait. Effet visuel proche d'un
-  /// vrai gras, sans changer la hauteur occupée.
+  /// Dessine un texte en gras simulé : les polices bitmap intégrées à la
+  /// librairie `image` n'ont pas de variante grasse, donc on superpose le
+  /// même texte à quelques pixels de décalage pour épaissir
+  /// artificiellement chaque trait. Effet visuel proche d'un vrai gras,
+  /// sans changer la hauteur occupée.
   static void _drawBoldString(
       img.Image canvas,
       String text, {
@@ -398,9 +493,8 @@ class EscPosPrinterService {
   /// forcément tous les caractères accentués français. On remplace ceux
   /// qui manqueraient par leur équivalent non accentué, pour ne jamais
   /// perdre silencieusement une lettre à l'impression (mieux vaut
-  /// "Ecole" que "cole"). ⚡ CORRIGÉ — vérifie désormais les glyphes de
-  /// la police réellement utilisée (passée en paramètre) plutôt que
-  /// toujours arial24, puisqu'on utilise maintenant aussi arial48.
+  /// "Ecole" que "cole"). Vérifie les glyphes de la police réellement
+  /// utilisée (passée en paramètre), puisqu'on utilise aussi arial48.
   static String _safeText(String text, img.BitmapFont font) {
     const replacements = {
       'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
@@ -425,7 +519,10 @@ class EscPosPrinterService {
   // ====================================================================
   // GÉNÉRER ET IMPRIMER UN REÇU COMPLET (paiement mensuel principal)
   // ⚡ Impression AUTOMATIQUE — appelée juste après l'enregistrement d'un
-  // paiement. Comportement inchangé : ne concerne qu'UN SEUL mois.
+  // paiement. Comportement inchangé : ne concerne qu'UN SEUL mois. Le
+  // booléen retourné reflète désormais le statut RÉEL et CONFIRMÉ de
+  // l'impression (voir `_confirmJobPrinted` ci-dessus), et non plus
+  // simplement l'acceptation par le spouleur Windows.
   // ====================================================================
   // Mise en page compacte pour économiser le papier :
   //   - "N° Reçu" sur sa propre ligne, "ID Élève" et "Classe" sur la même
@@ -671,8 +768,8 @@ class EscPosPrinterService {
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS
-  // PAIEMENTS DÉJÀ ENREGISTRÉS DU FRAIS MENSUEL PRINCIPAL.
+  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS PAIEMENTS DÉJÀ
+  // ENREGISTRÉS DU FRAIS MENSUEL PRINCIPAL.
   //
   // Utilisée pour 3 cas d'usage, tous à partir de l'écran "Paiements des
   // Élèves" (historique d'un élève) et depuis le Dashboard Admin après
@@ -689,7 +786,8 @@ class EscPosPrinterService {
   // 'amount' (ou 'montant'), et idéalement 'date'. Le reçu reste compact
   // (même esprit que printReceipt : économie de papier) mais soigné
   // visuellement (logo + nom de l'école en en-tête, séparateurs nets,
-  // montants alignés à droite).
+  // montants alignés à droite). Le booléen retourné reflète lui aussi le
+  // statut RÉEL et CONFIRMÉ de l'impression.
   // ====================================================================
   static Future<bool> printTransactionsReceipt({
     required String printerName,
@@ -941,7 +1039,7 @@ class EscPosPrinterService {
   }
 
   // ====================================================================
-  // ⚡ PETIT REÇU POUR UN "AUTRE FRAIS" (frais éphémère)
+  // PETIT REÇU POUR UN "AUTRE FRAIS" (frais éphémère)
   // ⚡ Impression AUTOMATIQUE — appelée juste après le paiement d'un seul
   // "autre frais". Comportement inchangé, avec en plus la possibilité
   // (optionnelle, rétro-compatible) d'afficher le logo de l'école comme
@@ -950,7 +1048,9 @@ class EscPosPrinterService {
   // l'école, titre du frais (ex: "Frais de l'État"), nom de l'élève,
   // classe, date de paiement, montant, et une ligne signature.
   // "Classe" et "Section" combinées sur une même ligne, signature réduite,
-  // même principe que printReceipt. Aucune information retirée.
+  // même principe que printReceipt. Aucune information retirée. Le
+  // booléen retourné reflète désormais le statut RÉEL et CONFIRMÉ de
+  // l'impression.
   // ====================================================================
   static Future<bool> printAutreFraisReceipt({
     required String printerName,
@@ -960,8 +1060,8 @@ class EscPosPrinterService {
     required String classe,
     required String section,
     required double montant,
-    Uint8List? logoBytes, // ⚡ NOUVEAU — optionnel, rétro-compatible
-    bool duplicata = false, // ⚡ NOUVEAU
+    Uint8List? logoBytes, // optionnel, rétro-compatible
+    bool duplicata = false,
   }) async {
     if (!Platform.isWindows) return false;
 
@@ -1114,8 +1214,8 @@ class EscPosPrinterService {
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS
-  // "AUTRES FRAIS" DÉJÀ PAYÉS PAR UN MÊME ÉLÈVE.
+  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS "AUTRES FRAIS" DÉJÀ
+  // PAYÉS PAR UN MÊME ÉLÈVE.
   //
   // Même logique que `printTransactionsReceipt`, mais pour la liste des
   // frais additionnels (nom du frais + montant + date), avec un total en
@@ -1127,7 +1227,8 @@ class EscPosPrinterService {
   //   3. L'impression automatique groupée depuis le Dashboard Admin après
   //      validation d'un lot de paiements d'"autres frais".
   // Chaque entrée de `paiements` doit contenir 'nom' (le nom du frais),
-  // 'montant' et idéalement 'date'.
+  // 'montant' et idéalement 'date'. Le booléen retourné reflète lui aussi
+  // le statut RÉEL et CONFIRMÉ de l'impression.
   // ====================================================================
   static Future<bool> printAutresFraisTransactionsReceipt({
     required String printerName,

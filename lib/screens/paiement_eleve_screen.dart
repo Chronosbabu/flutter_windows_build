@@ -42,7 +42,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   int _failedAttempts = 0;
   DateTime? _lockedUntil;
 
-  // ⚡ NOUVEAU — verrou anti double-clic pendant une réimpression
+  // ⚡ verrou anti double-clic pendant une réimpression
   bool _reprinting = false;
 
   @override
@@ -54,15 +54,11 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     searchController.addListener(_filterEleves);
     // Vérifier les paiements mobile en attente
     _fetchMobilePendingPayments();
-    // ⚡ NOUVEAU — vide la file d'attente des reçus non encore imprimés à
-    // l'ouverture de cet écran de paiement (voir
-    // FraisScolaires.flushReceiptQueue). Fonctionne même après un
-    // redémarrage complet de l'application ou de l'ordinateur, puisque
-    // cette file est persistée dans le fichier JSON local.
+    // Vide la file d'attente des reçus non encore imprimés à l'ouverture
+    // de cet écran de paiement (voir FraisScolaires.flushReceiptQueue).
     _flushPendingReceipts();
   }
 
-  // ⚡ NOUVEAU
   Future<void> _flushPendingReceipts() async {
     final count = await widget.fraisScolaires.flushReceiptQueue();
     if (mounted && count > 0) {
@@ -296,7 +292,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               const Text(
                 "Définissez un code secret, différent du mot de passe "
                     "de sauvegarde. Ce code sera nécessaire pour annuler "
-                    "ou modifier un paiement déjà enregistré. "
+                    "ou modifier un paiement déjà enregistré, ou pour "
+                    "forcer la réimpression d'un reçu déjà confirmé. "
                     "Ne le partagez avec personne.",
                 style: TextStyle(fontSize: 12.5),
               ),
@@ -476,7 +473,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   }
 
   void _showAdminTransactionOptions(
-      Eleve eleve, Map<String, dynamic> transaction, String mois) {
+      Eleve eleve, Map<String, dynamic> transaction, String mois,
+      {VoidCallback? onDone}) {
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
@@ -485,9 +483,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             ListTile(
               leading: const Icon(Icons.print, color: Colors.indigo),
               title: const Text("Réimprimer ce reçu (duplicata)"),
+              subtitle: const Text(
+                "Forcé — fonctionne même si le reçu est déjà confirmé "
+                    "imprimé (reçu perdu/abîmé).",
+                style: TextStyle(fontSize: 11),
+              ),
               onTap: () {
                 Navigator.pop(ctx);
-                _reprintTransactionReceipt(eleve, transaction);
+                _reprintTransactionReceipt(eleve, transaction,
+                    onDone: onDone);
               },
             ),
             ListTile(
@@ -513,22 +517,70 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — RÉIMPRESSION MANUELLE D'UN PAIEMENT (DUPLICATA)
+  // ⚡ STATUT RÉEL D'IMPRESSION D'UN PAIEMENT (par transaction, pas par
+  // élève+mois)
   // ==========================================================================
-  // Un clic sur un paiement dans l'historique (icône imprimante) réimprime
-  // directement le reçu correspondant à CE paiement précis, avec la mention
-  // "DUPLICATA" clairement visible sur le ticket. Cette fonction n'utilise
-  // JAMAIS `printOrQueuePrincipalReceipt` (qui bloque toute réimpression dès
-  // qu'une tentative a été considérée comme réussie une première fois) : elle
-  // appelle directement le service d'impression, et ne touche NI aux
-  // montants payés (`eleve.paid`) NI à l'historique des transactions
-  // (`eleve.transactions`). Aucun nouveau paiement n'est donc créé — un seul
-  // paiement reste enregistré, seul le PAPIER peut être réimprimé autant de
-  // fois que nécessaire (ex: ticket sorti à moitié suite à un problème
-  // d'imprimante).
+  // `receiptConfirmed` est stocké DIRECTEMENT sur la transaction (le Map
+  // déjà présent dans `eleve.transactions`) :
+  //   - true  -> l'impression de CE paiement a été CONFIRMÉE côté spouleur
+  //              Windows (voir `_confirmJobPrinted` dans
+  //              epson_printer_service.dart) : le papier est réellement
+  //              sorti. Un tap sur l'icône affiche alors "déjà imprimé"
+  //              au lieu de réimprimer.
+  //   - false / absent -> pas confirmé (échec, imprimante déconnectée, ou
+  //              impression pas encore tentée) : un tap réimprime
+  //              directement.
+  // Le mode administrateur (code masqué) permet de TOUJOURS forcer une
+  // réimpression (duplicata), même si `receiptConfirmed == true`, pour le
+  // cas exceptionnel d'un reçu perdu/abîmé après coup.
+  // ==========================================================================
+  bool _isReceiptConfirmed(Map<String, dynamic> t) =>
+      t['receiptConfirmed'] == true;
+
+  void _showAlreadyPrintedDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Reçu déjà imprimé"),
+        content: const Text(
+          "Le reçu pour ce paiement a déjà été correctement imprimé.\n\n"
+              "S'il a été perdu ou abîmé, un administrateur peut le "
+              "réimprimer (duplicata) via le code masqué : triple-clic "
+              "sur le titre de cette page, puis entrez le code.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Compris"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ RÉIMPRESSION MANUELLE D'UN PAIEMENT (DUPLICATA)
+  // ==========================================================================
+  // N'utilise JAMAIS `printOrQueuePrincipalReceipt` (qui bloque toute
+  // réimpression dès qu'une tentative a été considérée comme réussie une
+  // première fois) : elle appelle directement le service d'impression, et
+  // ne touche NI aux montants payés (`eleve.paid`) NI à l'historique des
+  // transactions (`eleve.transactions`) — hormis le champ
+  // `receiptConfirmed` posé sur la transaction imprimée, qui ne sert qu'à
+  // l'affichage de l'icône. Aucun nouveau paiement n'est donc créé — un
+  // seul paiement reste enregistré, seul le PAPIER peut être réimprimé
+  // autant de fois que nécessaire.
+  //
+  // [onDone] permet au dialogue appelant (StatefulBuilder) de se
+  // rafraîchir immédiatement après la tentative, pour que l'icône reflète
+  // tout de suite le nouveau statut sans devoir fermer/rouvrir le
+  // dialogue.
   // ==========================================================================
   Future<void> _reprintTransactionReceipt(
-      Eleve eleve, Map<String, dynamic> transaction) async {
+      Eleve eleve,
+      Map<String, dynamic> transaction, {
+        VoidCallback? onDone,
+      }) async {
     if (_reprinting) return;
     setState(() => _reprinting = true);
 
@@ -562,6 +614,14 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         duplicata: true,
       );
 
+      if (ok) {
+        // ⚡ NOUVEAU — statut réel et confirmé : ce paiement précis a
+        // maintenant un reçu papier physiquement sorti. L'icône passera
+        // au ✅ dès le prochain rafraîchissement du dialogue.
+        transaction['receiptConfirmed'] = true;
+        await widget.fraisScolaires.saveData();
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -578,6 +638,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       }
     } finally {
       if (mounted) setState(() => _reprinting = false);
+      onDone?.call();
     }
   }
 
@@ -612,12 +673,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         content: Text(
           "Annuler ce paiement de ${montant.toStringAsFixed(0)} FC "
               "pour \"$mois\" ?\n\n"
-          // ⚡ CORRIGÉ — le message explique désormais clairement que
-          // l'année entière de l'élève sera automatiquement recalculée
-          // et remise en ordre après l'annulation (voir
-          // FraisScolaires.cancelTransaction, qui appelle maintenant
-          // recalculerRepartitionMoisPourEleve), et pas seulement le
-          // mois annulé.
               "Cette action retirera ce montant, puis le systèmes "
               "recalculera automatiquement toute la répartition des "
               "paiements de cet élève (tous les mois) pour que tout reste "
@@ -675,9 +730,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               decoration: const InputDecoration(labelText: "Nouveau montant (FC)"),
             ),
             const SizedBox(height: 10),
-            // ⚡ NOUVEAU — même précision que pour l'annulation : on prévient
-            // que la modification déclenche un recalcul automatique de
-            // toute l'année de l'élève, pas seulement du mois affiché.
             const Text(
               "Après validation, la répartition de TOUTE l'année de cet "
                   "élève sera automatiquement recalculée pour rester "
@@ -899,12 +951,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                       postNomController.text.trim().isNotEmpty &&
                       selectedClasseNumeroEdit != null &&
                       selectedSectionEdit != null) {
-                    // ==========================================================
-                    // ⚡ NOUVEAU — UNICITÉ STRICTE NOM + POST-NOM + PRÉNOM,
-                    // vérifiée aussi lors d'une MODIFICATION (et pas
-                    // seulement à la création). `excludeId` permet de ne
-                    // jamais comparer l'élève à lui-même.
-                    // ==========================================================
                     final duplicateEleve =
                     widget.fraisScolaires.findDuplicateFullName(
                       nom: nomController.text.trim(),
@@ -1129,11 +1175,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                           'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
                           'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC',
                     ),
-                    // ⚡ CORRIGÉ — le bouton de réimpression manuelle a été
-                    // retiré de la liste principale (sur demande de la
-                    // direction). La réimpression manuelle reste possible,
-                    // mais uniquement paiement par paiement, depuis
-                    // l'historique du mois (voir _showMonthDetailDialog).
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -1281,13 +1322,12 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                       const Text("Historique des paiements :",
                           style: TextStyle(
                               fontWeight: FontWeight.bold, fontSize: 13)),
-                      // ⚡ NOUVEAU — rappel visuel : cliquer sur l'icône
-                      // imprimante d'un paiement ci-dessous réimprime
-                      // directement son reçu (duplicata), sans passer par
-                      // le mode administrateur.
+                      // ⚡ NOUVEAU — légende à jour : ✅ = reçu déjà
+                      // confirmé imprimé (tap => "déjà imprimé") ; 🖨️ =
+                      // pas encore confirmé (tap => réimprime directement).
                       if (historique.isNotEmpty)
                         const Text(
-                          "🖨️ = réimprimer",
+                          "✅ = déjà imprimé • 🖨️ = à imprimer",
                           style: TextStyle(
                               fontSize: 10.5, color: Colors.grey),
                         ),
@@ -1312,6 +1352,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                               "Date inconnue";
                           final isFromParent =
                               t['from_parent'] == true;
+                          // ⚡ NOUVEAU — statut réel et confirmé de
+                          // l'impression pour CE paiement précis.
+                          final confirmed = _isReceiptConfirmed(t);
                           return ListTile(
                             dense: true,
                             contentPadding: EdgeInsets.zero,
@@ -1333,11 +1376,16 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                                   color: Colors.green),
                             )
                                 : null,
-                            // ⚡ NOUVEAU — un simple clic sur l'icône
-                            // imprimante réimprime directement le reçu de
-                            // CE paiement précis (marqué DUPLICATA), sans
-                            // toucher aux montants ni créer de nouveau
-                            // paiement. Le montant reste affiché à droite.
+                            // ⚡ NOUVEAU — l'icône reflète le statut RÉEL
+                            // et CONFIRMÉ de l'impression :
+                            //   - ✅ vert  : déjà imprimé -> tap affiche
+                            //     "Reçu déjà imprimé" (aucune impression
+                            //     supplémentaire n'est déclenchée).
+                            //   - 🖨️ indigo : pas confirmé -> tap
+                            //     réimprime directement ce paiement précis
+                            //     (marqué DUPLICATA) et marque le
+                            //     paiement comme confirmé en cas de
+                            //     succès.
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -1355,13 +1403,32 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                                     child: CircularProgressIndicator(
                                         strokeWidth: 2),
                                   )
-                                      : const Icon(Icons.print,
-                                      color: Colors.indigo, size: 20),
-                                  tooltip: "Réimprimer ce reçu",
+                                      : Icon(
+                                    confirmed
+                                        ? Icons.check_circle
+                                        : Icons.print,
+                                    color: confirmed
+                                        ? Colors.green
+                                        : Colors.indigo,
+                                    size: 20,
+                                  ),
+                                  tooltip: confirmed
+                                      ? "Reçu déjà imprimé"
+                                      : "Réimprimer ce reçu",
                                   onPressed: _reprinting
                                       ? null
-                                      : () =>
-                                      _reprintTransactionReceipt(eleve, t),
+                                      : () {
+                                    if (confirmed) {
+                                      _showAlreadyPrintedDialog();
+                                    } else {
+                                      _reprintTransactionReceipt(
+                                        eleve,
+                                        t,
+                                        onDone: () =>
+                                            setStateDialog(() {}),
+                                      );
+                                    }
+                                  },
                                 ),
                               ],
                             ),
@@ -1452,6 +1519,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                   );
                   return;
                 }
+
+                // ⚡ NOUVEAU — on retient combien de transactions existent
+                // AVANT le paiement, pour pouvoir identifier après coup
+                // celle(s) que `handlePayment` vient de créer (il peut y
+                // en avoir plusieurs si le montant déborde sur le(s)
+                // mois suivant(s)) et leur appliquer le statut RÉEL
+                // d'impression.
+                final int nbTransactionsAvant = eleve.transactions.length;
+
                 widget.fraisScolaires.handlePayment(eleve, mois, amount);
                 await widget.fraisScolaires.saveData();
                 Navigator.pop(ctx);
@@ -1463,23 +1539,13 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                         Text("✅ Paiement enregistré avec succès")),
                   );
                   // ==========================================================
-                  // ⚡ CORRIGÉ — L'IMPRESSION PASSE DÉSORMAIS PAR LE SYSTÈME
-                  // CENTRALISÉ ANTI-DOUBLON + FILE D'ATTENTE DE
-                  // FraisScolaires (`printOrQueuePrincipalReceipt`), au lieu
-                  // d'imprimer directement depuis cet écran. Un reçu déjà
-                  // imprimé pour cet élève et ce mois ne sera plus jamais
-                  // réimprimé automatiquement, et si aucune imprimante
-                  // n'est branchée, le reçu reste en attente et sortira
-                  // automatiquement dès qu'une imprimante redevient
-                  // disponible (même après extinction complète de
-                  // l'ordinateur ou de l'application) — voir
-                  // `flushReceiptQueue`, appelée à l'ouverture de cet écran.
-                  // Si cette impression automatique venait à échouer/sortir
-                  // à moitié à cause d'un problème matériel, le paiement
-                  // reste ouvert dans l'historique du mois (voir
-                  // _showMonthDetailDialog) où l'icône imprimante permet de
-                  // réimprimer ce paiement précis en duplicata, à tout
-                  // moment, sans créer de nouveau paiement.
+                  // L'IMPRESSION PASSE PAR LE SYSTÈME CENTRALISÉ
+                  // ANTI-DOUBLON + FILE D'ATTENTE DE FraisScolaires
+                  // (`printOrQueuePrincipalReceipt`). `printed` reflète
+                  // désormais le statut RÉEL et CONFIRMÉ de l'impression
+                  // (voir `_confirmJobPrinted` dans
+                  // epson_printer_service.dart), pas juste l'acceptation
+                  // par le spouleur Windows.
                   // ==========================================================
                   final printed = await widget.fraisScolaires
                       .printOrQueuePrincipalReceipt(
@@ -1487,15 +1553,32 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     mois: mois,
                     montantPaye: amount,
                   );
+
+                  // ⚡ NOUVEAU — on applique ce statut RÉEL à CHAQUE
+                  // transaction créée par ce paiement (voir commentaire
+                  // ci-dessus), pour que l'icône dans l'historique du
+                  // mois (✅/🖨️) reflète immédiatement si un reçu papier
+                  // est bien sorti pour ce paiement ou pas encore.
+                  if (eleve.transactions.length > nbTransactionsAvant) {
+                    for (var i = nbTransactionsAvant;
+                    i < eleve.transactions.length;
+                    i++) {
+                      eleve.transactions[i]['receiptConfirmed'] = printed;
+                    }
+                    await widget.fraisScolaires.saveData();
+                  }
+
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
                         content: Text(
                           printed
                               ? "🖨️ Reçu imprimé avec succès"
-                              : "📥 Aucune imprimante disponible — le reçu "
-                              "sortira automatiquement dès qu'une "
-                              "imprimante sera branchée",
+                              : "📥 Aucune imprimante disponible ou reçu non "
+                              "confirmé — le reçu sortira automatiquement "
+                              "dès qu'une imprimante sera prête, ou "
+                              "peut être réimprimé manuellement depuis "
+                              "l'historique de ce mois (icône 🖨️).",
                         ),
                         backgroundColor:
                         printed ? Colors.green : Colors.orange,

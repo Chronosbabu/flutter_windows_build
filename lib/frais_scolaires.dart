@@ -426,6 +426,74 @@ class FraisScolaires {
       }),
     ];
   }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MISE EN PAGE ROBUSTE DES TABLEAUX PDF
+  // ==========================================================================
+  // Problème résolu : sans largeurs de colonnes explicites, la librairie
+  // PDF calcule des largeurs "intrinsèques" par colonne (une largeur qui
+  // dépend du contenu, sans tenir compte de la largeur totale disponible).
+  // Dès qu'un rapport contient beaucoup de colonnes (typiquement une
+  // colonne par administration configurée) ou des textes un peu longs
+  // (noms de classes composés, noms d'administrations...), la somme de
+  // ces largeurs "idéales" dépasse la largeur de la page : la librairie
+  // réduit alors TOUTES les colonnes proportionnellement pour que ça
+  // tienne, au point qu'une colonne peut devenir plus étroite qu'un seul
+  // caractère — ce qui produit le rendu illisible parfois observé (texte
+  // étalé lettre par lettre à la verticale).
+  //
+  // La solution appliquée à TOUS les tableaux de rapports ci-dessous :
+  //   1. Des largeurs de colonnes EXPLICITES et proportionnées
+  //      (`FlexColumnWidth`), toujours assez généreuses pour les colonnes
+  //      à texte long (Nom, Classe, Type de frais...), jamais écrasées
+  //      même avec beaucoup de colonnes numériques à côté.
+  //   2. Une taille de police qui s'adapte AUTOMATIQUEMENT au nombre de
+  //      colonnes (plus il y en a — ex: beaucoup d'administrations —
+  //      plus elle est réduite), mais jamais en dessous d'un seuil
+  //      lisible à l'impression.
+  //   3. Une orientation PAYSAGE pour tous les rapports à plusieurs
+  //      colonnes, qui donne nettement plus de largeur disponible et
+  //      garde un rendu net et présentable devant la direction, quel que
+  //      soit le nombre de colonnes ou la longueur des noms.
+  //   4. Des en-têtes harmonisés (fond indigo, texte blanc, gras) sur
+  //      tous les tableaux, pour un rendu homogène d'un rapport à l'autre.
+  // ==========================================================================
+
+  /// Construit une carte {index de colonne -> largeur relative} à partir
+  /// d'une liste de proportions (ex: [0.7, 2.4, 1.1, 1.2] pour ID / Nom
+  /// Complet / Section / Classe). Les proportions n'ont pas besoin de
+  /// totaliser 1 : seul leur ratio les unes par rapport aux autres compte.
+  Map<int, pw.TableColumnWidth> _buildColumnWidths(List<double> flexRatios) {
+    return {
+      for (var i = 0; i < flexRatios.length; i++)
+        i: pw.FlexColumnWidth(flexRatios[i]),
+    };
+  }
+
+  /// Taille de police des CELLULES d'un tableau, réduite automatiquement
+  /// quand il y a beaucoup de colonnes (typiquement à cause du nombre
+  /// d'administrations configurées), mais jamais en dessous de 6.5pt pour
+  /// rester lisible à l'impression.
+  double _tableCellFontSize(int columnCount) {
+    if (columnCount <= 6) return 9;
+    if (columnCount <= 8) return 8.5;
+    if (columnCount <= 10) return 8;
+    if (columnCount <= 13) return 7.5;
+    return 6.5;
+  }
+
+  /// Taille de police des EN-TÊTES — suit la même logique de réduction
+  /// progressive que `_tableCellFontSize`, avec un plancher légèrement
+  /// plus haut car les en-têtes portent souvent des libellés importants
+  /// (ex: nom d'une administration + son pourcentage).
+  double _tableHeaderFontSize(int columnCount) {
+    if (columnCount <= 6) return 9;
+    if (columnCount <= 8) return 8.5;
+    if (columnCount <= 10) return 8;
+    if (columnCount <= 13) return 7.5;
+    return 7;
+  }
+
   bool get hiddenCodeIsConfigured =>
       hiddenCodeHash != null && hiddenCodeHash!.isNotEmpty;
 
@@ -2365,10 +2433,35 @@ class FraisScolaires {
     final List<double> recapMensuel =
     reportType == "annual" ? getMonthlyEvolution() : const [];
 
+    // ⚡ NOUVEAU — largeurs de colonnes explicites et police adaptative
+    // (voir commentaire détaillé plus haut sur `_buildColumnWidths` et
+    // consorts) : évite tout écrasement du tableau, même avec beaucoup
+    // d'administrations configurées. Les colonnes à texte long (Nom
+    // Complet, Classe, Mois Concerné(s)) reçoivent une part généreuse ;
+    // chaque colonne d'administration reste compacte mais toujours
+    // lisible.
+    final List<double> mainTableFlex = [
+      0.7, // ID
+      2.5, // Nom Complet
+      1.1, // Section
+      1.3, // Classe
+      1.3, // Montant Payé (FC)
+      if (showMoisConcerne) 1.7, // Mois Concerné(s)
+      ...List<double>.filled(config.administrations.length, 1.3),
+    ];
+    final mainTableColumnWidths = _buildColumnWidths(mainTableFlex);
+    final double mainCellFontSize = _tableCellFontSize(headers.length);
+    final double mainHeaderFontSize = _tableHeaderFontSize(headers.length);
+
     pdf.addPage(
       pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(40),
+        // ⚡ NOUVEAU — orientation paysage : donne nettement plus de
+        // largeur disponible pour les tableaux à plusieurs colonnes
+        // (frais principaux + une colonne par administration), ce qui
+        // évite tout écrasement du texte quel que soit le nombre
+        // d'administrations configurées ou la longueur des noms.
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
           pw.Text(title,
               style: pw.TextStyle(
@@ -2406,10 +2499,19 @@ class FraisScolaires {
           pw.TableHelper.fromTextArray(
             headers:   headers,
             data:      rows,
+            columnWidths: mainTableColumnWidths,
             headerStyle: pw.TextStyle(
-                fontSize: 9, fontWeight: pw.FontWeight.bold),
-            cellStyle: const pw.TextStyle(fontSize: 9),
+                fontSize: mainHeaderFontSize,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white),
+            headerDecoration:
+            const pw.BoxDecoration(color: PdfColors.indigo),
+            cellStyle: pw.TextStyle(fontSize: mainCellFontSize),
             cellAlignment: pw.Alignment.centerLeft,
+            cellPadding:
+            const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+            oddRowDecoration:
+            const pw.BoxDecoration(color: PdfColors.indigo50),
           ),
           if (reportType == "annual") ...[
             pw.SizedBox(height: 26),
@@ -2427,6 +2529,7 @@ class FraisScolaires {
                       .toStringAsFixed(0),
                 ],
               ),
+              columnWidths: _buildColumnWidths([1.4, 1]),
               headerStyle: pw.TextStyle(
                 fontSize: 9,
                 fontWeight: pw.FontWeight.bold,
@@ -2435,6 +2538,8 @@ class FraisScolaires {
               headerDecoration:
               const pw.BoxDecoration(color: PdfColors.indigo),
               cellStyle: const pw.TextStyle(fontSize: 9),
+              cellPadding:
+              const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
               cellAlignments: {
                 0: pw.Alignment.centerLeft,
                 1: pw.Alignment.centerRight,
@@ -2496,11 +2601,17 @@ class FraisScolaires {
       rows.add(['${i + 1}', e.nom, e.postNom, e.prenom, e.classe]);
     }
 
+    // ⚡ NOUVEAU — largeurs de colonnes explicites : la colonne "Classe"
+    // (souvent un nom composé, ex: "6eme Informatique Management A") ne
+    // sera plus jamais écrasée par les colonnes voisines.
+    final columnWidths = _buildColumnWidths([0.5, 1.6, 1.6, 1.6, 1.5]);
+
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(36),
+        // ⚡ NOUVEAU — paysage : plus de place pour les noms longs.
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
           pw.Center(
             child: pw.Text(
@@ -2538,6 +2649,7 @@ class FraisScolaires {
           pw.TableHelper.fromTextArray(
             headers: ['N°', 'Nom', 'Post-nom', 'Prénom', 'Classe'],
             data:    rows,
+            columnWidths: columnWidths,
             headerStyle: pw.TextStyle(
               fontSize: 10,
               fontWeight: pw.FontWeight.bold,
@@ -2547,12 +2659,14 @@ class FraisScolaires {
             const pw.BoxDecoration(color: PdfColors.indigo),
             cellStyle:   const pw.TextStyle(fontSize: 10),
             cellHeight:  22,
+            cellPadding:
+            const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
             cellAlignments: {
               0: pw.Alignment.center,
               1: pw.Alignment.centerLeft,
               2: pw.Alignment.centerLeft,
               3: pw.Alignment.centerLeft,
-              4: pw.Alignment.center,
+              4: pw.Alignment.centerLeft,
             },
             oddRowDecoration:
             const pw.BoxDecoration(color: PdfColors.indigo50),
@@ -2603,11 +2717,18 @@ class FraisScolaires {
       ]);
     }
 
+    // ⚡ NOUVEAU — largeurs de colonnes explicites : "Classe" et la
+    // colonne "Payé / Requis" (qui contient deux montants) reçoivent
+    // suffisamment de place pour ne jamais être écrasées.
+    final columnWidths =
+    _buildColumnWidths([0.5, 1.5, 1.5, 1.5, 1.4, 1.9]);
+
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(36),
+        // ⚡ NOUVEAU — paysage : plus de largeur pour les six colonnes.
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
           pw.Center(
             child: pw.Text(
@@ -2650,6 +2771,7 @@ class FraisScolaires {
               'Payé / Requis ($mois)',
             ],
             data: rows,
+            columnWidths: columnWidths,
             headerStyle: pw.TextStyle(
               fontSize: 9,
               fontWeight: pw.FontWeight.bold,
@@ -2660,12 +2782,14 @@ class FraisScolaires {
             ),
             cellStyle:  const pw.TextStyle(fontSize: 9),
             cellHeight: 22,
+            cellPadding:
+            const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
             cellAlignments: {
               0: pw.Alignment.center,
               1: pw.Alignment.centerLeft,
               2: pw.Alignment.centerLeft,
               3: pw.Alignment.centerLeft,
-              4: pw.Alignment.center,
+              4: pw.Alignment.centerLeft,
               5: pw.Alignment.center,
             },
             oddRowDecoration: pw.BoxDecoration(
@@ -2780,11 +2904,20 @@ class FraisScolaires {
       'Montant (FC)', 'Date de Paiement',
     ];
 
+    // ⚡ NOUVEAU — largeurs explicites : "Nom Complet" et "Type de Frais"
+    // reçoivent la part la plus généreuse, les colonnes numériques/date
+    // restent compactes sans jamais être écrasées.
+    final columnWidths =
+    _buildColumnWidths([0.6, 2.1, 1.0, 1.1, 1.5, 1.0, 1.3]);
+    final double cellFontSize = _tableCellFontSize(headers.length);
+    final double headerFontSize = _tableHeaderFontSize(headers.length);
+
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(40),
+        // ⚡ NOUVEAU — paysage : plus de largeur pour les sept colonnes.
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
           pw.Text(
             title,
@@ -2829,10 +2962,19 @@ class FraisScolaires {
             pw.TableHelper.fromTextArray(
               headers: headers,
               data: rows,
-              headerStyle:
-              pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
-              cellStyle: const pw.TextStyle(fontSize: 9),
+              columnWidths: columnWidths,
+              headerStyle: pw.TextStyle(
+                  fontSize: headerFontSize,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColors.white),
+              headerDecoration:
+              const pw.BoxDecoration(color: PdfColors.indigo),
+              cellStyle: pw.TextStyle(fontSize: cellFontSize),
               cellAlignment: pw.Alignment.centerLeft,
+              cellPadding:
+              const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+              oddRowDecoration:
+              const pw.BoxDecoration(color: PdfColors.indigo50),
             ),
           pw.SizedBox(height: 30),
           // ⚡ NOUVEAU — répartition par administration DÉDIÉE aux "Autres
