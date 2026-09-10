@@ -99,6 +99,14 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   // manuelle ont été retirés de cet écran (le personnel se trompait avec
   // des reçus réimprimés plus tard). La SEULE impression possible est
   // désormais automatique, immédiatement après le paiement.
+  //
+  // ⚡ CE COMPORTEMENT N'A PAS CHANGÉ dans cette version : la génération de
+  // reçu pour les "Autres Frais" continue de fonctionner exactement comme
+  // pour les frais principaux (anti-doublon via `printedReceiptKeys`, mise
+  // en file d'attente via `receiptQueue` si aucune imprimante n'est
+  // disponible, impression automatique différée via `flushReceiptQueue`).
+  // Le nouveau bouton de répartition par administration ajouté plus bas
+  // n'a aucune interaction avec ce système de reçus.
   // ==========================================================================
 
   Future<void> _payerUnSeul(Eleve eleve) async {
@@ -339,6 +347,301 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     );
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — ADMINISTRATIONS & RÉPARTITION POUR LES "AUTRES FRAIS"
+  // ==========================================================================
+  // Demande de la direction : pouvoir AJOUTER, MODIFIER et SUPPRIMER des
+  // administrations (nom + pourcentage) DIRECTEMENT depuis cet écran
+  // "Autres Frais de Paiement" — sans jamais avoir besoin d'aller dans
+  // Paramètres — et voir, pour le frais additionnel sélectionné, combien
+  // chaque administration reçoit en % et en FC. Exactement le même
+  // fonctionnement que pour les frais principaux, mais entièrement séparé.
+  //
+  // ⚠️⚠️⚠️ SÉPARATION TOTALE ET DÉFINITIVE AVEC LES FRAIS PRINCIPAUX ⚠️⚠️⚠️
+  // Tout ce bloc utilise EXCLUSIVEMENT les méthodes dédiées côté
+  // FraisScolaires : `getAutresFraisAdministrations`,
+  // `addAutreFraisAdministration`, `updateAutreFraisAdministration`,
+  // `deleteAutreFraisAdministration`, `getTotalPaidForAutreFrais` et
+  // `getAdminDistributionForAutreFrais`. Aucune de ces méthodes ne touche à
+  // `config.administrations` ni à `eleve.paid` — c'est-à-dire qu'AUCUNE
+  // information saisie ici ne peut jamais apparaître dans la page de
+  // "Répartition par Administration" des frais PRINCIPAUX, et
+  // inversement les administrations des frais principaux n'apparaissent
+  // JAMAIS ici. Les deux listes, les deux calculs et les deux écrans de
+  // gestion restent strictement indépendants, comme demandé, pour ne
+  // jamais créer de confusion ni de risque de calcul erroné entre écoles.
+  //
+  // Si aucune administration n'a encore été ajoutée pour les Autres Frais,
+  // l'écran continue de fonctionner normalement : le paiement des frais,
+  // les reçus et les totaux restent inchangés — seul un message invite à
+  // en ajouter une si l'utilisateur le souhaite.
+  // ==========================================================================
+  void _showAdminRepartitionDialog() {
+    if (selectedFrais == null) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final frais = selectedFrais!;
+          final double total =
+          widget.fraisScolaires.getTotalPaidForAutreFrais(frais);
+          final Map<String, double> distribution = widget.fraisScolaires
+              .getAdminDistributionForAutreFrais(frais);
+          final administrations =
+          widget.fraisScolaires.getAutresFraisAdministrations();
+
+          Future<void> refreshAndRebuild() async {
+            setDialogState(() {});
+            if (mounted) setState(() {});
+          }
+
+          void showAddOrEditAdminDialog({
+            String? idToEdit,
+            String initialNom = '',
+            double? initialPourcentage,
+          }) {
+            final nomCtrl = TextEditingController(text: initialNom);
+            final pourcentageCtrl = TextEditingController(
+              text: initialPourcentage != null
+                  ? initialPourcentage.toString()
+                  : '',
+            );
+            final isEditing = idToEdit != null;
+
+            showDialog(
+              context: ctx,
+              builder: (ctx2) => AlertDialog(
+                title: Text(isEditing
+                    ? "Modifier l'administration"
+                    : "Nouvelle Administration (Autres Frais)"),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: nomCtrl,
+                      decoration: const InputDecoration(
+                        labelText: "Nom de l'administration",
+                        hintText: "Ex: Direction Provinciale",
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: pourcentageCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: "Pourcentage (%)",
+                        hintText: "Ex: 10",
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx2),
+                    child: const Text("Annuler"),
+                  ),
+                  ElevatedButton(
+                    onPressed: () async {
+                      final nom = nomCtrl.text.trim();
+                      final pourcentage =
+                      double.tryParse(pourcentageCtrl.text.trim());
+                      if (nom.isEmpty ||
+                          pourcentage == null ||
+                          pourcentage < 0) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                                "Veuillez entrer un nom et un pourcentage valides"),
+                          ),
+                        );
+                        return;
+                      }
+                      if (isEditing) {
+                        await widget.fraisScolaires
+                            .updateAutreFraisAdministration(
+                          idToEdit,
+                          nom: nom,
+                          pourcentage: pourcentage,
+                        );
+                      } else {
+                        await widget.fraisScolaires
+                            .addAutreFraisAdministration(
+                          nom: nom,
+                          pourcentage: pourcentage,
+                        );
+                      }
+                      if (ctx2.mounted) Navigator.pop(ctx2);
+                      await refreshAndRebuild();
+                    },
+                    child: const Text("Enregistrer"),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          void confirmDeleteAdmin(String id, String nom) {
+            showDialog(
+              context: ctx,
+              builder: (ctx2) => AlertDialog(
+                title: const Text("Supprimer cette administration ?"),
+                content: Text(
+                  "Voulez-vous vraiment supprimer \"$nom\" de la liste des "
+                      "administrations des Autres Frais ?",
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx2),
+                    child: const Text("Annuler"),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white),
+                    onPressed: () async {
+                      await widget.fraisScolaires
+                          .deleteAutreFraisAdministration(id);
+                      if (ctx2.mounted) Navigator.pop(ctx2);
+                      await refreshAndRebuild();
+                    },
+                    child: const Text("Supprimer"),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return AlertDialog(
+            title: Text("Administrations — ${frais.nom}"),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Total Collecté (\"${frais.nom}\") : "
+                          "${total.toStringAsFixed(0)} FC",
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      "Ce montant ne comprend QUE les paiements de ce frais "
+                          "additionnel — il n'inclut jamais les frais "
+                          "mensuels principaux, et ces administrations "
+                          "n'affectent jamais la répartition des frais "
+                          "principaux.",
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          "Administrations (Autres Frais)",
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.indigo),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => showAddOrEditAdminDialog(),
+                          icon: const Icon(Icons.add, size: 16),
+                          label: const Text("Ajouter",
+                              style: TextStyle(fontSize: 12)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    if (administrations.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          "Aucune administration ajoutée pour le moment. "
+                              "Utilisez le bouton \"Ajouter\" ci-dessus pour "
+                              "en créer une (nom + pourcentage). Tant "
+                              "qu'aucune n'est ajoutée, le paiement des "
+                              "Autres Frais continue de fonctionner "
+                              "normalement.",
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      )
+                    else
+                      ...administrations.map((admin) {
+                        final montant = distribution[admin.nom] ?? 0.0;
+                        return Padding(
+                          padding:
+                          const EdgeInsets.symmetric(vertical: 3),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      "${admin.nom} "
+                                          "(${admin.pourcentage.toStringAsFixed(0)}%)",
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w500),
+                                    ),
+                                    Text(
+                                      "${montant.toStringAsFixed(0)} FC",
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.indigo,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.edit,
+                                    size: 18, color: Colors.indigo),
+                                tooltip: "Modifier",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 32, minHeight: 32),
+                                onPressed: () => showAddOrEditAdminDialog(
+                                  idToEdit: admin.id,
+                                  initialNom: admin.nom,
+                                  initialPourcentage: admin.pourcentage,
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline,
+                                    size: 18, color: Colors.red),
+                                tooltip: "Supprimer",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 32, minHeight: 32),
+                                onPressed: () => confirmDeleteAdmin(
+                                    admin.id, admin.nom),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("Fermer"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final fraisList = widget.fraisScolaires.getAutresFrais();
@@ -348,11 +651,20 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
         title: const Text("Autres Frais de Paiement"),
         actions: [
           // ⚡ CORRIGÉ — le bouton "Réimprimer un reçu" a été retiré (sur
-          // demande de la direction) ; seul le bouton des totaux reste.
+          // demande de la direction) ; le bouton des totaux reste.
           IconButton(
             icon: const Icon(Icons.bar_chart),
             tooltip: "Totaux par classe et par option",
             onPressed: selectedFrais == null ? null : _showTotalsDialog,
+          ),
+          // ⚡ NOUVEAU — accès rapide, depuis l'AppBar, à la gestion des
+          // administrations (ajout/modification/suppression) et à la
+          // répartition en % pour le frais actuellement sélectionné.
+          IconButton(
+            icon: const Icon(Icons.account_balance),
+            tooltip: "Administrations (Autres Frais)",
+            onPressed:
+            selectedFrais == null ? null : _showAdminRepartitionDialog,
           ),
         ],
       ),
@@ -398,23 +710,41 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
               ],
             ),
           ),
+          // ⚡ NOUVEAU — dès qu'un frais est sélectionné, le bouton de
+          // répartition par administration apparaît EN HAUT de la liste
+          // des élèves, juste à côté du bouton "Voir les totaux" déjà
+          // existant (regroupés dans un Wrap pour rester lisibles même
+          // sur un écran étroit).
           if (selectedFrais != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Text(
-                      "${_eligibleFiltered.length} élève(s) concerné(s) — cochez "
-                          "ceux qui payent, ou utilisez le bouton paiement direct.",
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
+                  Text(
+                    "${_eligibleFiltered.length} élève(s) concerné(s) — cochez "
+                        "ceux qui payent, ou utilisez le bouton paiement direct.",
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
                   ),
-                  TextButton.icon(
-                    onPressed: _showTotalsDialog,
-                    icon: const Icon(Icons.bar_chart, size: 18),
-                    label: const Text("Voir les totaux",
-                        style: TextStyle(fontSize: 12)),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      TextButton.icon(
+                        onPressed: _showTotalsDialog,
+                        icon: const Icon(Icons.bar_chart, size: 18),
+                        label: const Text("Voir les totaux",
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                      TextButton.icon(
+                        onPressed: _showAdminRepartitionDialog,
+                        icon: const Icon(Icons.account_balance, size: 18),
+                        label: const Text(
+                            "Administrations & Répartition",
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                    ],
                   ),
                 ],
               ),

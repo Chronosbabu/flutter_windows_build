@@ -12,6 +12,7 @@ import '../models.dart';
 import '../services/epson_printer_service.dart';
 import 'recovery_screen.dart';
 import 'aide.dart';
+import 'grille_frais_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -73,6 +74,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _openAide() {
     Navigator.push(context,
         MaterialPageRoute(builder: (_) => const AideScreen()));
+  }
+
+  // ⚡ NOUVEAU — Ouvre l'écran de consultation "Grille des Frais"
+  // (100% lecture seule : montants mensuels par section/classe + liste
+  // des autres frais avec leur état de collecte). Toute modification
+  // continue de se faire ici, dans les Paramètres.
+  void _openGrilleFrais() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => GrilleFraisScreen(
+          fraisScolaires: widget.fraisScolaires,
+        ),
+      ),
+    );
   }
 
   // ====================================================================
@@ -1020,6 +1036,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       appBar: AppBar(
         title: const Text("Paramètres"),
         actions: [
+          // ⚡ NOUVEAU — Accès rapide à la Grille des Frais (lecture
+          // seule) : vue consolidée par section/classe/mois et vue des
+          // autres frais avec leur taux de collecte.
+          IconButton(
+            icon: const Icon(Icons.table_chart),
+            tooltip: "Grille des Frais",
+            onPressed: _openGrilleFrais,
+          ),
           IconButton(
             icon: const Icon(Icons.help_outline),
             tooltip: "Aide",
@@ -1146,9 +1170,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(),
 
             // ==================== FRAIS MENSUEL ====================
-            const Text("Frais Mensuel par Section ou par Classe",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Expanded(
+                  child: Text("Frais Mensuel par Section ou par Classe",
+                      style: TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+                // ⚡ NOUVEAU — bouton d'accès direct à la vue de
+                // consultation complète (lecture seule) de tous les
+                // frais, utile pour vérifier rapidement l'ensemble de
+                // la grille sans avoir à cliquer section par section.
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.table_chart, size: 18),
+                  label: const Text("Voir la grille complète"),
+                  onPressed: _openGrilleFrais,
+                ),
+              ],
+            ),
             const SizedBox(height: 6),
             const Text(
               "Choisissez \"Toutes les classes\" pour fixer le frais de toute "

@@ -139,6 +139,47 @@ class AutreFraisPaiement {
         '${two(date.hour)}:${two(date.minute)}';
   }
 }
+// ==========================================================================
+// ⚡ NOUVEAU — ADMINISTRATION DÉDIÉE AUX "AUTRES FRAIS DE PAIEMENT"
+// ==========================================================================
+// ⚠️ IMPORTANT — Cette classe est VOLONTAIREMENT SÉPARÉE de la classe
+// `Administration` utilisée par `config.administrations` (celle des frais
+// mensuels PRINCIPAUX, définie dans models.dart et gérée dans Paramètres >
+// "Administrations & Répartition (%)"). Les deux ne partagent AUCUNE
+// donnée, AUCUNE liste, AUCUN calcul commun :
+//   - `config.administrations`         -> UNIQUEMENT les frais principaux.
+//   - `autresFraisAdministrations`     -> UNIQUEMENT les "Autres Frais".
+// Cette séparation stricte est intentionnelle et ne doit JAMAIS être
+// fusionnée : l'application est utilisée par plusieurs écoles, et un
+// mélange entre les deux systèmes de répartition casserait la confiance
+// des utilisateurs dans des calculs financiers déjà validés et utilisés en
+// production pour les frais principaux. Ne jamais faire pointer l'une vers
+// l'autre, ni partager un pourcentage ou un nom entre les deux listes.
+// ==========================================================================
+class AutreFraisAdministration {
+  String id;
+  String nom;
+  double pourcentage;
+
+  AutreFraisAdministration({
+    required this.id,
+    required this.nom,
+    required this.pourcentage,
+  });
+
+  factory AutreFraisAdministration.fromJson(Map<String, dynamic> json) =>
+      AutreFraisAdministration(
+        id: json['id'] as String? ?? '',
+        nom: json['nom'] as String? ?? '',
+        pourcentage: (json['pourcentage'] as num?)?.toDouble() ?? 0.0,
+      );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'nom': nom,
+    'pourcentage': pourcentage,
+  };
+}
 class RepartitionDetail {
   final String label;
   final double total;
@@ -239,6 +280,11 @@ class FraisScolaires {
   Map<String, List<Depense>> depensesByYear = {};
   List<AutreFrais> autresFrais = [];
   Map<String, List<AutreFraisPaiement>> autresFraisPaiementsByYear = {};
+  // ⚡ NOUVEAU — Liste d'administrations DÉDIÉE aux "Autres Frais de
+  // Paiement", totalement indépendante de `config.administrations` (qui
+  // reste réservée aux frais mensuels principaux). Voir les commentaires
+  // détaillés sur la classe `AutreFraisAdministration` plus haut.
+  List<AutreFraisAdministration> autresFraisAdministrations = [];
   String? hiddenCodeHash;
   String? hiddenCodeSalt;
   List<AdminAuditLog> adminAuditLog = [];
@@ -845,6 +891,10 @@ class FraisScolaires {
             (key, value) =>
             MapEntry(key, value.map((p) => p.toJson()).toList()),
       ),
+      // ⚡ NOUVEAU — administrations dédiées aux Autres Frais (séparées de
+      // config.administrations, incluses dans config.toJson() ci-dessus).
+      'autresFraisAdministrations':
+      autresFraisAdministrations.map((a) => a.toJson()).toList(),
       'hiddenCodeHash': hiddenCodeHash,
       'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
@@ -1580,6 +1630,163 @@ class FraisScolaires {
     list.sort((a, b) => b.date.compareTo(a.date));
     return list;
   }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — RÉPARTITION PAR ADMINISTRATION POUR UN "AUTRE FRAIS" PRÉCIS
+  // ==========================================================================
+  // Demande de la direction : pouvoir gérer des administrations et consulter
+  // leur répartition en %, DIRECTEMENT depuis l'écran "Autres Frais de
+  // Paiement" (et non plus depuis les Paramètres), pour l'argent collecté
+  // sur le frais additionnel actuellement sélectionné (ex: "Frais de
+  // l'État", "Frais d'Aide"...).
+  //
+  // ⚠️⚠️⚠️ SÉPARATION TOTALE ET DÉFINITIVE AVEC LES FRAIS PRINCIPAUX ⚠️⚠️⚠️
+  // Ce bloc utilise EXCLUSIVEMENT :
+  //   - la liste `autresFraisAdministrations` (nouvelle, dédiée),
+  //   - la fonction `calculateAutresFraisAdminDistribution` (nouvelle,
+  //     dédiée),
+  //   - les paiements de `autresFraisPaiementsByYear`.
+  // Il n'utilise JAMAIS, et ne doit JAMAIS utiliser :
+  //   - `config.administrations` (réservée aux frais principaux),
+  //   - `calculateAdminDistribution` (réservée aux frais principaux),
+  //   - `eleve.paid` / `getStudentTotalPaid` (alimentés uniquement par les
+  //     frais principaux via `handlePayment`).
+  // La page "Répartition" des frais PRINCIPAUX (`getRepartitionForOption` /
+  // `getSousSectionsForOption`) reste donc strictement intacte et ne peut
+  // structurellement recevoir aucune donnée issue des "Autres Frais" — les
+  // deux systèmes ne se croisent à aucun moment, dans aucune direction.
+  // Cette règle est absolue : l'application sert plusieurs écoles et une
+  // fuite entre les deux calculs financiers casserait la confiance des
+  // utilisateurs. Si une évolution future doit toucher à ce bloc, elle doit
+  // continuer à n'utiliser que les éléments listés ci-dessus.
+  //
+  // Si aucune administration n'a été ajoutée pour les "Autres Frais"
+  // (`autresFraisAdministrations` vide), tout le reste de l'application
+  // continue de fonctionner normalement : le paiement des autres frais, les
+  // reçus, les totaux par classe/option restent inchangés. Seule la
+  // répartition par administration affiche alors "aucune administration
+  // configurée" au lieu d'une liste vide silencieuse.
+  //
+  // Filtres [sectionFilter] / [classFilter] optionnels : permettent de
+  // limiter le calcul à une section ou une classe précise (utilisés par le
+  // rapport PDF). Laissés à `null` (par défaut), le calcul porte sur TOUS
+  // les élèves ayant payé ce frais pour l'année en cours (ou l'année
+  // [year] si fournie) — c'est ce que l'écran "Autres Frais de Paiement"
+  // utilise pour son bouton de répartition rapide.
+  // ==========================================================================
+  double getTotalPaidForAutreFrais(
+      AutreFrais frais, {
+        String? year,
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final y = year ?? currentYear;
+    Iterable<AutreFraisPaiement> paiements =
+    (autresFraisPaiementsByYear[y] ?? [])
+        .where((p) => p.autreFraisId == frais.id);
+
+    if (sectionFilter != null || classFilter != null) {
+      paiements = paiements.where((p) {
+        Eleve? eleve;
+        for (final e in currentData.eleves) {
+          if (e.id == p.eleveId) {
+            eleve = e;
+            break;
+          }
+        }
+        if (eleve == null) return false;
+        if (sectionFilter != null && eleve.section != sectionFilter) {
+          return false;
+        }
+        if (classFilter != null && eleve.classe != classFilter) {
+          return false;
+        }
+        return true;
+      });
+    }
+
+    return paiements.fold(0.0, (sum, p) => sum + p.montant);
+  }
+
+  /// ⚡ NOUVEAU — Calcule la répartition (nom -> montant en FC) UNIQUEMENT à
+  /// partir de `autresFraisAdministrations` (jamais `config.administrations`).
+  /// Fonction miroir de `calculateAdminDistribution`, mais totalement isolée
+  /// et dédiée aux "Autres Frais de Paiement". Si `autresFraisAdministrations`
+  /// est vide, retourne une carte vide sans erreur.
+  Map<String, double> calculateAutresFraisAdminDistribution(
+      double totalAmount) {
+    final distribution = <String, double>{};
+    for (var admin in autresFraisAdministrations) {
+      distribution[admin.nom] = totalAmount * (admin.pourcentage / 100);
+    }
+    return distribution;
+  }
+
+  /// Répartition par administration (nom -> montant en FC) pour le total
+  /// réellement collecté sur [frais]. Calcul isolé, basé uniquement sur
+  /// `autresFraisPaiementsByYear` et sur les administrations dédiées
+  /// `autresFraisAdministrations` — jamais sur celles des frais principaux.
+  Map<String, double> getAdminDistributionForAutreFrais(
+      AutreFrais frais, {
+        String? year,
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final double total = getTotalPaidForAutreFrais(
+      frais,
+      year: year,
+      sectionFilter: sectionFilter,
+      classFilter: classFilter,
+    );
+    return calculateAutresFraisAdminDistribution(total);
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — GESTION (CRUD) DES ADMINISTRATIONS DÉDIÉES AUX "AUTRES
+  // FRAIS DE PAIEMENT"
+  // ==========================================================================
+  // Ajout, modification et suppression d'administrations pour les "Autres
+  // Frais" — accessible DIRECTEMENT depuis l'écran "Autres Frais de
+  // Paiement" (voir AutresFraisScreen), sans jamais passer par les
+  // Paramètres et sans jamais toucher à `config.administrations`.
+  // ==========================================================================
+  List<AutreFraisAdministration> getAutresFraisAdministrations() =>
+      List<AutreFraisAdministration>.from(autresFraisAdministrations);
+
+  Future<AutreFraisAdministration> addAutreFraisAdministration({
+    required String nom,
+    required double pourcentage,
+  }) async {
+    final admin = AutreFraisAdministration(
+      id: 'AFA${DateTime.now().millisecondsSinceEpoch}',
+      nom: nom.trim(),
+      pourcentage: pourcentage,
+    );
+    autresFraisAdministrations.add(admin);
+    await saveData();
+    return admin;
+  }
+
+  Future<void> updateAutreFraisAdministration(
+      String id, {
+        required String nom,
+        required double pourcentage,
+      }) async {
+    for (var a in autresFraisAdministrations) {
+      if (a.id == id) {
+        a.nom = nom.trim();
+        a.pourcentage = pourcentage;
+        break;
+      }
+    }
+    await saveData();
+  }
+
+  Future<void> deleteAutreFraisAdministration(String id) async {
+    autresFraisAdministrations.removeWhere((a) => a.id == id);
+    await saveData();
+  }
+
   List<String> getOptions() => List<String>.from(config.sections);
   RepartitionDetail getRepartitionForOption(String option) {
     final total = getStudentsBySection(option)
@@ -2475,6 +2682,20 @@ class FraisScolaires {
       enOrdre ? 'en_ordre_$mois' : 'pas_en_ordre_$mois',
     );
   }
+
+  // ==========================================================================
+  // RAPPORT "AUTRES FRAIS DE PAIEMENT"
+  // ==========================================================================
+  // ⚡ RAPPEL — ce rapport contenait DÉJÀ le bloc "RÉPARTITION GLOBALE PAR
+  // ADMINISTRATION" (basé sur `calculateAdminDistribution(total)`, le total
+  // étant calculé uniquement à partir des paiements d'"Autres Frais"
+  // filtrés ci-dessous — jamais mélangé avec les frais principaux). Ce
+  // comportement est conservé tel quel, il fonctionnait déjà correctement.
+  // Le nouveau bouton ajouté dans l'écran "Autres Frais de Paiement"
+  // (`getAdminDistributionForAutreFrais`) permet simplement de consulter le
+  // même type d'information EN AMONT, avant même de générer le PDF, pour un
+  // frais précis actuellement sélectionné.
+  // ==========================================================================
   Future<Map<String, dynamic>> generateAutresFraisPdf({
     required String filename,
     String? autreFraisId,
@@ -2536,7 +2757,10 @@ class FraisScolaires {
       }
     }
 
-    final adminDistribution = calculateAdminDistribution(total);
+    // ⚡ NOUVEAU — utilise EXCLUSIVEMENT les administrations dédiées aux
+    // "Autres Frais" (`autresFraisAdministrations`), jamais
+    // `config.administrations` (réservée aux frais principaux).
+    final adminDistribution = calculateAutresFraisAdminDistribution(total);
 
     String title = "RAPPORT — AUTRES FRAIS DE PAIEMENT";
     if (fraisSelectionne != null) {
@@ -2611,15 +2835,27 @@ class FraisScolaires {
               cellAlignment: pw.Alignment.centerLeft,
             ),
           pw.SizedBox(height: 30),
+          // ⚡ NOUVEAU — répartition par administration DÉDIÉE aux "Autres
+          // Frais" (basée sur `autresFraisAdministrations`, totalement
+          // indépendante de `config.administrations`). Basée sur `total`,
+          // calculé ci-dessus exclusivement à partir des paiements de ce
+          // rapport. Elle n'apparaît QUE dans ce rapport-ci et n'est
+          // jamais ajoutée au rapport de répartition des frais principaux.
           pw.Text(
-            "RÉPARTITION GLOBALE PAR ADMINISTRATION",
+            "RÉPARTITION GLOBALE PAR ADMINISTRATION (AUTRES FRAIS)",
             style:
             pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
           ),
           pw.SizedBox(height: 10),
-          if (total == 0)
+          if (autresFraisAdministrations.isEmpty)
             pw.Text(
-              "Aucun montant à répartir.",
+              "Aucune administration configurée pour les Autres Frais.",
+              style:
+              const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+            )
+          else if (total == 0)
+            pw.Text(
+              "Aucun montant à répartir pour ce filtre.",
               style:
               const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
             )
@@ -2627,7 +2863,7 @@ class FraisScolaires {
             ...adminDistribution.entries.map(
                   (entry) => pw.Text(
                 "${entry.key} : ${entry.value.toStringAsFixed(0)} FC "
-                    "(${config.administrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}%)",
+                    "(${autresFraisAdministrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}%)",
               ),
             ),
           ..._buildSignatureSection(city),
@@ -2731,6 +2967,17 @@ class FraisScolaires {
                   .toList(),
             ),
           );
+        }
+        // ⚡ NOUVEAU — chargement des administrations dédiées aux Autres
+        // Frais. Absentes d'une ancienne sauvegarde (avant cette version),
+        // la liste reste simplement vide : aucune erreur, aucun impact sur
+        // le reste des données.
+        if (data['autresFraisAdministrations'] != null) {
+          autresFraisAdministrations =
+              (data['autresFraisAdministrations'] as List<dynamic>)
+                  .map((e) => AutreFraisAdministration.fromJson(
+                  e as Map<String, dynamic>))
+                  .toList();
         }
 
         if (history.containsKey(currentYear)) {
@@ -2865,6 +3112,11 @@ class FraisScolaires {
             (key, value) =>
             MapEntry(key, value.map((p) => p.toJson()).toList()),
       ),
+      // ⚡ NOUVEAU — administrations dédiées aux Autres Frais, sauvegardées
+      // séparément de config.administrations (déjà incluses dans
+      // config.toJson()).
+      'autresFraisAdministrations':
+      autresFraisAdministrations.map((a) => a.toJson()).toList(),
       'hiddenCodeHash': hiddenCodeHash,
       'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
@@ -2901,6 +3153,7 @@ class FraisScolaires {
     depensesByYear = {}; // ⚡ NOUVEAU
     autresFrais = []; // ⚡ NOUVEAU
     autresFraisPaiementsByYear = {}; // ⚡ NOUVEAU
+    autresFraisAdministrations = []; // ⚡ NOUVEAU
     hiddenCodeHash = null; // ⚡ NOUVEAU
     hiddenCodeSalt = null; // ⚡ NOUVEAU
     adminAuditLog = []; // ⚡ NOUVEAU
@@ -2993,6 +3246,10 @@ class FraisScolaires {
               (key, value) =>
               MapEntry(key, value.map((p) => p.toJson()).toList()),
         ),
+        // ⚡ NOUVEAU — administrations dédiées aux Autres Frais, envoyées
+        // au serveur séparément de config.administrations.
+        'autresFraisAdministrations':
+        autresFraisAdministrations.map((a) => a.toJson()).toList(),
         'hiddenCodeHash': hiddenCodeHash,
         'hiddenCodeSalt': hiddenCodeSalt,
         'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
@@ -3231,6 +3488,25 @@ class FraisScolaires {
           }
         } else {
           autresFraisPaiementsByYear[year] = serverList;
+        }
+      }
+    }
+    // ⚡ NOUVEAU — fusion des administrations dédiées aux Autres Frais,
+    // anti-doublon par id, exactement comme pour `autresFrais` ci-dessus.
+    // Totalement indépendant de la fusion de `config.administrations`
+    // (qui se fait via `config = SchoolConfig.fromJson(...)` plus haut et
+    // reste réservée aux frais principaux).
+    if (serverData['autresFraisAdministrations'] != null) {
+      final serverAutresFraisAdmins =
+      (serverData['autresFraisAdministrations'] as List<dynamic>)
+          .map((e) =>
+          AutreFraisAdministration.fromJson(e as Map<String, dynamic>))
+          .toList();
+      final existingAdminIds =
+      autresFraisAdministrations.map((a) => a.id).toSet();
+      for (var a in serverAutresFraisAdmins) {
+        if (!existingAdminIds.contains(a.id)) {
+          autresFraisAdministrations.add(a);
         }
       }
     }

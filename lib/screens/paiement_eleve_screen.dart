@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
+import '../services/epson_printer_service.dart';
 
 class PaiementEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -36,6 +41,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   int _failedAttempts = 0;
   DateTime? _lockedUntil;
+
+  // ⚡ NOUVEAU — verrou anti double-clic pendant une réimpression
+  bool _reprinting = false;
 
   @override
   void initState() {
@@ -475,6 +483,14 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         child: Wrap(
           children: [
             ListTile(
+              leading: const Icon(Icons.print, color: Colors.indigo),
+              title: const Text("Réimprimer ce reçu (duplicata)"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _reprintTransactionReceipt(eleve, transaction);
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.edit, color: Colors.blue),
               title: const Text("Modifier ce paiement"),
               onTap: () {
@@ -494,6 +510,96 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         ),
       ),
     );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — RÉIMPRESSION MANUELLE D'UN PAIEMENT (DUPLICATA)
+  // ==========================================================================
+  // Un clic sur un paiement dans l'historique (icône imprimante) réimprime
+  // directement le reçu correspondant à CE paiement précis, avec la mention
+  // "DUPLICATA" clairement visible sur le ticket. Cette fonction n'utilise
+  // JAMAIS `printOrQueuePrincipalReceipt` (qui bloque toute réimpression dès
+  // qu'une tentative a été considérée comme réussie une première fois) : elle
+  // appelle directement le service d'impression, et ne touche NI aux
+  // montants payés (`eleve.paid`) NI à l'historique des transactions
+  // (`eleve.transactions`). Aucun nouveau paiement n'est donc créé — un seul
+  // paiement reste enregistré, seul le PAPIER peut être réimprimé autant de
+  // fois que nécessaire (ex: ticket sorti à moitié suite à un problème
+  // d'imprimante).
+  // ==========================================================================
+  Future<void> _reprintTransactionReceipt(
+      Eleve eleve, Map<String, dynamic> transaction) async {
+    if (_reprinting) return;
+    setState(() => _reprinting = true);
+
+    try {
+      final printerName = await _currentPrinterNameForReprint();
+      if (printerName.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  "Aucune imprimante configurée dans les Paramètres."),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      final logoBytes = await _loadLogoBytesForReprint();
+
+      final bool ok = await EscPosPrinterService.printTransactionsReceipt(
+        printerName: printerName,
+        schoolName: widget.fraisScolaires.config.schoolName,
+        currentYear: widget.fraisScolaires.currentYear,
+        studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+        studentId: eleve.id,
+        classe: eleve.classe,
+        section: eleve.section,
+        transactions: [transaction],
+        logoBytes: logoBytes,
+        duplicata: true,
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              ok
+                  ? "🖨️ Reçu réimprimé (duplicata) avec succès"
+                  : "❌ Échec de l'impression — vérifiez que "
+                  "l'imprimante est bien branchée et prête, puis "
+                  "réessayez",
+            ),
+            backgroundColor: ok ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _reprinting = false);
+    }
+  }
+
+  Future<String> _currentPrinterNameForReprint() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('printer_name') ?? '';
+  }
+
+  Future<Uint8List?> _loadLogoBytesForReprint() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final hasLogo = prefs.getBool('has_logo') ?? false;
+      if (!hasLogo) return null;
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/school_logo.png');
+      if (await file.exists()) {
+        return await file.readAsBytes();
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 
   void _confirmCancelTransaction(
@@ -1024,9 +1130,10 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                           'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC',
                     ),
                     // ⚡ CORRIGÉ — le bouton de réimpression manuelle a été
-                    // retiré (sur demande de la direction). Seule
-                    // l'impression automatique, juste après un paiement,
-                    // reste possible.
+                    // retiré de la liste principale (sur demande de la
+                    // direction). La réimpression manuelle reste possible,
+                    // mais uniquement paiement par paiement, depuis
+                    // l'historique du mois (voir _showMonthDetailDialog).
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -1168,9 +1275,24 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                       ),
                     ),
                   const SizedBox(height: 12),
-                  const Text("Historique des paiements :",
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 13)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("Historique des paiements :",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      // ⚡ NOUVEAU — rappel visuel : cliquer sur l'icône
+                      // imprimante d'un paiement ci-dessous réimprime
+                      // directement son reçu (duplicata), sans passer par
+                      // le mode administrateur.
+                      if (historique.isNotEmpty)
+                        const Text(
+                          "🖨️ = réimprimer",
+                          style: TextStyle(
+                              fontSize: 10.5, color: Colors.grey),
+                        ),
+                    ],
+                  ),
                   const SizedBox(height: 6),
                   if (historique.isEmpty)
                     const Text("Aucun paiement enregistré pour ce mois.",
@@ -1178,7 +1300,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                   else
                     ConstrainedBox(
                       constraints:
-                      const BoxConstraints(maxHeight: 220),
+                      const BoxConstraints(maxHeight: 260),
                       child: ListView.builder(
                         shrinkWrap: true,
                         itemCount: historique.length,
@@ -1211,14 +1333,37 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                                   color: Colors.green),
                             )
                                 : null,
-                            // ⚡ CORRIGÉ — le bouton de réimpression
-                            // manuelle par paiement a été retiré (sur
-                            // demande de la direction) : seul le montant
-                            // reste affiché.
-                            trailing: Text(
-                              "${montant.toStringAsFixed(0)} FC",
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold),
+                            // ⚡ NOUVEAU — un simple clic sur l'icône
+                            // imprimante réimprime directement le reçu de
+                            // CE paiement précis (marqué DUPLICATA), sans
+                            // toucher aux montants ni créer de nouveau
+                            // paiement. Le montant reste affiché à droite.
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  "${montant.toStringAsFixed(0)} FC",
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  icon: _reprinting
+                                      ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2),
+                                  )
+                                      : const Icon(Icons.print,
+                                      color: Colors.indigo, size: 20),
+                                  tooltip: "Réimprimer ce reçu",
+                                  onPressed: _reprinting
+                                      ? null
+                                      : () =>
+                                      _reprintTransactionReceipt(eleve, t),
+                                ),
+                              ],
                             ),
                             onTap: _adminModeUnlocked
                                 ? () {
@@ -1329,6 +1474,12 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                   // disponible (même après extinction complète de
                   // l'ordinateur ou de l'application) — voir
                   // `flushReceiptQueue`, appelée à l'ouverture de cet écran.
+                  // Si cette impression automatique venait à échouer/sortir
+                  // à moitié à cause d'un problème matériel, le paiement
+                  // reste ouvert dans l'historique du mois (voir
+                  // _showMonthDetailDialog) où l'icône imprimante permet de
+                  // réimprimer ce paiement précis en duplicata, à tout
+                  // moment, sans créer de nouveau paiement.
                   // ==========================================================
                   final printed = await widget.fraisScolaires
                       .printOrQueuePrincipalReceipt(
