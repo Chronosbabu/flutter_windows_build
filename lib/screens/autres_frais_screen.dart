@@ -16,6 +16,15 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   final Set<String> selectedStudentIds = {};
   bool _processing = false;
 
+  // ⚡ NOUVEAU — Filtres optionnels Section / Classe pour la fenêtre de
+  // paiement. Ils ne changent JAMAIS l'éligibilité au frais (celle-ci
+  // reste définie par le scope du frais dans les Paramètres) : ils
+  // servent uniquement à naviguer plus facilement dans la liste des
+  // élèves et à consulter la répartition par administration limitée à
+  // une section/classe précise (voir `_showAdminRepartitionDialog`).
+  String? filterSection;
+  String? filterClasse;
+
   @override
   void initState() {
     super.initState();
@@ -52,8 +61,19 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   List<Eleve> get _eligibleFiltered {
     if (selectedFrais == null) return [];
     final query = searchController.text.toLowerCase().trim();
-    final eligible =
+    var eligible =
     widget.fraisScolaires.getEligibleStudentsForAutreFrais(selectedFrais!);
+
+    // ⚡ NOUVEAU — filtres Section/Classe, purement pour la navigation
+    // dans cette fenêtre de paiement (n'affecte jamais l'éligibilité
+    // définie dans les Paramètres).
+    if (filterSection != null) {
+      eligible = eligible.where((e) => e.section == filterSection).toList();
+    }
+    if (filterClasse != null) {
+      eligible = eligible.where((e) => e.classe == filterClasse).toList();
+    }
+
     if (query.isEmpty) return eligible;
     return eligible.where((e) {
       final idMatch = e.id.toLowerCase().contains(query);
@@ -105,8 +125,10 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   // pour les frais principaux (anti-doublon via `printedReceiptKeys`, mise
   // en file d'attente via `receiptQueue` si aucune imprimante n'est
   // disponible, impression automatique différée via `flushReceiptQueue`).
-  // Le nouveau bouton de répartition par administration ajouté plus bas
-  // n'a aucune interaction avec ce système de reçus.
+  // Le montant réellement imprimé/enregistré est désormais toujours celui
+  // résolu pour CET élève précis (voir `getMontantAutreFraisPourEleve`),
+  // qui peut varier selon sa section/classe si des exceptions ont été
+  // configurées pour ce frais.
   // ==========================================================================
 
   Future<void> _payerUnSeul(Eleve eleve) async {
@@ -176,13 +198,18 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
 
   void _confirmPaiementUnique(Eleve eleve) {
     if (selectedFrais == null) return;
+    // ⚡ NOUVEAU — montant réellement dû par CET élève (peut varier selon
+    // sa section/classe, voir FraisScolaires.getMontantAutreFraisPourEleve),
+    // affiché ici au lieu du montant unique `selectedFrais!.montant`.
+    final double montant = widget.fraisScolaires
+        .getMontantAutreFraisPourEleve(selectedFrais!, eleve);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(selectedFrais!.nom),
         content: Text(
           "Confirmer le paiement de "
-              "${selectedFrais!.montant.toStringAsFixed(0)} FC pour "
+              "${montant.toStringAsFixed(0)} FC pour "
               "${eleve.nom} ${eleve.prenom} (${eleve.classe}) ?",
         ),
         actions: [
@@ -357,6 +384,13 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   // chaque administration reçoit en % et en FC. Exactement le même
   // fonctionnement que pour les frais principaux, mais entièrement séparé.
   //
+  // ⚡ NOUVEAU — cette répartition respecte désormais les filtres
+  // Section/Classe actifs dans cet écran (`filterSection` / `filterClasse`).
+  // Sans filtre, elle couvre TOUJOURS l'argent collecté pour ce frais dans
+  // TOUTE l'école (comportement historique inchangé) — un seul frais, une
+  // seule liste d'administrations, une seule répartition globale, quel que
+  // soit le nombre de montants différents définis par section/classe.
+  //
   // ⚠️⚠️⚠️ SÉPARATION TOTALE ET DÉFINITIVE AVEC LES FRAIS PRINCIPAUX ⚠️⚠️⚠️
   // Tout ce bloc utilise EXCLUSIVEMENT les méthodes dédiées côté
   // FraisScolaires : `getAutresFraisAdministrations`,
@@ -384,12 +418,27 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
           final frais = selectedFrais!;
-          final double total =
-          widget.fraisScolaires.getTotalPaidForAutreFrais(frais);
+          final double total = widget.fraisScolaires.getTotalPaidForAutreFrais(
+            frais,
+            sectionFilter: filterSection,
+            classFilter: filterClasse,
+          );
           final Map<String, double> distribution = widget.fraisScolaires
-              .getAdminDistributionForAutreFrais(frais);
+              .getAdminDistributionForAutreFrais(
+            frais,
+            sectionFilter: filterSection,
+            classFilter: filterClasse,
+          );
           final administrations =
           widget.fraisScolaires.getAutresFraisAdministrations();
+
+          final String filtreLabel = (filterSection == null &&
+              filterClasse == null)
+              ? "Toute l'école"
+              : [
+            if (filterSection != null) "Section : $filterSection",
+            if (filterClasse != null) "Classe : $filterClasse",
+          ].join(' — ');
 
           Future<void> refreshAndRebuild() async {
             setDialogState(() {});
@@ -521,6 +570,22 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(20),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        "Filtre actif : $filtreLabel",
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.indigo),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
                     Text(
                       "Total Collecté (\"${frais.nom}\") : "
                           "${total.toStringAsFixed(0)} FC",
@@ -646,6 +711,14 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   Widget build(BuildContext context) {
     final fraisList = widget.fraisScolaires.getAutresFrais();
 
+    // ⚡ NOUVEAU — options de classe pour le filtre, dépendantes de la
+    // section choisie (utilise les classes AVEC sous-classe, comme
+    // affichées pour chaque élève, pour que le filtre corresponde
+    // exactement à `eleve.classe`).
+    final classesOptionsForFilter = filterSection != null
+        ? widget.fraisScolaires.getAllDisplayClassesForSection(filterSection!)
+        : <String>[];
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("Autres Frais de Paiement"),
@@ -659,7 +732,8 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           ),
           // ⚡ NOUVEAU — accès rapide, depuis l'AppBar, à la gestion des
           // administrations (ajout/modification/suppression) et à la
-          // répartition en % pour le frais actuellement sélectionné.
+          // répartition en % pour le frais actuellement sélectionné (et
+          // le filtre section/classe actif, s'il y en a un).
           IconButton(
             icon: const Icon(Icons.account_balance),
             tooltip: "Administrations (Autres Frais)",
@@ -683,19 +757,25 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                     labelText: "Type de frais",
                     border: OutlineInputBorder(),
                   ),
-                  items: fraisList
-                      .map(
-                        (f) => DropdownMenuItem(
+                  items: fraisList.map((f) {
+                    final hasExceptions = f.montantsParSection.isNotEmpty ||
+                        f.montantsParClasse.isNotEmpty;
+                    return DropdownMenuItem(
                       value: f,
                       child: Text(
-                          "${f.nom} — ${f.montant.toStringAsFixed(0)} FC (${_scopeLabel(f)})"),
-                    ),
-                  )
-                      .toList(),
+                          "${f.nom} — ${f.montant.toStringAsFixed(0)} FC (${_scopeLabel(f)})"
+                              "${hasExceptions ? ' • montants variables' : ''}"),
+                    );
+                  }).toList(),
                   onChanged: (value) {
                     setState(() {
                       selectedFrais = value;
                       selectedStudentIds.clear();
+                      // ⚡ NOUVEAU — on réinitialise les filtres quand on
+                      // change de type de frais, pour éviter un filtre
+                      // hérité qui ne correspondrait plus au nouveau frais.
+                      filterSection = null;
+                      filterClasse  = null;
                     });
                   },
                 ),
@@ -707,6 +787,53 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                     prefixIcon: Icon(Icons.search),
                   ),
                 ),
+                // ⚡ NOUVEAU — filtres optionnels Section / Classe, pour
+                // naviguer facilement même sur un frais "toute l'école".
+                if (selectedFrais != null) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButton<String>(
+                          isExpanded: true,
+                          value: filterSection,
+                          hint: const Text("Toutes les sections"),
+                          items: [
+                            const DropdownMenuItem<String>(
+                                value: null,
+                                child: Text("Toutes les sections")),
+                            ...widget.fraisScolaires.config.sections.map(
+                                    (s) => DropdownMenuItem(
+                                    value: s, child: Text(s))),
+                          ],
+                          onChanged: (v) => setState(() {
+                            filterSection = v;
+                            filterClasse  = null;
+                          }),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: DropdownButton<String>(
+                          isExpanded: true,
+                          value: filterClasse,
+                          hint: const Text("Toutes les classes"),
+                          items: [
+                            const DropdownMenuItem<String>(
+                                value: null,
+                                child: Text("Toutes les classes")),
+                            ...classesOptionsForFilter.map(
+                                    (c) => DropdownMenuItem(
+                                    value: c, child: Text(c))),
+                          ],
+                          onChanged: filterSection == null
+                              ? null
+                              : (v) => setState(() => filterClasse = v),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -758,6 +885,11 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                   final dejaPaye = widget.fraisScolaires
                       .hasPaidAutreFrais(eleve, selectedFrais!);
                   final isSelected = selectedStudentIds.contains(eleve.id);
+                  // ⚡ NOUVEAU — montant réellement dû par CET élève
+                  // (dépend de ses éventuelles exceptions par
+                  // section/classe pour ce frais).
+                  final double montantEleve = widget.fraisScolaires
+                      .getMontantAutreFraisPourEleve(selectedFrais!, eleve);
                   return Card(
                     margin:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
@@ -773,7 +905,8 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                       title: Text(
                           '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'),
                       subtitle: Text(
-                        'ID: ${eleve.id} | Classe: ${eleve.classe} (${eleve.section})',
+                        'ID: ${eleve.id} | Classe: ${eleve.classe} (${eleve.section}) | '
+                            'Montant: ${montantEleve.toStringAsFixed(0)} FC',
                       ),
                       // ⚡ CORRIGÉ — le bouton de réimpression manuelle a
                       // été retiré ; un élève déjà payé n'affiche plus

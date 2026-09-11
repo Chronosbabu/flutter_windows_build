@@ -62,6 +62,52 @@ class AutreFrais {
   String? classe;
   DateTime dateCreation;
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — MONTANTS VARIABLES SELON LA SECTION OU LA CLASSE
+  // ==========================================================================
+  // Demande de la direction : un "Autre Frais" (ex: "Frais de l'État") doit
+  // pouvoir s'appliquer à TOUTE l'école (scope = 'all') — donc une seule
+  // répartition par administration pour ce frais — tout en étant payé à un
+  // montant DIFFÉRENT selon la section ou la classe de l'élève (ex: le
+  // Secondaire paie plus que le Primaire).
+  //
+  // Avant cette version, un `AutreFrais` n'avait qu'UN SEUL montant valable
+  // pour tous les élèves éligibles. Créer plusieurs frais séparés (un par
+  // section/classe) aurait cassé la répartition globale par administration,
+  // puisque chaque frais a ses propres paiements et ses propres totaux.
+  //
+  // Solution : ce même frais garde un montant par défaut (`montant`), et
+  // peut désormais définir des EXCEPTIONS optionnelles :
+  //   - `montantsParSection` : nom de section -> montant (remplace le
+  //     montant par défaut pour TOUS les élèves de cette section, sauf
+  //     exception plus précise par classe).
+  //   - `montantsParClasse`  : clé "section|classeNumero" -> montant
+  //     (PRIORITÉ ABSOLUE, même au-dessus d'une exception par section).
+  // La clé de `montantsParClasse` utilise le même format que
+  // `FraisScolaires._classeKey` (section + numéro de classe SANS la
+  // sous-classe A/B/C), exactement comme pour les frais mensuels
+  // principaux (`config.feesByClasse`), pour rester cohérent avec le reste
+  // de l'application.
+  //
+  // Ces deux cartes sont optionnelles et VIDES par défaut : un frais créé
+  // sans aucune exception continue de fonctionner exactement comme avant
+  // (un seul montant pour tous les élèves éligibles). L'ÉLIGIBILITÉ (qui
+  // doit payer ce frais) reste déterminée UNIQUEMENT par `scope` /
+  // `section` / `classe`, comme avant — ces deux nouvelles cartes ne
+  // déterminent QUE le montant, une fois l'élève déjà reconnu éligible.
+  //
+  // Voir `FraisScolaires.getMontantAutreFraisPourEleve` pour la résolution
+  // du montant, utilisée automatiquement par `FraisScolaires.payAutreFrais`
+  // et `FraisScolaires.printOrQueueAutreFraisReceipt`. La répartition par
+  // administration (`getAdminDistributionForAutreFrais`) et les totaux
+  // (`getTotalPaidForAutreFrais`) n'ont besoin d'AUCUNE modification : ils
+  // sont déjà calculés à partir des paiements RÉELLEMENT enregistrés
+  // (`AutreFraisPaiement.montant`), qui reflètent maintenant automatiquement
+  // le montant correct par élève.
+  // ==========================================================================
+  Map<String, double> montantsParSection;
+  Map<String, double> montantsParClasse;
+
   AutreFrais({
     required this.id,
     required this.nom,
@@ -70,7 +116,12 @@ class AutreFrais {
     this.section,
     this.classe,
     DateTime? dateCreation,
-  }) : dateCreation = dateCreation ?? DateTime.now();
+    Map<String, double>? montantsParSection,
+    Map<String, double>? montantsParClasse,
+  })  : dateCreation = dateCreation ?? DateTime.now(),
+        montantsParSection = montantsParSection ?? {},
+        montantsParClasse = montantsParClasse ?? {};
+
   factory AutreFrais.fromJson(Map<String, dynamic> json) => AutreFrais(
     id: json['id'] as String? ?? '',
     nom: json['nom'] as String? ?? '',
@@ -81,7 +132,20 @@ class AutreFrais {
     dateCreation:
     DateTime.tryParse(json['dateCreation'] as String? ?? '') ??
         DateTime.now(),
+    // ⚡ NOUVEAU — absentes d'une ancienne sauvegarde, ces cartes restent
+    // simplement vides : aucune erreur, comportement identique à avant.
+    montantsParSection:
+    (json['montantsParSection'] as Map<String, dynamic>?)?.map(
+          (key, value) => MapEntry(key, (value as num).toDouble()),
+    ) ??
+        {},
+    montantsParClasse:
+    (json['montantsParClasse'] as Map<String, dynamic>?)?.map(
+          (key, value) => MapEntry(key, (value as num).toDouble()),
+    ) ??
+        {},
   );
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'nom': nom,
@@ -90,6 +154,9 @@ class AutreFrais {
     'section': section,
     'classe': classe,
     'dateCreation': dateCreation.toIso8601String(),
+    // ⚡ NOUVEAU
+    'montantsParSection': montantsParSection,
+    'montantsParClasse': montantsParClasse,
   };
 }
 class AutreFraisPaiement {
@@ -767,12 +834,19 @@ class FraisScolaires {
     final key = 'autre_frais|${eleve.id}|${frais.id}';
     if (isReceiptPrinted(key)) return false;
 
+    // ⚡ NOUVEAU — le montant imprimé sur le reçu doit refléter le montant
+    // RÉELLEMENT dû par CET élève précis (peut désormais varier selon sa
+    // section/classe si des exceptions ont été configurées pour ce frais —
+    // voir `getMontantAutreFraisPourEleve`), jamais un montant unique
+    // supposé valable pour tout le monde.
+    final double montant = getMontantAutreFraisPourEleve(frais, eleve);
+
     final data = <String, dynamic>{
       'titreFrais': frais.nom,
       'studentName': '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
       'classe': eleve.classe,
       'section': eleve.section,
-      'montant': frais.montant,
+      'montant': montant,
     };
 
     final printerName = await _currentPrinterName();
@@ -1639,6 +1713,103 @@ class FraisScolaires {
     autresFrais.removeWhere((f) => f.id == id);
     await saveData();
   }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MODIFICATION D'UN "AUTRE FRAIS" DÉJÀ CRÉÉ
+  // ==========================================================================
+  // Permet de corriger le nom, le montant par défaut et l'éligibilité
+  // (toute l'école / une section / une classe) d'un frais additionnel déjà
+  // créé, sans avoir à le supprimer et le recréer (ce qui aurait cassé
+  // l'historique des paiements déjà liés à son id). Les éventuelles
+  // exceptions par section/classe (`montantsParSection`/`montantsParClasse`)
+  // ne sont JAMAIS touchées par cette fonction — elles se gèrent séparément
+  // via les fonctions ci-dessous.
+  // ==========================================================================
+  Future<void> updateAutreFrais(
+      String id, {
+        required String nom,
+        required double montant,
+        required String scope,
+        String? section,
+        String? classe,
+      }) async {
+    for (var f in autresFrais) {
+      if (f.id == id) {
+        f.nom = nom.trim();
+        f.montant = montant;
+        f.scope = scope;
+        f.section = scope == 'all' ? null : section;
+        f.classe = scope == 'classe' ? classe : null;
+        break;
+      }
+    }
+    await saveData();
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — GESTION DES MONTANTS PAR SECTION / PAR CLASSE POUR UN
+  // "AUTRE FRAIS" PRÉCIS (ex: Frais de l'État payé différemment selon la
+  // section ou la classe, tout en restant UN SEUL frais pour toute l'école)
+  // ==========================================================================
+  /// Définit (ou remplace) le montant spécifique à payer pour [autreFraisId]
+  /// par TOUS les élèves de [section], sans toucher au montant par défaut
+  /// ni aux éventuelles exceptions par classe (qui restent prioritaires —
+  /// voir `getMontantAutreFraisPourEleve`).
+  Future<void> setMontantSectionPourAutreFrais(
+      String autreFraisId, String section, double montant) async {
+    for (var f in autresFrais) {
+      if (f.id == autreFraisId) {
+        f.montantsParSection[section] = montant;
+        break;
+      }
+    }
+    await saveData();
+  }
+
+  Future<void> removeMontantSectionPourAutreFrais(
+      String autreFraisId, String section) async {
+    for (var f in autresFrais) {
+      if (f.id == autreFraisId) {
+        f.montantsParSection.remove(section);
+        break;
+      }
+    }
+    await saveData();
+  }
+
+  /// Définit (ou remplace) le montant spécifique à payer pour
+  /// [autreFraisId] par les élèves d'une classe précise ([section] +
+  /// [classeNumero], sans la sous-classe A/B/C). Cette exception est
+  /// TOUJOURS prioritaire sur une exception par section et sur le montant
+  /// par défaut — voir `getMontantAutreFraisPourEleve`.
+  Future<void> setMontantClassePourAutreFrais(
+      String autreFraisId,
+      String section,
+      String classeNumero,
+      double montant,
+      ) async {
+    final key = _classeKey(section, classeNumero);
+    for (var f in autresFrais) {
+      if (f.id == autreFraisId) {
+        f.montantsParClasse[key] = montant;
+        break;
+      }
+    }
+    await saveData();
+  }
+
+  Future<void> removeMontantClassePourAutreFrais(
+      String autreFraisId, String section, String classeNumero) async {
+    final key = _classeKey(section, classeNumero);
+    for (var f in autresFrais) {
+      if (f.id == autreFraisId) {
+        f.montantsParClasse.remove(key);
+        break;
+      }
+    }
+    await saveData();
+  }
+
   bool autreFraisAppliesToStudent(AutreFrais frais, Eleve eleve) {
     switch (frais.scope) {
       case 'section':
@@ -1661,6 +1832,47 @@ class FraisScolaires {
     });
     return students;
   }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — RÉSOLUTION DU MONTANT À PAYER PAR ÉLÈVE POUR UN "AUTRE
+  // FRAIS" (ex: Frais de l'État), QUAND CE MONTANT VARIE SELON LA SECTION
+  // OU LA CLASSE
+  // ==========================================================================
+  // Problème résolu : jusqu'ici, un "Autre Frais" avait UN SEUL montant,
+  // valable pour tous les élèves éligibles (toute l'école, une section, ou
+  // une classe). Or certains frais (ex: Frais de l'État) doivent s'appliquer
+  // à TOUTE l'école mais avec un montant différent selon la section ou la
+  // classe de l'élève (ex: le Secondaire paie plus que le Primaire).
+  //
+  // Chaque `AutreFrais` peut désormais définir, en plus de son montant par
+  // défaut (`montant`), des exceptions optionnelles :
+  //   - `montantsParSection` (nom de section -> montant),
+  //   - `montantsParClasse`  (section + classe -> montant, priorité
+  //     absolue).
+  // L'ÉLIGIBILITÉ (qui doit payer ce frais) continue de dépendre
+  // UNIQUEMENT de `scope`/`section`/`classe` (inchangé, voir
+  // `autreFraisAppliesToStudent` ci-dessus) ; cette fonction ne détermine
+  // QUE le montant, une fois l'élève déjà reconnu éligible.
+  //
+  // Priorité : exception par classe > exception par section > montant par
+  // défaut. Si aucune exception n'est définie pour ce frais, le
+  // comportement est strictement identique à avant (montant unique pour
+  // tout le monde). Utilisée automatiquement par `payAutreFrais` et
+  // `printOrQueueAutreFraisReceipt` — aucun appelant externe n'a besoin de
+  // calculer ce montant lui-même.
+  // ==========================================================================
+  double getMontantAutreFraisPourEleve(AutreFrais frais, Eleve eleve) {
+    final classeNumero = classeNumeroFromFullClasse(eleve.classe);
+    final classeKey = _classeKey(eleve.section, classeNumero);
+    if (frais.montantsParClasse.containsKey(classeKey)) {
+      return frais.montantsParClasse[classeKey]!;
+    }
+    if (frais.montantsParSection.containsKey(eleve.section)) {
+      return frais.montantsParSection[eleve.section]!;
+    }
+    return frais.montant;
+  }
+
   bool hasPaidAutreFrais(Eleve eleve, AutreFrais frais, [String? year]) {
     final y = year ?? currentYear;
     return (autresFraisPaiementsByYear[y] ?? []).any(
@@ -1671,12 +1883,18 @@ class FraisScolaires {
     required Eleve eleve,
     String enregistrePar = 'Direction',
   }) async {
+    // ⚡ NOUVEAU — le montant réellement facturé dépend désormais de la
+    // section/classe de l'élève (voir `getMontantAutreFraisPourEleve`),
+    // et non plus systématiquement de `frais.montant`. La répartition par
+    // administration reste correcte car elle se base sur ce montant
+    // réellement enregistré dans le paiement, jamais sur `frais.montant`.
+    final double montant = getMontantAutreFraisPourEleve(frais, eleve);
     final paiement = AutreFraisPaiement(
       id: 'AFP${DateTime.now().millisecondsSinceEpoch}',
       autreFraisId: frais.id,
       autreFraisNom: frais.nom,
       eleveId: eleve.id,
-      montant: frais.montant,
+      montant: montant,
       date: DateTime.now(),
       enregistrePar: enregistrePar,
     );
@@ -1707,6 +1925,15 @@ class FraisScolaires {
   // Paiement" (et non plus depuis les Paramètres), pour l'argent collecté
   // sur le frais additionnel actuellement sélectionné (ex: "Frais de
   // l'État", "Frais d'Aide"...).
+  //
+  // ⚡ Cette répartition se base sur le TOTAL RÉELLEMENT PERÇU
+  // (`AutreFraisPaiement.montant`), qui reflète désormais automatiquement
+  // le montant correct par élève même si ce frais a des montants
+  // différents par section/classe (voir `getMontantAutreFraisPourEleve`).
+  // Aucune modification n'a donc été nécessaire dans ce bloc : une seule
+  // répartition par administration continue de couvrir TOUT l'argent
+  // collecté pour ce frais, quel que soit le montant payé par chaque
+  // élève.
   //
   // ⚠️⚠️⚠️ SÉPARATION TOTALE ET DÉFINITIVE AVEC LES FRAIS PRINCIPAUX ⚠️⚠️⚠️
   // Ce bloc utilise EXCLUSIVEMENT :
@@ -2814,11 +3041,14 @@ class FraisScolaires {
   // ADMINISTRATION" (basé sur `calculateAdminDistribution(total)`, le total
   // étant calculé uniquement à partir des paiements d'"Autres Frais"
   // filtrés ci-dessous — jamais mélangé avec les frais principaux). Ce
-  // comportement est conservé tel quel, il fonctionnait déjà correctement.
-  // Le nouveau bouton ajouté dans l'écran "Autres Frais de Paiement"
-  // (`getAdminDistributionForAutreFrais`) permet simplement de consulter le
-  // même type d'information EN AMONT, avant même de générer le PDF, pour un
-  // frais précis actuellement sélectionné.
+  // comportement est conservé tel quel, il fonctionnait déjà correctement,
+  // et continue de fonctionner correctement même si ce frais a des
+  // montants différents par section/classe (le total est toujours la
+  // somme des montants RÉELLEMENT payés). Le nouveau bouton ajouté dans
+  // l'écran "Autres Frais de Paiement" (`getAdminDistributionForAutreFrais`)
+  // permet simplement de consulter le même type d'information EN AMONT,
+  // avant même de générer le PDF, pour un frais précis actuellement
+  // sélectionné.
   // ==========================================================================
   Future<Map<String, dynamic>> generateAutresFraisPdf({
     required String filename,

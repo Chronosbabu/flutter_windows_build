@@ -715,7 +715,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     controller: montantController,
                     keyboardType: TextInputType.number,
                     decoration:
-                    const InputDecoration(labelText: "Montant (FC)"),
+                    const InputDecoration(labelText: "Montant par défaut (FC)"),
+                  ),
+                  const SizedBox(height: 6),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      "Ce montant par défaut s'applique à tout élève "
+                          "éligible. Vous pourrez ensuite définir des "
+                          "montants différents par section ou par classe "
+                          "depuis le bouton \"Montants par section/classe\" "
+                          "(icône ⚙) dans la liste ci-dessous, sans changer "
+                          "l'éligibilité de ce frais.",
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
                   ),
                   const SizedBox(height: 16),
                   const Align(
@@ -812,6 +825,457 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   }
                 },
                 child: const Text("Ajouter"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MODIFIER UN FRAIS ADDITIONNEL DÉJÀ CRÉÉ
+  // ==========================================================================
+  // Permet de corriger le nom, le montant par défaut et l'éligibilité (toute
+  // l'école / une section / une classe) sans supprimer/recréer le frais
+  // (ce qui casserait l'historique des paiements déjà liés à son id).
+  // Les montants spécifiques par section/classe éventuellement déjà définis
+  // ne sont jamais touchés par cette fenêtre — ils se gèrent séparément via
+  // "Montants par section/classe" (voir `_showManageMontantsDialog`).
+  // ==========================================================================
+  void _editAutreFraisDialog(AutreFrais frais) async {
+    if (!await _verifyBackupPassword()) return;
+
+    final nomController     = TextEditingController(text: frais.nom);
+    final montantController =
+    TextEditingController(text: frais.montant.toString());
+    String? dialogSection = frais.scope == 'all' ? null : frais.section;
+    String? dialogClasse  = frais.scope == 'classe' ? frais.classe : null;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final classesOptions = dialogSection != null
+              ? widget.fraisScolaires.getClassesForSection(dialogSection!)
+              : <String>[];
+          return AlertDialog(
+            title: const Text("Modifier le Frais Additionnel"),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nomController,
+                    decoration:
+                    const InputDecoration(labelText: "Nom du frais"),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: montantController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                        labelText: "Montant par défaut (FC)"),
+                  ),
+                  const SizedBox(height: 16),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      "Ce frais concerne :",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  DropdownButton<String>(
+                    isExpanded: true,
+                    value: dialogSection,
+                    hint: const Text(
+                        "Toutes les classes (toute l'école)"),
+                    items: [
+                      const DropdownMenuItem<String>(
+                        value: null,
+                        child:
+                        Text("Toutes les classes (toute l'école)"),
+                      ),
+                      ...widget.fraisScolaires.config.sections.map(
+                            (s) => DropdownMenuItem(
+                          value: s,
+                          child: Text("Section : $s"),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) => setDialogState(() {
+                      dialogSection = value;
+                      dialogClasse  = null;
+                    }),
+                  ),
+                  if (dialogSection != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        value: dialogClasse,
+                        hint: const Text(
+                            "Toutes les classes de cette section"),
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: null,
+                            child: Text(
+                                "Toutes les classes de cette section"),
+                          ),
+                          ...classesOptions.map(
+                                (c) => DropdownMenuItem(
+                                value: c, child: Text(c)),
+                          ),
+                        ],
+                        onChanged: (value) =>
+                            setDialogState(() => dialogClasse = value),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("Annuler")),
+              ElevatedButton(
+                onPressed: () async {
+                  final nom     = nomController.text.trim();
+                  final montant = double.tryParse(montantController.text);
+                  if (nom.isEmpty || montant == null || montant <= 0) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              "Veuillez entrer un nom et un montant valides")),
+                    );
+                    return;
+                  }
+                  final scope = dialogSection == null
+                      ? 'all'
+                      : (dialogClasse == null ? 'section' : 'classe');
+                  await widget.fraisScolaires.updateAutreFrais(
+                    frais.id,
+                    nom: nom,
+                    montant: montant,
+                    scope: scope,
+                    section: dialogSection,
+                    classe: dialogClasse,
+                  );
+                  if (mounted) {
+                    Navigator.pop(ctx);
+                    setState(() {});
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text("✅ Frais modifié avec succès")),
+                    );
+                  }
+                },
+                child: const Text("Enregistrer"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MONTANTS PAR SECTION / PAR CLASSE POUR UN FRAIS ADDITIONNEL
+  // ==========================================================================
+  // Répond exactement au besoin : un frais additionnel unique (ex: "Frais
+  // de l'État"), valable pour TOUTE l'école (une seule répartition par
+  // administration, un seul frais dans la liste), mais payé à un montant
+  // DIFFÉRENT selon la section ou la classe de l'élève. L'éligibilité
+  // (qui doit payer ce frais) reste définie par le scope du frais
+  // lui-même (voir `_editAutreFraisDialog`) — cette fenêtre ne fait que
+  // définir le MONTANT, une fois l'élève déjà reconnu éligible.
+  //
+  // Priorité de résolution (voir FraisScolaires.getMontantAutreFraisPourEleve) :
+  //   montant par classe  >  montant par section  >  montant par défaut.
+  //
+  // Comme ces montants ne changent QUE le montant facturé (jamais
+  // l'éligibilité), la répartition par administration et les totaux
+  // restent automatiquement corrects : ils se basent sur les paiements
+  // réellement enregistrés (qui reflètent déjà le bon montant par élève).
+  // ==========================================================================
+  void _manageMontantsAutreFrais(AutreFrais frais) async {
+    if (!await _verifyBackupPassword()) return;
+    _showManageMontantsDialog(frais);
+  }
+
+  void _showManageMontantsDialog(AutreFrais frais) {
+    final montantSectionController = TextEditingController();
+    final montantClasseController  = TextEditingController();
+    String? sectionPourSection;
+    String? sectionPourClasse;
+    String? classePourClasse;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final classesOptionsPourClasse = sectionPourClasse != null
+              ? widget.fraisScolaires.getClassesForSection(sectionPourClasse!)
+              : <String>[];
+
+          Future<void> refresh() async {
+            setDialogState(() {});
+            if (mounted) setState(() {});
+          }
+
+          return AlertDialog(
+            title: Text("Montants par Section/Classe — ${frais.nom}"),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Montant par défaut : "
+                          "${frais.montant.toStringAsFixed(0)} FC",
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 2),
+                    const Text(
+                      "S'applique à tout élève éligible qui n'a AUCUNE "
+                          "exception ci-dessous. L'éligibilité (qui doit "
+                          "payer ce frais) ne change pas ici — elle reste "
+                          "définie dans \"Modifier le Frais\".",
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 18),
+
+                    // ---------------- PAR SECTION ----------------
+                    const Text(
+                      "Montant spécifique par Section",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          color: Colors.indigo),
+                    ),
+                    const SizedBox(height: 6),
+                    if (frais.montantsParSection.isEmpty)
+                      const Text(
+                        "Aucune exception par section pour ce frais.",
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      )
+                    else
+                      ...frais.montantsParSection.entries.map(
+                            (e) => ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(e.key),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text("${e.value.toStringAsFixed(0)} FC"),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline,
+                                    size: 18, color: Colors.red),
+                                tooltip: "Retirer cette exception",
+                                onPressed: () async {
+                                  await widget.fraisScolaires
+                                      .removeMontantSectionPourAutreFrais(
+                                      frais.id, e.key);
+                                  await refresh();
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          flex: 2,
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            value: sectionPourSection,
+                            hint: const Text("Choisir une section"),
+                            items: widget.fraisScolaires.config.sections
+                                .map((s) => DropdownMenuItem(
+                                value: s, child: Text(s)))
+                                .toList(),
+                            onChanged: (v) => setDialogState(
+                                    () => sectionPourSection = v),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 1,
+                          child: TextField(
+                            controller: montantSectionController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                                labelText: "Montant (FC)"),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.add_circle,
+                              color: Colors.indigo),
+                          tooltip: "Ajouter / Remplacer",
+                          onPressed: () async {
+                            final montant = double.tryParse(
+                                montantSectionController.text.trim());
+                            if (sectionPourSection == null ||
+                                montant == null ||
+                                montant <= 0) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text(
+                                        "Choisissez une section et un montant valides")),
+                              );
+                              return;
+                            }
+                            await widget.fraisScolaires
+                                .setMontantSectionPourAutreFrais(
+                                frais.id, sectionPourSection!, montant);
+                            montantSectionController.clear();
+                            await refresh();
+                          },
+                        ),
+                      ],
+                    ),
+
+                    const Divider(height: 30),
+
+                    // ---------------- PAR CLASSE ----------------
+                    const Text(
+                      "Montant spécifique par Classe (priorité absolue)",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          color: Colors.indigo),
+                    ),
+                    const SizedBox(height: 6),
+                    if (frais.montantsParClasse.isEmpty)
+                      const Text(
+                        "Aucune exception par classe pour ce frais.",
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      )
+                    else
+                      ...frais.montantsParClasse.entries.map((e) {
+                        final parts = e.key.split('|');
+                        final label = parts.length == 2
+                            ? "${parts[0]} - ${parts[1]}"
+                            : e.key;
+                        return ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(label),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text("${e.value.toStringAsFixed(0)} FC"),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline,
+                                    size: 18, color: Colors.red),
+                                tooltip: "Retirer cette exception",
+                                onPressed: () async {
+                                  if (parts.length == 2) {
+                                    await widget.fraisScolaires
+                                        .removeMontantClassePourAutreFrais(
+                                        frais.id, parts[0], parts[1]);
+                                    await refresh();
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            value: sectionPourClasse,
+                            hint: const Text("Section"),
+                            items: widget.fraisScolaires.config.sections
+                                .map((s) => DropdownMenuItem(
+                                value: s, child: Text(s)))
+                                .toList(),
+                            onChanged: (v) => setDialogState(() {
+                              sectionPourClasse = v;
+                              classePourClasse  = null;
+                            }),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            value: classePourClasse,
+                            hint: const Text("Classe"),
+                            items: classesOptionsPourClasse
+                                .map((c) => DropdownMenuItem(
+                                value: c, child: Text(c)))
+                                .toList(),
+                            onChanged: (v) => setDialogState(
+                                    () => classePourClasse = v),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: montantClasseController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                                labelText: "Montant (FC)"),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.add_circle,
+                              color: Colors.indigo),
+                          tooltip: "Ajouter / Remplacer",
+                          onPressed: () async {
+                            final montant = double.tryParse(
+                                montantClasseController.text.trim());
+                            if (sectionPourClasse == null ||
+                                classePourClasse == null ||
+                                montant == null ||
+                                montant <= 0) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text(
+                                        "Choisissez section + classe et un montant valides")),
+                              );
+                              return;
+                            }
+                            await widget.fraisScolaires
+                                .setMontantClassePourAutreFrais(
+                              frais.id,
+                              sectionPourClasse!,
+                              classePourClasse!,
+                              montant,
+                            );
+                            montantClasseController.clear();
+                            await refresh();
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("Fermer"),
               ),
             ],
           );
@@ -1683,7 +2147,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   "Frais d'Aide...). Contrairement au frais mensuel principal, "
                   "vous pouvez les ajouter ou les supprimer librement à tout "
                   "moment. Ils sont ensuite payables depuis le bouton "
-                  "\"Autres Frais\" de l'écran d'accueil.",
+                  "\"Autres Frais\" de l'écran d'accueil. Un frais défini "
+                  "pour \"toute l'école\" peut malgré tout être payé à un "
+                  "montant différent selon la section ou la classe : "
+                  "utilisez l'icône ⚙ \"Montants par section/classe\" "
+                  "ci-dessous — l'éligibilité (toute l'école) et la "
+                  "répartition par administration restent uniques pour ce "
+                  "frais, seul le montant facturé change par élève.",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
@@ -1698,21 +2168,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
               )
             else
               ...autresFraisList.map(
-                    (f) => Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  child: ListTile(
-                    title: Text(f.nom),
-                    subtitle: Text(
-                      "${f.montant.toStringAsFixed(0)} FC — "
-                          "${_autreFraisScopeLabel(f)}",
+                    (f) {
+                  final nbExceptions =
+                      f.montantsParSection.length + f.montantsParClasse.length;
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    child: ListTile(
+                      title: Text(f.nom),
+                      subtitle: Text(
+                        "${f.montant.toStringAsFixed(0)} FC — "
+                            "${_autreFraisScopeLabel(f)}"
+                            "${nbExceptions > 0 ? ' • $nbExceptions montant(s) spécifique(s)' : ''}",
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit,
+                                color: Colors.indigo),
+                            tooltip: "Modifier le frais",
+                            onPressed: () => _editAutreFraisDialog(f),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.tune,
+                                color: Colors.teal),
+                            tooltip: "Montants par section/classe",
+                            onPressed: () =>
+                                _manageMontantsAutreFrais(f),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline,
+                                color: Colors.red),
+                            tooltip: "Supprimer",
+                            onPressed: () => _deleteAutreFrais(f),
+                          ),
+                        ],
+                      ),
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline,
-                          color: Colors.red),
-                      onPressed: () => _deleteAutreFrais(f),
-                    ),
-                  ),
-                ),
+                  );
+                },
               ),
             const SizedBox(height: 10),
             ElevatedButton.icon(
