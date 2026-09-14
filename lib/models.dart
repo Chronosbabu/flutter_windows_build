@@ -171,7 +171,11 @@ class SchoolConfig {
     Map<String, double>? feesByClasse,
     Map<String, Map<String, double>>? monthlyExceptionsByClasse,
   }) {
-    this.sections = sections ?? ['Primaire', 'Secondaire'];
+    // ⚡ CORRIGÉ — dédoublonnage même quand la liste de sections est fournie
+    // explicitement au constructeur (et pas seulement dans fromJson), pour
+    // fermer TOUTE porte d'entrée possible à un doublon dans cette liste.
+    this.sections =
+        _dedupeSections(sections ?? ['Primaire', 'Secondaire']);
     this.feesBySection = feesBySection ?? {};
     this.monthlyExceptionsBySection = monthlyExceptionsBySection ?? {};
     this.administrations = administrations ?? [];
@@ -179,6 +183,42 @@ class SchoolConfig {
     this.subClassesByClasse = subClassesByClasse ?? {};
     this.feesByClasse = feesByClasse ?? {};
     this.monthlyExceptionsByClasse = monthlyExceptionsByClasse ?? {};
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — DÉDOUBLONNAGE DÉFINITIF DE LA LISTE DES SECTIONS
+  // ==========================================================================
+  // Cause racine du crash "There should be exactly one item with
+  // [DropdownButton]'s value: ..." rencontré dans les écrans Paiement et
+  // Paramètres : `sections` était rechargée TELLE QUELLE depuis le JSON
+  // sauvegardé (`List<String>.from(json['sections'] ?? [...])`), sans
+  // aucune vérification. Si un doublon s'était un jour glissé dans ce
+  // tableau — par exemple lors d'une restauration serveur qui a réintroduit
+  // une section déjà présente localement, ou lors d'un ancien enregistrement
+  // avant que le contrôle actuel de `_addNewSection` (contains()) existe —
+  // ce doublon était relu et réutilisé indéfiniment à CHAQUE démarrage de
+  // l'application, sans que rien ne le nettoie jamais. Une suppression
+  // depuis Paramètres ne retire qu'UNE SEULE occurrence (`.remove()`),
+  // laissant l'autre invisible dans l'interface (le `Chip` affiché est
+  // identique visuellement) mais bien présente dans les données.
+  //
+  // Cette fonction retire les doublons EXACTS, en conservant l'ordre
+  // d'apparition (LinkedHashSet), et est appliquée à la fois :
+  //   1. Dans le constructeur ci-dessus (couvre toute création manuelle).
+  //   2. Dans `fromJson` ci-dessous (couvre le chargement local ET la
+  //      restauration serveur, qui passe elle aussi par `fromJson`).
+  // Comme `saveData()` est appelé très fréquemment dans l'application, dès
+  // le premier enregistrement suivant le chargement, la version nettoyée
+  // remplace définitivement l'ancienne sur le disque — le doublon ne peut
+  // plus jamais réapparaître après ce nettoyage.
+  // ==========================================================================
+  static List<String> _dedupeSections(Iterable<String> sections) {
+    final seen = <String>{};
+    final result = <String>[];
+    for (final s in sections) {
+      if (seen.add(s)) result.add(s);
+    }
+    return result;
   }
 
   // Numéros de classe générés AUTOMATIQUEMENT selon le nom de la section.
@@ -217,7 +257,13 @@ class SchoolConfig {
   factory SchoolConfig.fromJson(Map<String, dynamic> json) {
     return SchoolConfig(
       schoolName: json['schoolName'] ?? "MAPENDO TCC",
-      sections: List<String>.from(json['sections'] ?? ['Primaire', 'Secondaire']),
+      // ⚡ CORRIGÉ — dédoublonnage à la lecture du JSON (voir
+      // `_dedupeSections` ci-dessus pour l'explication complète). C'est ICI
+      // que le doublon persistant était relu à chaque démarrage ; il est
+      // désormais nettoyé avant même d'être stocké en mémoire.
+      sections: _dedupeSections(
+        List<String>.from(json['sections'] ?? ['Primaire', 'Secondaire']),
+      ),
       feesBySection: Map<String, double>.from(json['feesBySection'] ?? {}),
       monthlyExceptionsBySection: (json['monthlyExceptionsBySection'] as Map? ?? {}).map(
             (key, value) => MapEntry(key, Map<String, double>.from(value)),

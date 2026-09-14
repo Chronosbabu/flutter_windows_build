@@ -23,8 +23,8 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final nameController  = TextEditingController();
-  final feeController   = TextEditingController();
+  final nameController = TextEditingController();
+  final feeController = TextEditingController();
   String? selectedYear;
 
   String? selectedSectionForFee;
@@ -34,17 +34,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? selectedClasseScopeForException;
   final TextEditingController newClasseController = TextEditingController();
 
-  // ⚡ Imprimante Epson TM-T20III en USB (via spouleur Windows),
-  // remplace l'ancienne détection de ports COM Bluetooth.
   List<String> _availablePrinters = [];
-  String?      _selectedPrinterName;
-  bool         _loadingPrinters = false;
-  bool         _testingPrint    = false;
+  String? _selectedPrinterName;
+  bool _loadingPrinters = false;
+  bool _testingPrint = false;
 
-  // ⚡ NOUVEAU — Logo de l'école imprimé sur les reçus (gauche + droite,
-  // avec le nom de l'établissement centré entre les deux).
   Uint8List? _logoBytes;
-  bool       _loadingLogo = false;
+  bool _loadingLogo = false;
 
   bool _showBackupReminder = true;
 
@@ -52,9 +48,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     nameController.text = widget.fraisScolaires.config.schoolName;
-    selectedYear        = widget.fraisScolaires.currentYear;
-    selectedSectionForFee =
-    widget.fraisScolaires.config.sections.isNotEmpty
+    selectedYear = widget.fraisScolaires.currentYear;
+    selectedSectionForFee = widget.fraisScolaires.config.sections.isNotEmpty
         ? widget.fraisScolaires.config.sections.first
         : null;
     _loadPrinterConfig();
@@ -63,8 +58,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadPrinterConfig() async {
     final prefs = await SharedPreferences.getInstance();
-    // ⚡ Clé de préférence : on stocke le NOM de l'imprimante Windows
-    // (ex: "EPSON TM-T20III Receipt") au lieu d'un port COM Bluetooth.
     final saved = prefs.getString('printer_name');
     if (saved != null && saved.isNotEmpty) {
       setState(() => _selectedPrinterName = saved);
@@ -72,35 +65,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _openAide() {
-    Navigator.push(context,
-        MaterialPageRoute(builder: (_) => const AideScreen()));
+    Navigator.push(
+        context, MaterialPageRoute(builder: (_) => const AideScreen()));
   }
 
-  // ⚡ NOUVEAU — Ouvre l'écran de consultation "Grille des Frais"
-  // (100% lecture seule : montants mensuels par section/classe + liste
-  // des autres frais avec leur état de collecte). Toute modification
-  // continue de se faire ici, dans les Paramètres.
   void _openGrilleFrais() {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => GrilleFraisScreen(
-          fraisScolaires: widget.fraisScolaires,
-        ),
+        builder: (_) =>
+            GrilleFraisScreen(fraisScolaires: widget.fraisScolaires),
       ),
     );
   }
 
-  // ====================================================================
-  // VÉRIFICATION MOT DE PASSE
-  // ====================================================================
   Future<bool> _verifyBackupPassword() async {
     final appState = Provider.of<AppState>(context, listen: false);
     if (appState.backupPassword == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text(
-                "Veuillez d'abord définir un mot de passe de sauvegarde")),
+            content:
+            Text("Veuillez d'abord définir un mot de passe de sauvegarde")),
       );
       return false;
     }
@@ -113,14 +98,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-                "Entrez votre mot de passe de sauvegarde pour continuer"),
+            const Text("Entrez votre mot de passe de sauvegarde pour continuer"),
             const SizedBox(height: 15),
             TextField(
               controller: passController,
               obscureText: true,
-              decoration: const InputDecoration(
-                  labelText: "Mot de passe"),
+              decoration: const InputDecoration(labelText: "Mot de passe"),
             ),
           ],
         ),
@@ -130,13 +113,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              if (passController.text.trim() ==
-                  appState.backupPassword) {
+              if (passController.text.trim() == appState.backupPassword) {
                 Navigator.pop(ctx, true);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text("Mot de passe incorrect")),
+                  const SnackBar(content: Text("Mot de passe incorrect")),
                 );
               }
             },
@@ -148,28 +129,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return isCorrect ?? false;
   }
 
-  // ====================================================================
-  // ⚡ NOUVEAU — CHOIX DU MODE DE RECALCUL (INTELLIGENT vs CONSTANT)
-  // ====================================================================
-  // Affiché UNIQUEMENT quand le nouveau montant d'un frais ou d'une
-  // exception est plus bas que l'ancien pour au moins un des mois
-  // concernés (voir les appels dans le bouton "Enregistrer" des Frais
-  // Mensuel, le bouton "Retirer l'exception" et `_editExceptionForSection`
-  // plus bas). Volontairement discret : dans tous les autres cas (montant
-  // égal ou en hausse), le recalcul intelligent habituel s'applique
-  // directement, sans jamais rien demander à l'utilisateur.
-  //
-  // - "Intelligent" (comportement historique, inchangé) : reprend le total
-  //   réellement payé par chaque élève sur toute l'année et le redistribue
-  //   selon les nouveaux montants — un éventuel excédent peut compléter
-  //   automatiquement les mois suivants.
-  // - "Constant" (nouveau) : n'ajuste QUE le(s) mois dont le montant a
-  //   baissé. Si un élève avait déjà payé plus que le nouveau montant pour
-  //   ce mois, son paiement est simplement ramené à ce nouveau montant (le
-  //   mois reste coché comme payé) — rien n'est reporté vers les autres
-  //   mois. C'est le mode à utiliser quand on veut baisser le prix d'un
-  //   seul mois sans que l'argent déjà versé "déborde" sur les mois
-  //   suivants.
   Future<String?> _askRecalculMode(BuildContext context) async {
     return showDialog<String>(
       context: context,
@@ -187,8 +146,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               "baissé. Si un élève avait déjà payé plus que le nouveau "
               "montant pour ce mois, son paiement est simplement ramené à "
               "ce nouveau montant (le mois reste coché comme payé) — le "
-              "reste n'est PAS reporté automatiquement sur les autres "
-              "mois.",
+              "reste n'est PAS reporté automatiquement sur les autres mois.",
           style: TextStyle(fontSize: 12.5),
         ),
         actions: [
@@ -205,9 +163,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ====================================================================
-  // NOM DE L'ÉCOLE
-  // ====================================================================
   void _saveSchoolName() async {
     final newName = nameController.text.trim();
     if (newName.isEmpty) {
@@ -230,9 +185,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ====================================================================
-  // MOT DE PASSE
-  // ====================================================================
   void _changeBackupPassword(BuildContext context, AppState appState) async {
     if (appState.backupPassword == null) {
       _setBackupPassword(context, appState);
@@ -252,8 +204,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField(
               controller: oldPassController,
               obscureText: true,
-              decoration: const InputDecoration(
-                  labelText: "Ancien mot de passe"),
+              decoration: const InputDecoration(labelText: "Ancien mot de passe"),
             ),
           ],
         ),
@@ -263,13 +214,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              if (oldPassController.text.trim() ==
-                  appState.backupPassword) {
+              if (oldPassController.text.trim() == appState.backupPassword) {
                 Navigator.pop(ctx, true);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text("Ancien mot de passe incorrect")),
+                  const SnackBar(content: Text("Ancien mot de passe incorrect")),
                 );
               }
             },
@@ -281,7 +230,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (oldCorrect != true) return;
 
-    final newPassController    = TextEditingController();
+    final newPassController = TextEditingController();
     final confirmPassController = TextEditingController();
     await showDialog(
       context: context,
@@ -300,40 +249,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField(
               controller: confirmPassController,
               obscureText: true,
-              decoration: const InputDecoration(
-                  labelText: "Confirmer le nouveau mot de passe"),
+              decoration:
+              const InputDecoration(labelText: "Confirmer le nouveau mot de passe"),
             ),
           ],
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final newPass     = newPassController.text.trim();
+              final newPass = newPassController.text.trim();
               final confirmPass = confirmPassController.text.trim();
               if (newPass.length < 6) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                      content: Text(
-                          "Le mot de passe doit contenir au moins 6 caractères")),
+                      content:
+                      Text("Le mot de passe doit contenir au moins 6 caractères")),
                 );
                 return;
               }
               if (newPass != confirmPass) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                      content: Text(
-                          "Les deux mots de passe ne correspondent pas")),
+                      content: Text("Les deux mots de passe ne correspondent pas")),
                 );
                 return;
               }
               appState.setBackupPassword(newPass);
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                    content: Text("✅ Mot de passe changé avec succès")),
+                const SnackBar(content: Text("✅ Mot de passe changé avec succès")),
               );
             },
             child: const Text("Enregistrer"),
@@ -343,9 +288,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ====================================================================
-  // DÉCONNEXION — AVEC AVERTISSEMENT ET SAUVEGARDE OBLIGATOIRE
-  // ====================================================================
   void _deconnexion() async {
     final action = await showDialog<String>(
       context: context,
@@ -353,8 +295,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (ctx) => AlertDialog(
         title: const Row(
           children: [
-            Icon(Icons.warning_amber_rounded,
-                color: Colors.orange, size: 28),
+            Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 28),
             SizedBox(width: 8),
             Text("Déconnexion"),
           ],
@@ -375,18 +316,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: const Icon(Icons.cloud_upload),
             label: const Text("Sauvegarder puis déconnecter"),
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.indigo,
-              foregroundColor: Colors.white,
-            ),
+                backgroundColor: Colors.indigo, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(ctx, 'save_then_logout'),
           ),
           ElevatedButton.icon(
             icon: const Icon(Icons.logout),
             label: const Text("Déconnecter sans sauvegarder"),
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(ctx, 'logout_only'),
           ),
         ],
@@ -396,15 +333,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (action == null || action == 'cancel') return;
 
     if (action == 'save_then_logout') {
-      final appState =
-      Provider.of<AppState>(context, listen: false);
-      if (appState.schoolCode == null ||
-          appState.backupPassword == null) {
+      final appState = Provider.of<AppState>(context, listen: false);
+      if (appState.schoolCode == null || appState.backupPassword == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text(
-                    "Impossible de sauvegarder : code école ou mot de passe manquant")),
+                content:
+                Text("Impossible de sauvegarder : code école ou mot de passe manquant")),
           );
         }
         return;
@@ -418,16 +353,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         );
       }
 
-      final backupResult = await widget.fraisScolaires.backupToServer(
-        appState.schoolCode!,
-        appState.backupPassword!,
-      );
+      final backupResult = await widget.fraisScolaires
+          .backupToServer(appState.schoolCode!, appState.backupPassword!);
       final bool backupSuccess = backupResult['success'] == true;
 
       if (!backupSuccess) {
         if (mounted) {
-          final String errMsg =
-              backupResult['error']?.toString() ?? "Erreur inconnue";
+          final String errMsg = backupResult['error']?.toString() ?? "Erreur inconnue";
           final forceLogout = await showDialog<bool>(
             context: context,
             builder: (ctx) => AlertDialog(
@@ -443,8 +375,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     child: const Text("Annuler")),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      foregroundColor: Colors.white),
+                      backgroundColor: Colors.red, foregroundColor: Colors.white),
                   onPressed: () => Navigator.pop(ctx, true),
                   child: const Text("Déconnecter quand même"),
                 ),
@@ -459,7 +390,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text("✅ Sauvegarde réussie !"),
+              content: Text("✅ Sauvegarde réussie ! Résumé promoteur mis à jour."),
               backgroundColor: Colors.green,
               duration: Duration(seconds: 2),
             ),
@@ -474,7 +405,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) {
       final appState = Provider.of<AppState>(context, listen: false);
       await appState.logout();
-
       Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(builder: (_) => const RecoveryScreen()),
@@ -483,15 +413,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ====================================================================
-  // IMPRIMANTE — détection des imprimantes Windows (Epson TM-T20III en USB).
-  // ====================================================================
   Future<void> _detectPrinters() async {
     setState(() => _loadingPrinters = true);
     final printers = await EscPosPrinterService.getAvailablePrinters();
     setState(() {
       _availablePrinters = printers;
-      _loadingPrinters   = false;
+      _loadingPrinters = false;
       if (_selectedPrinterName != null &&
           !_availablePrinters.contains(_selectedPrinterName)) {
         _availablePrinters.insert(0, _selectedPrinterName!);
@@ -523,14 +450,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ====================================================================
-  // ⚡ NOUVEAU — LOGO DE L'ÉCOLE POUR LES REÇUS
-  // ====================================================================
-  // Le logo est stocké localement sur ce PC (comme le nom de
-  // l'imprimante), pas dans la sauvegarde serveur : chaque poste peut
-  // donc avoir son propre fichier logo. Il est toujours réenregistré en
-  // PNG pour garder un chemin de fichier stable quel que soit le format
-  // d'origine (jpg, png...) choisi par l'utilisateur.
   Future<String> _logoFilePath() async {
     final dir = await getApplicationDocumentsDirectory();
     return '${dir.path}/school_logo.png';
@@ -553,10 +472,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _pickLogo() async {
     setState(() => _loadingLogo = true);
     try {
-      const typeGroup = XTypeGroup(
-        label: 'images',
-        extensions: ['png', 'jpg', 'jpeg'],
-      );
+      const typeGroup =
+      XTypeGroup(label: 'images', extensions: ['png', 'jpg', 'jpeg']);
       final file = await openFile(acceptedTypeGroups: [typeGroup]);
       if (file == null) {
         setState(() => _loadingLogo = false);
@@ -564,36 +481,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
 
       final rawBytes = await file.readAsBytes();
-      final decoded  = img.decodeImage(rawBytes);
+      final decoded = img.decodeImage(rawBytes);
       if (decoded == null) {
         setState(() => _loadingLogo = false);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content:
-                Text("⚠️ Image invalide ou format non supporté")),
+            const SnackBar(content: Text("⚠️ Image invalide ou format non supporté")),
           );
         }
         return;
       }
 
       final pngBytes = Uint8List.fromList(img.encodePng(decoded));
-      final path     = await _logoFilePath();
+      final path = await _logoFilePath();
       await File(path).writeAsBytes(pngBytes);
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('has_logo', true);
 
       setState(() {
-        _logoBytes   = pngBytes;
+        _logoBytes = pngBytes;
         _loadingLogo = false;
       });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-                "✅ Logo enregistré — il apparaîtra sur les prochains reçus"),
+            content: Text("✅ Logo enregistré — il apparaîtra sur les prochains reçus"),
             backgroundColor: Colors.green,
           ),
         );
@@ -602,9 +516,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() => _loadingLogo = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content:
-              Text("⚠️ Erreur lors de la sélection du logo : $e")),
+          SnackBar(content: Text("⚠️ Erreur lors de la sélection du logo : $e")),
         );
       }
     }
@@ -630,27 +542,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_selectedPrinterName == null) return;
     setState(() => _testingPrint = true);
     final ok = await EscPosPrinterService.printReceipt(
-      printerName:  _selectedPrinterName!,
-      schoolName:   widget.fraisScolaires.config.schoolName,
-      currentYear:  widget.fraisScolaires.currentYear,
-      studentName:  'TEST ELEVE',
-      studentId:    'TEST-001',
-      classe:       '7eme A',
-      section:      'Secondaire',
-      moisPaye:     'Septembre',
-      montantPaye:  35000,
+      printerName: _selectedPrinterName!,
+      schoolName: widget.fraisScolaires.config.schoolName,
+      currentYear: widget.fraisScolaires.currentYear,
+      studentName: 'TEST ELEVE',
+      studentId: 'TEST-001',
+      classe: '7eme A',
+      section: 'Secondaire',
+      moisPaye: 'Septembre',
+      montantPaye: 35000,
       montantRequis: 35000,
       resteAPayerMois: 0,
       totalDejaPayeAnnee: 35000,
-      totalRequis:  350000,
+      totalRequis: 350000,
       historiqueTransactions: [
         {
-          'date':   DateTime.now().toString().split(' ')[0],
-          'mois':   'Septembre',
+          'date': DateTime.now().toString().split(' ')[0],
+          'mois': 'Septembre',
           'amount': 35000,
         }
       ],
-      logoBytes: _logoBytes, // ⚡ logo choisi (ou null si aucun)
+      logoBytes: _logoBytes,
     );
     setState(() => _testingPrint = false);
     if (mounted) {
@@ -668,9 +580,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ====================================================================
-  // ⚡ NOUVEAU — AUTRES FRAIS DE PAIEMENT (ÉPHÉMÈRES)
-  // ====================================================================
   String _autreFraisScopeLabel(AutreFrais f) {
     switch (f.scope) {
       case 'section':
@@ -685,8 +594,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _showAddAutreFraisDialog() async {
     if (!await _verifyBackupPassword()) return;
 
-    final nomController      = TextEditingController();
-    final montantController  = TextEditingController();
+    final nomController = TextEditingController();
+    final montantController = TextEditingController();
     String? dialogSection;
     String? dialogClasse;
 
@@ -735,32 +644,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     alignment: Alignment.centerLeft,
                     child: Text(
                       "Ce frais concerne :",
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 13),
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                     ),
                   ),
                   const SizedBox(height: 6),
                   DropdownButton<String>(
                     isExpanded: true,
                     value: dialogSection,
-                    hint: const Text(
-                        "Toutes les classes (toute l'école)"),
+                    hint: const Text("Toutes les classes (toute l'école)"),
                     items: [
                       const DropdownMenuItem<String>(
                         value: null,
-                        child:
-                        Text("Toutes les classes (toute l'école)"),
+                        child: Text("Toutes les classes (toute l'école)"),
                       ),
                       ...widget.fraisScolaires.config.sections.map(
-                            (s) => DropdownMenuItem(
-                          value: s,
-                          child: Text("Section : $s"),
-                        ),
+                            (s) => DropdownMenuItem(value: s, child: Text("Section : $s")),
                       ),
                     ],
                     onChanged: (value) => setDialogState(() {
                       dialogSection = value;
-                      dialogClasse  = null;
+                      dialogClasse = null;
                     }),
                   ),
                   if (dialogSection != null)
@@ -769,18 +672,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: DropdownButton<String>(
                         isExpanded: true,
                         value: dialogClasse,
-                        hint: const Text(
-                            "Toutes les classes de cette section"),
+                        hint: const Text("Toutes les classes de cette section"),
                         items: [
                           const DropdownMenuItem<String>(
                             value: null,
-                            child: Text(
-                                "Toutes les classes de cette section"),
+                            child: Text("Toutes les classes de cette section"),
                           ),
-                          ...classesOptions.map(
-                                (c) => DropdownMenuItem(
-                                value: c, child: Text(c)),
-                          ),
+                          ...classesOptions
+                              .map((c) => DropdownMenuItem(value: c, child: Text(c))),
                         ],
                         onChanged: (value) =>
                             setDialogState(() => dialogClasse = value),
@@ -790,24 +689,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text("Annuler")),
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
               ElevatedButton(
                 onPressed: () async {
-                  final nom     = nomController.text.trim();
+                  final nom = nomController.text.trim();
                   final montant = double.tryParse(montantController.text);
                   if (nom.isEmpty || montant == null || montant <= 0) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
-                          content: Text(
-                              "Veuillez entrer un nom et un montant valides")),
+                          content: Text("Veuillez entrer un nom et un montant valides")),
                     );
                     return;
                   }
-                  final scope = dialogSection == null
-                      ? 'all'
-                      : (dialogClasse == null ? 'section' : 'classe');
+                  final scope =
+                  dialogSection == null ? 'all' : (dialogClasse == null ? 'section' : 'classe');
                   await widget.fraisScolaires.addAutreFrais(
                     nom: nom,
                     montant: montant,
@@ -819,8 +714,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Navigator.pop(ctx);
                     setState(() {});
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text("✅ Frais ajouté avec succès")),
+                      const SnackBar(content: Text("✅ Frais ajouté avec succès")),
                     );
                   }
                 },
@@ -833,24 +727,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — MODIFIER UN FRAIS ADDITIONNEL DÉJÀ CRÉÉ
-  // ==========================================================================
-  // Permet de corriger le nom, le montant par défaut et l'éligibilité (toute
-  // l'école / une section / une classe) sans supprimer/recréer le frais
-  // (ce qui casserait l'historique des paiements déjà liés à son id).
-  // Les montants spécifiques par section/classe éventuellement déjà définis
-  // ne sont jamais touchés par cette fenêtre — ils se gèrent séparément via
-  // "Montants par section/classe" (voir `_showManageMontantsDialog`).
-  // ==========================================================================
   void _editAutreFraisDialog(AutreFrais frais) async {
     if (!await _verifyBackupPassword()) return;
 
-    final nomController     = TextEditingController(text: frais.nom);
-    final montantController =
-    TextEditingController(text: frais.montant.toString());
+    final nomController = TextEditingController(text: frais.nom);
+    final montantController = TextEditingController(text: frais.montant.toString());
     String? dialogSection = frais.scope == 'all' ? null : frais.section;
-    String? dialogClasse  = frais.scope == 'classe' ? frais.classe : null;
+    String? dialogClasse = frais.scope == 'classe' ? frais.classe : null;
 
     await showDialog(
       context: context,
@@ -867,47 +750,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: [
                   TextField(
                     controller: nomController,
-                    decoration:
-                    const InputDecoration(labelText: "Nom du frais"),
+                    decoration: const InputDecoration(labelText: "Nom du frais"),
                   ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: montantController,
                     keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                        labelText: "Montant par défaut (FC)"),
+                    decoration:
+                    const InputDecoration(labelText: "Montant par défaut (FC)"),
                   ),
                   const SizedBox(height: 16),
                   const Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
                       "Ce frais concerne :",
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 13),
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                     ),
                   ),
                   const SizedBox(height: 6),
                   DropdownButton<String>(
                     isExpanded: true,
                     value: dialogSection,
-                    hint: const Text(
-                        "Toutes les classes (toute l'école)"),
+                    hint: const Text("Toutes les classes (toute l'école)"),
                     items: [
                       const DropdownMenuItem<String>(
                         value: null,
-                        child:
-                        Text("Toutes les classes (toute l'école)"),
+                        child: Text("Toutes les classes (toute l'école)"),
                       ),
                       ...widget.fraisScolaires.config.sections.map(
-                            (s) => DropdownMenuItem(
-                          value: s,
-                          child: Text("Section : $s"),
-                        ),
+                            (s) => DropdownMenuItem(value: s, child: Text("Section : $s")),
                       ),
                     ],
                     onChanged: (value) => setDialogState(() {
                       dialogSection = value;
-                      dialogClasse  = null;
+                      dialogClasse = null;
                     }),
                   ),
                   if (dialogSection != null)
@@ -916,18 +792,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: DropdownButton<String>(
                         isExpanded: true,
                         value: dialogClasse,
-                        hint: const Text(
-                            "Toutes les classes de cette section"),
+                        hint: const Text("Toutes les classes de cette section"),
                         items: [
                           const DropdownMenuItem<String>(
                             value: null,
-                            child: Text(
-                                "Toutes les classes de cette section"),
+                            child: Text("Toutes les classes de cette section"),
                           ),
-                          ...classesOptions.map(
-                                (c) => DropdownMenuItem(
-                                value: c, child: Text(c)),
-                          ),
+                          ...classesOptions
+                              .map((c) => DropdownMenuItem(value: c, child: Text(c))),
                         ],
                         onChanged: (value) =>
                             setDialogState(() => dialogClasse = value),
@@ -937,24 +809,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text("Annuler")),
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
               ElevatedButton(
                 onPressed: () async {
-                  final nom     = nomController.text.trim();
+                  final nom = nomController.text.trim();
                   final montant = double.tryParse(montantController.text);
                   if (nom.isEmpty || montant == null || montant <= 0) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
-                          content: Text(
-                              "Veuillez entrer un nom et un montant valides")),
+                          content: Text("Veuillez entrer un nom et un montant valides")),
                     );
                     return;
                   }
-                  final scope = dialogSection == null
-                      ? 'all'
-                      : (dialogClasse == null ? 'section' : 'classe');
+                  final scope =
+                  dialogSection == null ? 'all' : (dialogClasse == null ? 'section' : 'classe');
                   await widget.fraisScolaires.updateAutreFrais(
                     frais.id,
                     nom: nom,
@@ -967,8 +835,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Navigator.pop(ctx);
                     setState(() {});
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text("✅ Frais modifié avec succès")),
+                      const SnackBar(content: Text("✅ Frais modifié avec succès")),
                     );
                   }
                 },
@@ -981,25 +848,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — MONTANTS PAR SECTION / PAR CLASSE POUR UN FRAIS ADDITIONNEL
-  // ==========================================================================
-  // Répond exactement au besoin : un frais additionnel unique (ex: "Frais
-  // de l'État"), valable pour TOUTE l'école (une seule répartition par
-  // administration, un seul frais dans la liste), mais payé à un montant
-  // DIFFÉRENT selon la section ou la classe de l'élève. L'éligibilité
-  // (qui doit payer ce frais) reste définie par le scope du frais
-  // lui-même (voir `_editAutreFraisDialog`) — cette fenêtre ne fait que
-  // définir le MONTANT, une fois l'élève déjà reconnu éligible.
-  //
-  // Priorité de résolution (voir FraisScolaires.getMontantAutreFraisPourEleve) :
-  //   montant par classe  >  montant par section  >  montant par défaut.
-  //
-  // Comme ces montants ne changent QUE le montant facturé (jamais
-  // l'éligibilité), la répartition par administration et les totaux
-  // restent automatiquement corrects : ils se basent sur les paiements
-  // réellement enregistrés (qui reflètent déjà le bon montant par élève).
-  // ==========================================================================
   void _manageMontantsAutreFrais(AutreFrais frais) async {
     if (!await _verifyBackupPassword()) return;
     _showManageMontantsDialog(frais);
@@ -1007,7 +855,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _showManageMontantsDialog(AutreFrais frais) {
     final montantSectionController = TextEditingController();
-    final montantClasseController  = TextEditingController();
+    final montantClasseController = TextEditingController();
     String? sectionPourSection;
     String? sectionPourClasse;
     String? classePourClasse;
@@ -1035,10 +883,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Montant par défaut : "
-                          "${frais.montant.toStringAsFixed(0)} FC",
-                      style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.bold),
+                      "Montant par défaut : ${frais.montant.toStringAsFixed(0)} FC",
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 2),
                     const Text(
@@ -1049,14 +895,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       style: TextStyle(fontSize: 11, color: Colors.grey),
                     ),
                     const SizedBox(height: 18),
-
-                    // ---------------- PAR SECTION ----------------
                     const Text(
                       "Montant spécifique par Section",
                       style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                          color: Colors.indigo),
+                          fontWeight: FontWeight.bold, fontSize: 13, color: Colors.indigo),
                     ),
                     const SizedBox(height: 6),
                     if (frais.montantsParSection.isEmpty)
@@ -1080,8 +922,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 tooltip: "Retirer cette exception",
                                 onPressed: () async {
                                   await widget.fraisScolaires
-                                      .removeMontantSectionPourAutreFrais(
-                                      frais.id, e.key);
+                                      .removeMontantSectionPourAutreFrais(frais.id, e.key);
                                   await refresh();
                                 },
                               ),
@@ -1100,11 +941,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: sectionPourSection,
                             hint: const Text("Choisir une section"),
                             items: widget.fraisScolaires.config.sections
-                                .map((s) => DropdownMenuItem(
-                                value: s, child: Text(s)))
+                                .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                                 .toList(),
-                            onChanged: (v) => setDialogState(
-                                    () => sectionPourSection = v),
+                            onChanged: (v) => setDialogState(() => sectionPourSection = v),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -1113,29 +952,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           child: TextField(
                             controller: montantSectionController,
                             keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                                labelText: "Montant (FC)"),
+                            decoration: const InputDecoration(labelText: "Montant (FC)"),
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.add_circle,
-                              color: Colors.indigo),
+                          icon: const Icon(Icons.add_circle, color: Colors.indigo),
                           tooltip: "Ajouter / Remplacer",
                           onPressed: () async {
-                            final montant = double.tryParse(
-                                montantSectionController.text.trim());
-                            if (sectionPourSection == null ||
-                                montant == null ||
-                                montant <= 0) {
+                            final montant =
+                            double.tryParse(montantSectionController.text.trim());
+                            if (sectionPourSection == null || montant == null || montant <= 0) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                    content: Text(
-                                        "Choisissez une section et un montant valides")),
+                                    content: Text("Choisissez une section et un montant valides")),
                               );
                               return;
                             }
-                            await widget.fraisScolaires
-                                .setMontantSectionPourAutreFrais(
+                            await widget.fraisScolaires.setMontantSectionPourAutreFrais(
                                 frais.id, sectionPourSection!, montant);
                             montantSectionController.clear();
                             await refresh();
@@ -1143,16 +976,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ],
                     ),
-
                     const Divider(height: 30),
-
-                    // ---------------- PAR CLASSE ----------------
                     const Text(
                       "Montant spécifique par Classe (priorité absolue)",
                       style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                          color: Colors.indigo),
+                          fontWeight: FontWeight.bold, fontSize: 13, color: Colors.indigo),
                     ),
                     const SizedBox(height: 6),
                     if (frais.montantsParClasse.isEmpty)
@@ -1163,9 +991,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     else
                       ...frais.montantsParClasse.entries.map((e) {
                         final parts = e.key.split('|');
-                        final label = parts.length == 2
-                            ? "${parts[0]} - ${parts[1]}"
-                            : e.key;
+                        final label = parts.length == 2 ? "${parts[0]} - ${parts[1]}" : e.key;
                         return ListTile(
                           dense: true,
                           contentPadding: EdgeInsets.zero,
@@ -1200,12 +1026,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: sectionPourClasse,
                             hint: const Text("Section"),
                             items: widget.fraisScolaires.config.sections
-                                .map((s) => DropdownMenuItem(
-                                value: s, child: Text(s)))
+                                .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                                 .toList(),
                             onChanged: (v) => setDialogState(() {
                               sectionPourClasse = v;
-                              classePourClasse  = null;
+                              classePourClasse = null;
                             }),
                           ),
                         ),
@@ -1216,11 +1041,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: classePourClasse,
                             hint: const Text("Classe"),
                             items: classesOptionsPourClasse
-                                .map((c) => DropdownMenuItem(
-                                value: c, child: Text(c)))
+                                .map((c) => DropdownMenuItem(value: c, child: Text(c)))
                                 .toList(),
-                            onChanged: (v) => setDialogState(
-                                    () => classePourClasse = v),
+                            onChanged: (v) => setDialogState(() => classePourClasse = v),
                           ),
                         ),
                       ],
@@ -1232,31 +1055,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           child: TextField(
                             controller: montantClasseController,
                             keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                                labelText: "Montant (FC)"),
+                            decoration: const InputDecoration(labelText: "Montant (FC)"),
                           ),
                         ),
                         const SizedBox(width: 8),
                         IconButton(
-                          icon: const Icon(Icons.add_circle,
-                              color: Colors.indigo),
+                          icon: const Icon(Icons.add_circle, color: Colors.indigo),
                           tooltip: "Ajouter / Remplacer",
                           onPressed: () async {
-                            final montant = double.tryParse(
-                                montantClasseController.text.trim());
+                            final montant =
+                            double.tryParse(montantClasseController.text.trim());
                             if (sectionPourClasse == null ||
                                 classePourClasse == null ||
                                 montant == null ||
                                 montant <= 0) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                    content: Text(
-                                        "Choisissez section + classe et un montant valides")),
+                                    content:
+                                    Text("Choisissez section + classe et un montant valides")),
                               );
                               return;
                             }
-                            await widget.fraisScolaires
-                                .setMontantClassePourAutreFrais(
+                            await widget.fraisScolaires.setMontantClassePourAutreFrais(
                               frais.id,
                               sectionPourClasse!,
                               classePourClasse!,
@@ -1273,10 +1093,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text("Fermer"),
-              ),
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Fermer")),
             ],
           );
         },
@@ -1297,9 +1114,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               "nouveaux paiements.",
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Annuler")),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red, foregroundColor: Colors.white),
@@ -1315,16 +1130,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ====================================================================
-  // ⚡ NOUVEAU — RENOMMER / SUPPRIMER UN NUMÉRO DE CLASSE
-  // Permet de corriger une classe mal orthographiée (ex: "6eme" tapé
-  // "6eem" par erreur) sans devoir recréer la classe et réaffecter
-  // chaque élève à la main. Le renommage se propage automatiquement à
-  // TOUS les élèves concernés (année en cours + historique), aux frais
-  // spécifiques et aux exceptions déjà configurés pour cette classe —
-  // donc à tous les écrans qui affichent ces données (accueil, listes,
-  // PDF, reçus...).
-  // ====================================================================
   void _renameClasseNumeroDialog(String section, String oldNumero) async {
     if (!await _verifyBackupPassword()) return;
 
@@ -1339,35 +1144,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField(
               controller: controller,
               autofocus: true,
-              decoration:
-              const InputDecoration(labelText: "Nouveau nom de la classe"),
+              decoration: const InputDecoration(labelText: "Nouveau nom de la classe"),
             ),
             const SizedBox(height: 10),
             const Text(
               "Ce changement sera appliqué immédiatement à tous les élèves "
                   "déjà inscrits dans cette classe (année en cours et années "
-                  "précédentes), ainsi qu'aux frais et exceptions déjà "
+                  "précédentes), ainsi qu'aux frais, exceptions et \"Autres "
+                  "Frais\" (éligibilité ciblée ou montant spécifique) déjà "
                   "configurés pour elle.",
               style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
           ],
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () async {
               final newName = controller.text.trim();
               if (newName.isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text("Le nom ne peut pas être vide")),
+                  const SnackBar(content: Text("Le nom ne peut pas être vide")),
                 );
                 return;
               }
-              await widget.fraisScolaires
-                  .renameClasseNumero(section, oldNumero, newName);
+              await widget.fraisScolaires.renameClasseNumero(section, oldNumero, newName);
               if (mounted) {
                 Navigator.pop(ctx);
                 setState(() {
@@ -1381,8 +1182,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
-                        "✅ Classe renommée en \"$newName\" — mis à jour "
-                            "partout dans l'application"),
+                        "✅ Classe renommée en \"$newName\" — mis à jour partout dans l'application"),
                     backgroundColor: Colors.green,
                   ),
                 );
@@ -1398,15 +1198,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _deleteClasseNumeroDialog(String section, String numero) async {
     if (!await _verifyBackupPassword()) return;
 
-    final result =
-    await widget.fraisScolaires.deleteClasseNumero(section, numero);
+    final result = await widget.fraisScolaires.deleteClasseNumero(section, numero);
 
     if (result['success'] == true) {
       if (mounted) {
         setState(() {
-          if (selectedClasseScopeForFee == numero) {
-            selectedClasseScopeForFee = null;
-          }
+          if (selectedClasseScopeForFee == numero) selectedClasseScopeForFee = null;
           if (selectedClasseScopeForException == numero) {
             selectedClasseScopeForException = null;
           }
@@ -1418,28 +1215,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    // La classe contient encore des élèves : on demande une
-    // confirmation explicite avant de forcer la suppression.
-    final int count = result['studentCount'] as int? ?? 0;
+    final int studentCount = result['studentCount'] as int? ?? 0;
+    final int autresFraisCount = result['autresFraisCount'] as int? ?? 0;
     if (!mounted) return;
+
+    final List<String> impacts = [];
+    if (studentCount > 0) {
+      impacts.add(
+        "• $studentCount élève(s) sont actuellement dans la classe "
+            "\"$numero\" (année en cours ou années précédentes). Si vous "
+            "supprimez cette classe, elle n'apparaîtra plus dans les "
+            "listes de choix, mais ces élèves garderont \"$numero\" comme "
+            "classe jusqu'à ce que vous les réaffectiez manuellement (ou "
+            "que vous renommiez cette classe au lieu de la supprimer).",
+      );
+    }
+    if (autresFraisCount > 0) {
+      impacts.add(
+        "• $autresFraisCount \"Autre(s) Frais\" référencent précisément "
+            "cette classe (éligibilité \"cette classe précise\" et/ou "
+            "montant spécifique défini pour elle). Après suppression, un "
+            "frais ciblé sur \"$numero\" retombera automatiquement sur "
+            "toute la section \"$section\" (au lieu de ne s'appliquer à "
+            "personne), et tout montant spécifique déjà défini pour cette "
+            "classe précise sera retiré.",
+      );
+    }
+
     final forceDelete = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Classe non vide"),
-        content: Text(
-          "$count élève(s) sont actuellement dans la classe \"$numero\" "
-              "(année en cours ou années précédentes).\n\n"
-              "Si vous supprimez cette classe, elle n'apparaîtra plus dans "
-              "les listes de choix, mais les élèves concernés garderont "
-              "\"$numero\" comme classe jusqu'à ce que vous les "
-              "réaffectiez manuellement (ou que vous renommiez cette "
-              "classe au lieu de la supprimer).\n\n"
-              "Voulez-vous continuer ?",
-        ),
+        content: Text("${impacts.join('\n\n')}\n\nVoulez-vous continuer ?"),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Annuler")),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red, foregroundColor: Colors.white),
@@ -1451,13 +1260,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
 
     if (forceDelete == true) {
-      await widget.fraisScolaires
-          .deleteClasseNumero(section, numero, force: true);
+      await widget.fraisScolaires.deleteClasseNumero(section, numero, force: true);
       if (mounted) {
         setState(() {
-          if (selectedClasseScopeForFee == numero) {
-            selectedClasseScopeForFee = null;
-          }
+          if (selectedClasseScopeForFee == numero) selectedClasseScopeForFee = null;
           if (selectedClasseScopeForException == numero) {
             selectedClasseScopeForException = null;
           }
@@ -1469,40 +1275,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ====================================================================
-  // BUILD
-  // ====================================================================
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
 
     final classesForFeeSection = selectedSectionForFee != null
-        ? widget.fraisScolaires
-        .getClassesForSection(selectedSectionForFee!)
+        ? widget.fraisScolaires.getClassesForSection(selectedSectionForFee!)
         : <String>[];
 
-    final classesForExceptionSection =
-    selectedSectionForException != null
-        ? widget.fraisScolaires
-        .getClassesForSection(selectedSectionForException!)
+    final classesForExceptionSection = selectedSectionForException != null
+        ? widget.fraisScolaires.getClassesForSection(selectedSectionForException!)
         : <String>[];
 
     final classFeesForSection = selectedSectionForFee != null
         ? widget.fraisScolaires.config.feesByClasse.entries
-        .where((e) =>
-        e.key.startsWith("${selectedSectionForFee!}|"))
+        .where((e) => e.key.startsWith("${selectedSectionForFee!}|"))
         .toList()
         : <MapEntry<String, double>>[];
 
     final autresFraisList = widget.fraisScolaires.getAutresFrais();
 
+    final double totalPourcentAdmins =
+    widget.fraisScolaires.getTotalPourcentageAdministrations();
+    final bool totalAdminsCorrect = widget.fraisScolaires.config.administrations.isEmpty ||
+        (totalPourcentAdmins - 100).abs() < 0.01;
+
+    final double totalPourcentAutresFraisAdmins =
+    widget.fraisScolaires.getTotalPourcentageAutresFraisAdministrations();
+    final bool totalAutresFraisAdminsCorrect =
+        widget.fraisScolaires.autresFraisAdministrations.isEmpty ||
+            (totalPourcentAutresFraisAdmins - 100).abs() < 0.01;
+
+    final List<String> sectionsSansFrais =
+    widget.fraisScolaires.getSectionsSansFraisConfigure();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("Paramètres"),
         actions: [
-          // ⚡ NOUVEAU — Accès rapide à la Grille des Frais (lecture
-          // seule) : vue consolidée par section/classe/mois et vue des
-          // autres frais avec leur taux de collecte.
           IconButton(
             icon: const Icon(Icons.table_chart),
             tooltip: "Grille des Frais",
@@ -1519,7 +1329,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-
             if (_showBackupReminder)
               Container(
                 margin: const EdgeInsets.only(bottom: 16),
@@ -1531,53 +1340,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.cloud_upload,
-                        color: Colors.orange),
+                    const Icon(Icons.cloud_upload, color: Colors.orange),
                     const SizedBox(width: 10),
                     const Expanded(
                       child: Text(
-                        "💡 Pensez à sauvegarder régulièrement sur le serveur "
-                            "pour permettre aux parents de retrouver leurs enfants "
-                            "et pour sécuriser vos données.",
-                        style: TextStyle(
-                            fontSize: 12, color: Colors.orange),
+                        "💡 Sauvegardez régulièrement sur le serveur : cela "
+                            "permet aux parents de retrouver leurs enfants, "
+                            "sécurise vos données, et met à jour en temps "
+                            "réel le résumé consulté par le promoteur.",
+                        style: TextStyle(fontSize: 12, color: Colors.orange),
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.close,
-                          size: 18, color: Colors.orange),
-                      onPressed: () =>
-                          setState(() => _showBackupReminder = false),
+                      icon: const Icon(Icons.close, size: 18, color: Colors.orange),
+                      onPressed: () => setState(() => _showBackupReminder = false),
                     ),
                   ],
                 ),
               ),
-
-            // ==================== NOM DE L'ÉCOLE ====================
             Row(
               children: [
                 Expanded(
                   child: TextField(
                     controller: nameController,
-                    decoration: const InputDecoration(
-                        labelText: "Nom de l'établissement"),
+                    decoration: const InputDecoration(labelText: "Nom de l'établissement"),
                   ),
                 ),
                 const SizedBox(width: 10),
-                ElevatedButton(
-                  onPressed: _saveSchoolName,
-                  child: const Text("Enregistrer"),
-                ),
+                ElevatedButton(onPressed: _saveSchoolName, child: const Text("Enregistrer")),
               ],
             ),
             const SizedBox(height: 4),
             const Text(
-              "Ce nom apparaît sur les PDF générés et sur les reçus "
-                  "imprimés.",
+              "Ce nom apparaît sur les PDF générés et sur les reçus imprimés.",
               style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
             const SizedBox(height: 8),
-
             if (appState.schoolCode != null)
               Container(
                 padding: const EdgeInsets.all(10),
@@ -1587,31 +1385,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.info_outline,
-                        size: 16, color: Colors.indigo),
+                    const Icon(Icons.info_outline, size: 16, color: Colors.indigo),
                     const SizedBox(width: 8),
                     Text(
                       "Code école : ${appState.schoolCode}",
                       style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.indigo),
+                          fontSize: 12, fontWeight: FontWeight.bold, color: Colors.indigo),
                     ),
                     const SizedBox(width: 4),
-                    const Text(
-                      "(à retenir pour la reconnexion)",
-                      style: TextStyle(
-                          fontSize: 11, color: Colors.grey),
-                    ),
+                    const Text("(à retenir pour la reconnexion)",
+                        style: TextStyle(fontSize: 11, color: Colors.grey)),
                   ],
                 ),
               ),
             const SizedBox(height: 20),
-
-            // ==================== SECTIONS ====================
             const Text("Gestion des Sections",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
             ElevatedButton.icon(
               icon: const Icon(Icons.add),
@@ -1622,30 +1411,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Wrap(
               spacing: 8,
               children: widget.fraisScolaires.config.sections
-                  .map(
-                    (section) => Chip(
-                  label: Text(section),
-                  deleteIcon: const Icon(Icons.close, size: 18),
-                  onDeleted: () => _removeSection(section),
-                ),
-              )
+                  .map((section) => Chip(
+                label: Text(section),
+                deleteIcon: const Icon(Icons.close, size: 18),
+                onDeleted: () => _removeSection(section),
+              ))
                   .toList(),
             ),
             const Divider(),
-
-            // ==================== FRAIS MENSUEL ====================
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Expanded(
                   child: Text("Frais Mensuel par Section ou par Classe",
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold)),
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
-                // ⚡ NOUVEAU — bouton d'accès direct à la vue de
-                // consultation complète (lecture seule) de tous les
-                // frais, utile pour vérifier rapidement l'ensemble de
-                // la grille sans avoir à cliquer section par section.
                 OutlinedButton.icon(
                   icon: const Icon(Icons.table_chart, size: 18),
                   label: const Text("Voir la grille complète"),
@@ -1660,6 +1440,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
+            if (sectionsSansFrais.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.red.shade300),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.red, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "⚠️ Aucun frais mensuel de base n'a jamais été "
+                            "défini pour : ${sectionsSansFrais.join(', ')}. "
+                            "Ces sections facturent actuellement le montant "
+                            "de secours par défaut (35 000 FC) — "
+                            "configurez leur vrai montant ci-dessous dès que possible.",
+                        style: const TextStyle(fontSize: 12, color: Colors.red),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             DropdownButton<String>(
               value: selectedSectionForFee,
               isExpanded: true,
@@ -1667,8 +1474,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                   .toList(),
               onChanged: (value) => setState(() {
-                selectedSectionForFee        = value;
-                selectedClasseScopeForFee    = null;
+                selectedSectionForFee = value;
+                selectedClasseScopeForFee = null;
               }),
             ),
             const SizedBox(height: 10),
@@ -1681,8 +1488,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: TextField(
                         controller: newClasseController,
                         decoration: InputDecoration(
-                          labelText:
-                          "Ajouter une classe à \"$selectedSectionForFee\"",
+                          labelText: "Ajouter une classe à \"$selectedSectionForFee\"",
                           hintText: "Ex: 1ère, 2ème, Niveau 1...",
                         ),
                       ),
@@ -1693,25 +1499,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         final value = newClasseController.text.trim();
                         if (value.isEmpty) return;
                         if (!await _verifyBackupPassword()) return;
-                        await widget.fraisScolaires.addClasseNumero(
-                            selectedSectionForFee!, value);
+                        await widget.fraisScolaires
+                            .addClasseNumero(selectedSectionForFee!, value);
                         newClasseController.clear();
-                        if (mounted) {
-                          setState(() =>
-                          selectedClasseScopeForFee = value);
-                        }
+                        if (mounted) setState(() => selectedClasseScopeForFee = value);
                       },
                       child: const Text("Ajouter"),
                     ),
                   ],
                 ),
               ),
-
-            // ⚡ NOUVEAU — Liste des classes existantes de la section
-            // sélectionnée, avec un bouton pour RENOMMER (corriger une
-            // faute de frappe) et un bouton pour SUPPRIMER chacune.
-            if (selectedSectionForFee != null &&
-                classesForFeeSection.isNotEmpty)
+            if (selectedSectionForFee != null && classesForFeeSection.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 14),
                 child: Column(
@@ -1720,8 +1518,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const Text(
                       "Classes existantes (touchez l'icône crayon pour "
                           "corriger un nom, ou la croix pour supprimer) :",
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 13),
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                     ),
                     const SizedBox(height: 8),
                     Wrap(
@@ -1729,42 +1526,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       runSpacing: 8,
                       children: classesForFeeSection.map((c) {
                         return Container(
-                          padding: const EdgeInsets.only(
-                              left: 12, right: 4, top: 2, bottom: 2),
+                          padding: const EdgeInsets.only(left: 12, right: 4, top: 2, bottom: 2),
                           decoration: BoxDecoration(
                             color: Colors.indigo.withAlpha(18),
                             borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                                color: Colors.indigo.shade100),
+                            border: Border.all(color: Colors.indigo.shade100),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Text(
-                                c,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w500),
-                              ),
+                              Text(c, style: const TextStyle(fontWeight: FontWeight.w500)),
                               const SizedBox(width: 2),
                               IconButton(
-                                icon: const Icon(Icons.edit,
-                                    size: 16, color: Colors.indigo),
+                                icon: const Icon(Icons.edit, size: 16, color: Colors.indigo),
                                 tooltip: "Renommer cette classe",
                                 padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(
-                                    minWidth: 30, minHeight: 30),
-                                onPressed: () => _renameClasseNumeroDialog(
-                                    selectedSectionForFee!, c),
+                                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                                onPressed: () =>
+                                    _renameClasseNumeroDialog(selectedSectionForFee!, c),
                               ),
                               IconButton(
-                                icon: const Icon(Icons.delete_outline,
-                                    size: 16, color: Colors.red),
+                                icon: const Icon(Icons.delete_outline, size: 16, color: Colors.red),
                                 tooltip: "Supprimer cette classe",
                                 padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(
-                                    minWidth: 30, minHeight: 30),
-                                onPressed: () => _deleteClasseNumeroDialog(
-                                    selectedSectionForFee!, c),
+                                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                                onPressed: () =>
+                                    _deleteClasseNumeroDialog(selectedSectionForFee!, c),
                               ),
                             ],
                           ),
@@ -1774,19 +1561,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
               ),
-
             DropdownButton<String>(
               value: selectedClasseScopeForFee,
               isExpanded: true,
               hint: const Text("Toutes les classes"),
               items: [
-                const DropdownMenuItem<String>(
-                    value: null, child: Text("Toutes les classes")),
-                ...classesForFeeSection.map(
-                        (c) => DropdownMenuItem(value: c, child: Text(c))),
+                const DropdownMenuItem<String>(value: null, child: Text("Toutes les classes")),
+                ...classesForFeeSection.map((c) => DropdownMenuItem(value: c, child: Text(c))),
               ],
-              onChanged: (value) =>
-                  setState(() => selectedClasseScopeForFee = value),
+              onChanged: (value) => setState(() => selectedClasseScopeForFee = value),
             ),
             const SizedBox(height: 10),
             TextField(
@@ -1805,11 +1588,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (await _verifyBackupPassword()) {
                   final amount = double.tryParse(feeController.text);
                   if (amount != null) {
-                    // ⚡ NOUVEAU — instantané des montants requis, mois par
-                    // mois, AVANT d'appliquer le changement, pour pouvoir
-                    // ensuite proposer le mode "constant" si le nouveau
-                    // montant s'avère plus bas (voir _askRecalculMode et
-                    // FraisScolaires.recalculerPaiementsPourModeConstant).
                     final Map<String, double> anciensRequis =
                     widget.fraisScolaires.snapshotRequisTousMoisPour(
                       selectedSectionForFee!,
@@ -1817,30 +1595,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     );
 
                     if (selectedClasseScopeForFee == null) {
-                      widget.fraisScolaires.config
-                          .feesBySection[selectedSectionForFee!] =
-                          amount;
+                      widget.fraisScolaires.config.feesBySection[selectedSectionForFee!] = amount;
                     } else {
-                      final key =
-                          "${selectedSectionForFee!}|${selectedClasseScopeForFee!}";
-                      widget.fraisScolaires.config
-                          .feesByClasse[key] = amount;
+                      final key = "${selectedSectionForFee!}|${selectedClasseScopeForFee!}";
+                      widget.fraisScolaires.config.feesByClasse[key] = amount;
                     }
                     await widget.fraisScolaires.saveData();
 
-                    // ⚡ NOUVEAU — le nouveau montant est-il plus bas que
-                    // l'ancien pour AU MOINS un des mois concernés ? Si
-                    // oui, on propose le choix du mode de recalcul ;
-                    // sinon (montant égal ou plus élevé), on garde
-                    // directement le comportement intelligent habituel,
-                    // sans rien demander à l'utilisateur.
-                    final bool unMoisEstPlusBas = anciensRequis.entries.any(
-                            (e) =>
-                        widget.fraisScolaires.getRequiredForMonth(
-                            e.key,
-                            selectedSectionForFee!,
-                            selectedClasseScopeForFee) <
-                            e.value);
+                    final bool unMoisEstPlusBas = anciensRequis.entries.any((e) =>
+                    widget.fraisScolaires.getRequiredForMonth(
+                        e.key, selectedSectionForFee!, selectedClasseScopeForFee) <
+                        e.value);
 
                     String mode = 'intelligent';
                     if (unMoisEstPlusBas && mounted) {
@@ -1848,27 +1613,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       if (choix != null) mode = choix;
                     }
 
-                    // ⚡ NOUVEAU — Après un changement de frais, on
-                    // recalcule automatiquement la répartition mois par
-                    // mois des élèves concernés. Par défaut (mode
-                    // "intelligent"), toute l'année est redistribuée à
-                    // partir du total réellement payé (report automatique
-                    // de l'excédent ou du manque sur les mois suivants,
-                    // sans jamais perdre un seul FC déjà payé). En mode
-                    // "constant" (disponible uniquement pour une baisse de
-                    // montant), seuls les mois dont le montant a baissé
-                    // sont ajustés, sans aucun report vers les autres
-                    // mois. Les reçus non encore imprimés sont aussi mis
-                    // à jour automatiquement dans les deux cas.
                     final int nbRecalcules = mode == 'constant'
-                        ? await widget.fraisScolaires
-                        .recalculerPaiementsPourModeConstant(
+                        ? await widget.fraisScolaires.recalculerPaiementsPourModeConstant(
                       section: selectedSectionForFee,
                       classeNumero: selectedClasseScopeForFee,
                       anciensRequisParMois: anciensRequis,
                     )
-                        : await widget.fraisScolaires
-                        .recalculerPaiementsPour(
+                        : await widget.fraisScolaires.recalculerPaiementsPour(
                       section: selectedSectionForFee,
                       classeNumero: selectedClasseScopeForFee,
                     );
@@ -1900,8 +1651,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             if (selectedClasseScopeForFee != null &&
                 widget.fraisScolaires.config.feesByClasse
-                    .containsKey(
-                    "${selectedSectionForFee}|${selectedClasseScopeForFee}"))
+                    .containsKey("${selectedSectionForFee}|${selectedClasseScopeForFee}"))
               TextButton.icon(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
                 label: Text(
@@ -1911,9 +1661,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onPressed: () async {
                   if (!await _verifyBackupPassword()) return;
 
-                  // ⚡ NOUVEAU — instantané avant de retirer l'exception,
-                  // pour pouvoir proposer le mode "constant" si le retour
-                  // au tarif de la section fait baisser le montant requis.
                   final Map<String, double> anciensRequis =
                   widget.fraisScolaires.snapshotRequisTousMoisPour(
                     selectedSectionForFee!,
@@ -1921,17 +1668,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   );
 
                   widget.fraisScolaires.config.feesByClasse
-                      .remove(
-                      "${selectedSectionForFee}|${selectedClasseScopeForFee}");
+                      .remove("${selectedSectionForFee}|${selectedClasseScopeForFee}");
                   await widget.fraisScolaires.saveData();
 
-                  final bool unMoisEstPlusBas = anciensRequis.entries.any(
-                          (e) =>
-                      widget.fraisScolaires.getRequiredForMonth(
-                          e.key,
-                          selectedSectionForFee!,
-                          selectedClasseScopeForFee) <
-                          e.value);
+                  final bool unMoisEstPlusBas = anciensRequis.entries.any((e) =>
+                  widget.fraisScolaires.getRequiredForMonth(
+                      e.key, selectedSectionForFee!, selectedClasseScopeForFee) <
+                      e.value);
 
                   String mode = 'intelligent';
                   if (unMoisEstPlusBas && mounted) {
@@ -1939,17 +1682,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     if (choix != null) mode = choix;
                   }
 
-                  // ⚡ NOUVEAU — même recalcul automatique qu'au-dessus,
-                  // avec le choix du mode "intelligent" ou "constant".
                   final int nbRecalcules = mode == 'constant'
-                      ? await widget.fraisScolaires
-                      .recalculerPaiementsPourModeConstant(
+                      ? await widget.fraisScolaires.recalculerPaiementsPourModeConstant(
                     section: selectedSectionForFee,
                     classeNumero: selectedClasseScopeForFee,
                     anciensRequisParMois: anciensRequis,
                   )
-                      : await widget.fraisScolaires
-                      .recalculerPaiementsPour(
+                      : await widget.fraisScolaires.recalculerPaiementsPour(
                     section: selectedSectionForFee,
                     classeNumero: selectedClasseScopeForFee,
                   );
@@ -1972,8 +1711,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 10),
               const Text(
                 "Frais spécifiques déjà définis pour cette section :",
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, fontSize: 13),
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
               ),
               ...classFeesForSection.map((entry) {
                 final classeNumero = entry.key.split('|')[1];
@@ -1981,17 +1719,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   dense: true,
                   contentPadding: EdgeInsets.zero,
                   title: Text(classeNumero),
-                  trailing:
-                  Text("${entry.value.toStringAsFixed(0)} FC"),
+                  trailing: Text("${entry.value.toStringAsFixed(0)} FC"),
                 );
               }),
             ],
             const Divider(),
-
-            // ==================== EXCEPTIONS ====================
             const Text("Exceptions par Mois, par Section ou par Classe",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
             DropdownButton<String>(
               value: selectedSectionForException,
@@ -2001,8 +1735,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                   .toList(),
               onChanged: (value) => setState(() {
-                selectedSectionForException      = value;
-                selectedClasseScopeForException  = null;
+                selectedSectionForException = value;
+                selectedClasseScopeForException = null;
               }),
             ),
             const SizedBox(height: 10),
@@ -2011,13 +1745,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               hint: const Text("Toutes les classes"),
               isExpanded: true,
               items: [
-                const DropdownMenuItem<String>(
-                    value: null, child: Text("Toutes les classes")),
-                ...classesForExceptionSection.map(
-                        (c) => DropdownMenuItem(value: c, child: Text(c))),
+                const DropdownMenuItem<String>(value: null, child: Text("Toutes les classes")),
+                ...classesForExceptionSection
+                    .map((c) => DropdownMenuItem(value: c, child: Text(c))),
               ],
-              onChanged: (value) => setState(
-                      () => selectedClasseScopeForException = value),
+              onChanged: (value) => setState(() => selectedClasseScopeForException = value),
             ),
             const SizedBox(height: 10),
             DropdownButton<String>(
@@ -2025,11 +1757,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               hint: const Text("Choisir un mois"),
               isExpanded: true,
               items: widget.fraisScolaires.months
-                  .map((m) =>
-                  DropdownMenuItem(value: m, child: Text(m)))
+                  .map((m) => DropdownMenuItem(value: m, child: Text(m)))
                   .toList(),
-              onChanged: (value) =>
-                  setState(() => selectedMonthForException = value),
+              onChanged: (value) => setState(() => selectedMonthForException = value),
             ),
             const SizedBox(height: 10),
             ElevatedButton(
@@ -2037,11 +1767,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: const Text("Ajouter / Modifier Exception"),
             ),
             const Divider(),
-
-            // ==================== ⚡ NOUVEAU — RECALCUL DE SÉCURITÉ ====================
             const Text("Recalcul de Sécurité des Paiements",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
               "À utiliser si vous avez remarqué qu'un frais était mal "
@@ -2049,20 +1776,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   "des élèves ont déjà payé avec l'ancien montant. Ce bouton "
                   "ne supprime ni n'ajoute aucun argent : il redistribue "
                   "simplement, mois par mois et pour chaque élève, ce qu'il "
-                  "a déjà payé, en respectant les montants requis ACTUELS. "
-                  "Un mois ne sera donc à nouveau marqué comme \"entièrement "
-                  "payé\" que s'il l'est vraiment au tarif courant ; le "
-                  "manque ou l'excédent est automatiquement reporté sur les "
-                  "mois voisins. Les reçus déjà imprimés ne sont jamais "
-                  "modifiés ; seuls les reçus en attente d'impression sont "
-                  "mis à jour.",
+                  "a déjà payé, en respectant les montants requis ACTUELS.",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
             ElevatedButton.icon(
               icon: const Icon(Icons.auto_fix_high),
-              label: const Text(
-                  "Recalculer TOUS les paiements de l'année en cours"),
+              label: const Text("Recalculer TOUS les paiements de l'année en cours"),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.indigo,
                 foregroundColor: Colors.white,
@@ -2078,11 +1798,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       "Ceci va recalculer, pour TOUS les élèves de l'année "
                           "en cours, la répartition mois par mois de ce "
                           "qu'ils ont déjà payé, selon les montants requis "
-                          "actuels.\n\n"
-                          "Aucun montant payé ne sera perdu ni ajouté : "
-                          "seule la répartition entre les mois sera "
-                          "corrigée.\n\n"
-                          "Continuer ?",
+                          "actuels.\n\nAucun montant payé ne sera perdu ni "
+                          "ajouté : seule la répartition entre les mois sera "
+                          "corrigée.\n\nContinuer ?",
                     ),
                     actions: [
                       TextButton(
@@ -2096,15 +1814,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 );
                 if (confirm != true) return;
-                final int nbRecalcules =
-                await widget.fraisScolaires.recalculerPaiementsPour();
+                final int nbRecalcules = await widget.fraisScolaires.recalculerPaiementsPour();
                 if (mounted) {
                   setState(() {});
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
-                      content: Text(
-                          "✅ Recalcul terminé — $nbRecalcules élève(s) "
-                              "mis à jour"),
+                      content: Text("✅ Recalcul terminé — $nbRecalcules élève(s) mis à jour"),
                       backgroundColor: Colors.green,
                       duration: const Duration(seconds: 4),
                     ),
@@ -2113,11 +1828,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
             ),
             const Divider(),
-
-            // ==================== ADMINISTRATIONS ====================
             const Text("Administrations & Répartition (%)",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            if (!totalAdminsCorrect)
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.red.shade300),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.red, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "⚠️ La somme des pourcentages des administrations "
+                            "est actuellement de ${totalPourcentAdmins.toStringAsFixed(1)}% "
+                            "(devrait être 100%). Vérifiez la répartition ci-dessous.",
+                        style: const TextStyle(fontSize: 12, color: Colors.red),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ...widget.fraisScolaires.config.administrations
                 .map(
                   (admin) => ListTile(
@@ -2136,24 +1873,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: _addAdministration,
             ),
             const Divider(),
-
-            // ==================== ⚡ NOUVEAU — AUTRES FRAIS DE PAIEMENT ====================
             const Text("Autres Frais de Paiement",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
-              "Frais ponctuels propres à votre école (ex: Frais de l'État, "
-                  "Frais d'Aide...). Contrairement au frais mensuel principal, "
-                  "vous pouvez les ajouter ou les supprimer librement à tout "
-                  "moment. Ils sont ensuite payables depuis le bouton "
-                  "\"Autres Frais\" de l'écran d'accueil. Un frais défini "
-                  "pour \"toute l'école\" peut malgré tout être payé à un "
-                  "montant différent selon la section ou la classe : "
-                  "utilisez l'icône ⚙ \"Montants par section/classe\" "
-                  "ci-dessous — l'éligibilité (toute l'école) et la "
-                  "répartition par administration restent uniques pour ce "
-                  "frais, seul le montant facturé change par élève.",
+              "Frais ponctuels propres à votre école. Un frais défini pour "
+                  "\"toute l'école\" peut malgré tout être payé à un montant "
+                  "différent selon la section ou la classe via l'icône ⚙ "
+                  "\"Montants par section/classe\".",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
@@ -2162,52 +1889,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 padding: EdgeInsets.symmetric(vertical: 8),
                 child: Text(
                   "Aucun frais additionnel défini pour le moment.",
-                  style: TextStyle(
-                      color: Colors.grey, fontStyle: FontStyle.italic),
+                  style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
                 ),
               )
             else
-              ...autresFraisList.map(
-                    (f) {
-                  final nbExceptions =
-                      f.montantsParSection.length + f.montantsParClasse.length;
-                  return Card(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    child: ListTile(
-                      title: Text(f.nom),
-                      subtitle: Text(
-                        "${f.montant.toStringAsFixed(0)} FC — "
-                            "${_autreFraisScopeLabel(f)}"
-                            "${nbExceptions > 0 ? ' • $nbExceptions montant(s) spécifique(s)' : ''}",
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.edit,
-                                color: Colors.indigo),
-                            tooltip: "Modifier le frais",
-                            onPressed: () => _editAutreFraisDialog(f),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.tune,
-                                color: Colors.teal),
-                            tooltip: "Montants par section/classe",
-                            onPressed: () =>
-                                _manageMontantsAutreFrais(f),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline,
-                                color: Colors.red),
-                            tooltip: "Supprimer",
-                            onPressed: () => _deleteAutreFrais(f),
-                          ),
-                        ],
-                      ),
+              ...autresFraisList.map((f) {
+                final nbExceptions = f.montantsParSection.length + f.montantsParClasse.length;
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    title: Text(f.nom),
+                    subtitle: Text(
+                      "${f.montant.toStringAsFixed(0)} FC — ${_autreFraisScopeLabel(f)}"
+                          "${nbExceptions > 0 ? ' • $nbExceptions montant(s) spécifique(s)' : ''}",
                     ),
-                  );
-                },
-              ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.indigo),
+                          tooltip: "Modifier le frais",
+                          onPressed: () => _editAutreFraisDialog(f),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.tune, color: Colors.teal),
+                          tooltip: "Montants par section/classe",
+                          onPressed: () => _manageMontantsAutreFrais(f),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline, color: Colors.red),
+                          tooltip: "Supprimer",
+                          onPressed: () => _deleteAutreFrais(f),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
             const SizedBox(height: 10),
             ElevatedButton.icon(
               icon: const Icon(Icons.add_box),
@@ -2215,21 +1933,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: _showAddAutreFraisDialog,
             ),
             const Divider(),
-
-            // ==================== ANNÉE SCOLAIRE ====================
+            const Text("Administrations & Répartition — Autres Frais (%)",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              "Liste TOTALEMENT INDÉPENDANTE des administrations des frais "
+                  "mensuels principaux ci-dessus.",
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            if (!totalAutresFraisAdminsCorrect)
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.red.shade300),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.red, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "⚠️ La somme des pourcentages des administrations "
+                            "des \"Autres Frais\" est actuellement de "
+                            "${totalPourcentAutresFraisAdmins.toStringAsFixed(1)}% "
+                            "(devrait être 100%). Vérifiez la répartition ci-dessous.",
+                        style: const TextStyle(fontSize: 12, color: Colors.red),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (widget.fraisScolaires.autresFraisAdministrations.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  "Aucune administration définie pour les Autres Frais.",
+                  style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+                ),
+              )
+            else
+              ...widget.fraisScolaires.autresFraisAdministrations
+                  .map(
+                    (admin) => ListTile(
+                  title: Text(admin.nom),
+                  subtitle: Text("${admin.pourcentage}%"),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.edit),
+                        onPressed: () => _editAutreFraisAdministration(admin),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.red),
+                        onPressed: () => _deleteAutreFraisAdministration(admin),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+                  .toList(),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add),
+              label: const Text("Ajouter Administration (Autres Frais)"),
+              onPressed: _addAutreFraisAdministration,
+            ),
+            const Divider(),
             const Text("Année Scolaire",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             DropdownButton<String>(
               value: selectedYear,
               isExpanded: true,
               items: [
-                ...widget.fraisScolaires.history.keys.map(
-                        (year) => DropdownMenuItem(
-                        value: year, child: Text(year))),
+                ...widget.fraisScolaires.history.keys
+                    .map((year) => DropdownMenuItem(value: year, child: Text(year))),
                 const DropdownMenuItem(
-                    value: "Nouvelle Annee",
-                    child: Text("Créer nouvelle année")),
+                    value: "Nouvelle Annee", child: Text("Créer nouvelle année")),
               ],
               onChanged: (value) async {
                 if (value == "Nouvelle Annee") {
@@ -2240,23 +2023,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       title: const Text("Nouvelle Année Scolaire"),
                       content: TextField(
                         controller: controller,
-                        decoration: const InputDecoration(
-                            labelText: "Ex: 2026-2027"),
+                        decoration: const InputDecoration(labelText: "Ex: 2026-2027"),
                       ),
                       actions: [
                         TextButton(
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text("Annuler")),
+                            onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
                         ElevatedButton(
                           onPressed: () async {
                             if (controller.text.isNotEmpty) {
                               if (await _verifyBackupPassword()) {
                                 await widget.fraisScolaires
-                                    .changeYear(
-                                    controller.text.trim());
+                                    .changeYear(controller.text.trim());
                                 if (mounted) {
-                                  setState(() => selectedYear =
-                                      controller.text.trim());
+                                  setState(() => selectedYear = controller.text.trim());
                                 }
                               }
                             }
@@ -2276,11 +2055,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
             ),
             const Divider(),
-
-            // ==================== SYNCHRONISATION SERVEUR ====================
             const Text("Synchronisation Serveur",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             Container(
               padding: const EdgeInsets.all(10),
@@ -2290,9 +2066,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 border: Border.all(color: Colors.orange.shade200),
               ),
               child: const Text(
-                "⚠️ Sauvegardez régulièrement pour que les parents "
-                    "puissent retrouver leurs enfants via l'app parent et "
-                    "pour récupérer vos données depuis n'importe quel PC.",
+                "⚠️ Sauvegardez régulièrement : les parents peuvent alors "
+                    "retrouver leurs enfants via l'app parent, et le "
+                    "promoteur reçoit un résumé à jour et les nouvelles "
+                    "demandes en attente.",
                 style: TextStyle(fontSize: 12, color: Colors.orange),
               ),
             ),
@@ -2301,8 +2078,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ElevatedButton.icon(
                 icon: const Icon(Icons.lock),
                 label: const Text("Définir Code École"),
-                onPressed: () =>
-                    _setSchoolCode(context, appState),
+                onPressed: () => _setSchoolCode(context, appState),
               )
             else
               ListTile(
@@ -2310,8 +2086,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 subtitle: Text(appState.schoolCode!),
                 trailing: IconButton(
                   icon: const Icon(Icons.edit),
-                  onPressed: () =>
-                      _setSchoolCode(context, appState),
+                  onPressed: () => _setSchoolCode(context, appState),
                 ),
               ),
             const SizedBox(height: 10),
@@ -2319,8 +2094,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ElevatedButton.icon(
                 icon: const Icon(Icons.password),
                 label: const Text("Définir Mot de Passe Sauvegarde"),
-                onPressed: () =>
-                    _setBackupPassword(context, appState),
+                onPressed: () => _setBackupPassword(context, appState),
               )
             else
               ListTile(
@@ -2328,8 +2102,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 subtitle: const Text("••••••••"),
                 trailing: IconButton(
                   icon: const Icon(Icons.edit),
-                  onPressed: () =>
-                      _changeBackupPassword(context, appState),
+                  onPressed: () => _changeBackupPassword(context, appState),
                 ),
               ),
             const SizedBox(height: 15),
@@ -2337,29 +2110,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
               icon: const Icon(Icons.cloud_upload),
               label: const Text("Sauvegarder sur le Serveur"),
               onPressed: () async {
-                if (appState.schoolCode == null ||
-                    appState.backupPassword == null) {
+                if (appState.schoolCode == null || appState.backupPassword == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text(
-                            "Définissez le code et le mot de passe")),
+                    const SnackBar(content: Text("Définissez le code et le mot de passe")),
                   );
                   return;
                 }
-                final result =
-                await widget.fraisScolaires.backupToServer(
-                  appState.schoolCode!,
-                  appState.backupPassword!,
-                );
+                final result = await widget.fraisScolaires
+                    .backupToServer(appState.schoolCode!, appState.backupPassword!);
                 final bool success = result['success'] == true;
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(success
-                          ? "✅ Sauvegarde réussie — les parents peuvent maintenant accéder aux données"
+                          ? "✅ Sauvegarde réussie — résumé promoteur mis à jour, "
+                          "et les parents peuvent maintenant accéder aux données"
                           : "❌ Erreur de sauvegarde : ${result['error'] ?? 'inconnue'}"),
-                      backgroundColor:
-                      success ? Colors.green : Colors.red,
+                      backgroundColor: success ? Colors.green : Colors.red,
                       duration: Duration(seconds: success ? 3 : 6),
                     ),
                   );
@@ -2371,32 +2138,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
               icon: const Icon(Icons.cloud_download),
               label: const Text("Récupérer depuis le Serveur"),
               onPressed: () async {
-                if (appState.schoolCode == null ||
-                    appState.backupPassword == null) {
+                if (appState.schoolCode == null || appState.backupPassword == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text(
-                            "Définissez le code et le mot de passe")),
+                    const SnackBar(content: Text("Définissez le code et le mot de passe")),
                   );
                   return;
                 }
-                final result =
-                await widget.fraisScolaires.restoreFromServer(
-                  appState.schoolCode!,
-                  appState.backupPassword!,
-                );
+                final result = await widget.fraisScolaires
+                    .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
                 final bool success = result['success'] == true;
                 if (success && mounted) {
                   setState(() {
-                    selectedYear =
-                        widget.fraisScolaires.currentYear;
-                    nameController.text =
-                        widget.fraisScolaires.config.schoolName;
+                    selectedYear = widget.fraisScolaires.currentYear;
+                    nameController.text = widget.fraisScolaires.config.schoolName;
                   });
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text(
-                            "✅ Données récupérées et fusionnées")),
+                    const SnackBar(content: Text("✅ Données récupérées et fusionnées")),
                   );
                 } else if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -2410,20 +2167,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
             ),
             const Divider(),
-
-            // ==================== IMPRIMANTE EPSON TM-T20III (USB) ====================
             const Text("Imprimante de Reçus (Epson TM-T20III — USB)",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
-              "1. Branchez l'Epson TM-T20III en USB et installez son pilote "
-                  "Epson (elle doit apparaître dans \"Imprimantes et scanners\" "
-                  "de Windows).\n"
-                  "2. Cliquez \"Détecter\" pour voir les imprimantes installées.\n"
+              "1. Branchez l'Epson TM-T20III en USB et installez son pilote.\n"
+                  "2. Cliquez \"Détecter\".\n"
                   "3. Sélectionnez l'Epson dans la liste.\n"
-                  "4. Testez avec \"Imprimer page de test\".\n"
-                  "Après ça, chaque paiement imprimera automatiquement le reçu.",
+                  "4. Testez avec \"Imprimer page de test\".",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 12),
@@ -2435,8 +2186,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     hint: const Text("Choisir l'imprimante"),
                     value: _selectedPrinterName,
                     items: _availablePrinters
-                        .map((p) => DropdownMenuItem(
-                        value: p, child: Text(p)))
+                        .map((p) => DropdownMenuItem(value: p, child: Text(p)))
                         .toList(),
                     onChanged: (val) {
                       if (val != null) _saveSelectedPrinter(val);
@@ -2447,15 +2197,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ElevatedButton.icon(
                   icon: _loadingPrinters
                       ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2),
-                  )
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
                       : const Icon(Icons.search),
                   label: const Text("Détecter"),
-                  onPressed:
-                  _loadingPrinters ? null : _detectPrinters,
+                  onPressed: _loadingPrinters ? null : _detectPrinters,
                 ),
               ],
             ),
@@ -2464,23 +2211,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
                   "Imprimante actuelle : $_selectedPrinterName",
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.indigo),
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
                 ),
               ),
             const SizedBox(height: 18),
-
-            // ==================== ⚡ NOUVEAU — LOGO DU REÇU ====================
             const Text("Logo de l'établissement (sur les reçus)",
-                style: TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.bold)),
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
               "Le logo choisi sera imprimé à gauche ET à droite, en haut "
-                  "du reçu, avec le nom de l'établissement bien centré "
-                  "entre les deux. Une image carrée donne le meilleur "
-                  "résultat.",
+                  "du reçu, avec le nom de l'établissement centré entre les deux.",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
@@ -2503,18 +2243,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     child: _logoBytes != null
                         ? ClipRRect(
                       borderRadius: BorderRadius.circular(6),
-                      child: Image.memory(_logoBytes!,
-                          fit: BoxFit.contain),
+                      child: Image.memory(_logoBytes!, fit: BoxFit.contain),
                     )
-                        : const Icon(Icons.image_not_supported,
-                        color: Colors.grey),
+                        : const Icon(Icons.image_not_supported, color: Colors.grey),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Text(
-                      _logoBytes != null
-                          ? "Logo actuel"
-                          : "Aucun logo sélectionné",
+                      _logoBytes != null ? "Logo actuel" : "Aucun logo sélectionné",
                       style: const TextStyle(fontWeight: FontWeight.w500),
                     ),
                   ),
@@ -2523,18 +2259,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ? const SizedBox(
                         width: 14,
                         height: 14,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2))
+                        child: CircularProgressIndicator(strokeWidth: 2))
                         : const Icon(Icons.upload, size: 18),
-                    label: Text(
-                        _logoBytes == null ? "Choisir" : "Changer"),
+                    label: Text(_logoBytes == null ? "Choisir" : "Changer"),
                     onPressed: _loadingLogo ? null : _pickLogo,
                   ),
                   if (_logoBytes != null) ...[
                     const SizedBox(width: 8),
                     IconButton(
-                      icon: const Icon(Icons.delete_outline,
-                          color: Colors.red),
+                      icon: const Icon(Icons.delete_outline, color: Colors.red),
                       tooltip: "Retirer le logo",
                       onPressed: _loadingLogo ? null : _removeLogo,
                     ),
@@ -2546,50 +2279,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ElevatedButton.icon(
               icon: _testingPrint
                   ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Colors.white),
-              )
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                   : const Icon(Icons.print),
-              label: Text(_testingPrint
-                  ? "Impression en cours..."
-                  : "Imprimer page de test"),
+              label: Text(_testingPrint ? "Impression en cours..." : "Imprimer page de test"),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.indigo,
                 foregroundColor: Colors.white,
                 minimumSize: const Size(double.infinity, 48),
               ),
-              onPressed:
-              (_selectedPrinterName == null || _testingPrint)
-                  ? null
-                  : _testPrint,
+              onPressed: (_selectedPrinterName == null || _testingPrint) ? null : _testPrint,
             ),
             const Divider(),
-
-            // ==================== MODE SOMBRE ====================
             SwitchListTile(
               title: const Text("Mode Sombre"),
               value: appState.isDarkMode,
               onChanged: (_) => appState.toggleTheme(),
             ),
             const Divider(),
-
-            // ==================== DÉCONNEXION ====================
             const SizedBox(height: 8),
             ElevatedButton.icon(
               icon: const Icon(Icons.logout, color: Colors.white),
-              label: const Text(
-                "Déconnexion",
-                style: TextStyle(fontSize: 16),
-              ),
+              label: const Text("Déconnexion", style: TextStyle(fontSize: 16)),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,
                 foregroundColor: Colors.white,
-                padding:
-                const EdgeInsets.symmetric(vertical: 14),
-                minimumSize:
-                const Size(double.infinity, 52),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                minimumSize: const Size(double.infinity, 52),
               ),
               onPressed: _deconnexion,
             ),
@@ -2600,9 +2317,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ====================================================================
-  // GESTION DES SECTIONS
-  // ====================================================================
   void _addNewSection() async {
     if (!await _verifyBackupPassword()) return;
     final controller = TextEditingController();
@@ -2612,23 +2326,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text("Nouvelle Section"),
         content: TextField(
           controller: controller,
-          decoration:
-          const InputDecoration(labelText: "Nom de la section"),
+          decoration: const InputDecoration(labelText: "Nom de la section"),
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               if (controller.text.trim().isNotEmpty) {
                 final newSection = controller.text.trim();
-                if (!widget.fraisScolaires.config.sections
-                    .contains(newSection)) {
-                  widget.fraisScolaires.config.sections
-                      .add(newSection);
-                  widget.fraisScolaires.config
-                      .feesBySection[newSection] = 35000;
+                if (!widget.fraisScolaires.config.sections.contains(newSection)) {
+                  widget.fraisScolaires.config.sections.add(newSection);
                   widget.fraisScolaires.saveData();
                   if (mounted) setState(() {});
                 }
@@ -2646,45 +2353,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!await _verifyBackupPassword()) return;
     if (widget.fraisScolaires.config.sections.length <= 1) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content:
-            Text("Vous devez garder au moins une section")),
+        const SnackBar(content: Text("Vous devez garder au moins une section")),
       );
       return;
     }
     setState(() {
       widget.fraisScolaires.config.sections.remove(section);
       widget.fraisScolaires.config.feesBySection.remove(section);
-      widget.fraisScolaires.config.monthlyExceptionsBySection
-          .remove(section);
+      widget.fraisScolaires.config.monthlyExceptionsBySection.remove(section);
       widget.fraisScolaires.config.feesByClasse
           .removeWhere((key, _) => key.startsWith("$section|"));
       widget.fraisScolaires.config.monthlyExceptionsByClasse
           .removeWhere((key, _) => key.startsWith("$section|"));
-      widget.fraisScolaires.config.classesBySection
-          .remove(section);
+      widget.fraisScolaires.config.classesBySection.remove(section);
     });
     await widget.fraisScolaires.saveData();
   }
 
-  // ====================================================================
-  // EXCEPTIONS
-  // ====================================================================
   void _editExceptionForSection() async {
-    if (selectedSectionForException == null ||
-        selectedMonthForException == null) {
+    if (selectedSectionForException == null || selectedMonthForException == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content:
-            Text("Veuillez choisir une section et un mois")),
+        const SnackBar(content: Text("Veuillez choisir une section et un mois")),
       );
       return;
     }
     if (!await _verifyBackupPassword()) return;
 
     final controller = TextEditingController();
-    final scopeLabel =
-        selectedClasseScopeForException ?? "Toutes les classes";
+    final scopeLabel = selectedClasseScopeForException ?? "Toutes les classes";
 
     showDialog(
       context: context,
@@ -2696,25 +2392,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           keyboardType: TextInputType.number,
           decoration: const InputDecoration(
             labelText: "Montant (FC)",
-            helperText:
-            "Laisser vide pour supprimer l'exception existante",
+            helperText: "Laisser vide pour supprimer l'exception existante",
           ),
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () async {
-              final amount =
-              double.tryParse(controller.text);
+              final amount = double.tryParse(controller.text);
 
-              // ⚡ NOUVEAU — montant requis pour CE mois précis, capturé
-              // AVANT toute modification, pour pouvoir ensuite proposer
-              // le mode "constant" si le nouveau montant s'avère plus
-              // bas.
-              final double ancienRequisPourCeMois =
-              widget.fraisScolaires.getRequiredForMonth(
+              final double ancienRequisPourCeMois = widget.fraisScolaires.getRequiredForMonth(
                 selectedMonthForException!,
                 selectedSectionForException!,
                 selectedClasseScopeForException,
@@ -2722,28 +2409,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
               if (selectedClasseScopeForException == null) {
                 if (amount != null) {
-                  widget.fraisScolaires.config
-                      .monthlyExceptionsBySection
-                      .putIfAbsent(
-                      selectedSectionForException!, () => {})
-                  [selectedMonthForException!] = amount;
+                  widget.fraisScolaires.config.monthlyExceptionsBySection
+                      .putIfAbsent(selectedSectionForException!, () => {})[
+                  selectedMonthForException!] = amount;
                 } else {
-                  widget.fraisScolaires.config
-                      .monthlyExceptionsBySection[
-                  selectedSectionForException!]
+                  widget.fraisScolaires
+                      .config.monthlyExceptionsBySection[selectedSectionForException!]
                       ?.remove(selectedMonthForException);
                 }
               } else {
-                final key =
-                    "${selectedSectionForException!}|${selectedClasseScopeForException!}";
+                final key = "${selectedSectionForException!}|${selectedClasseScopeForException!}";
                 if (amount != null) {
-                  widget.fraisScolaires.config
-                      .monthlyExceptionsByClasse
-                      .putIfAbsent(key, () => {})
-                  [selectedMonthForException!] = amount;
+                  widget.fraisScolaires.config.monthlyExceptionsByClasse
+                      .putIfAbsent(key, () => {})[selectedMonthForException!] = amount;
                 } else {
-                  widget.fraisScolaires.config
-                      .monthlyExceptionsByClasse[key]
+                  widget.fraisScolaires.config.monthlyExceptionsByClasse[key]
                       ?.remove(selectedMonthForException);
                 }
               }
@@ -2751,44 +2431,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
               Navigator.pop(ctx);
 
-              // ⚡ NOUVEAU — montant requis pour ce même mois APRÈS la
-              // modification, pour savoir s'il a réellement baissé.
-              final double nouveauRequisPourCeMois =
-              widget.fraisScolaires.getRequiredForMonth(
+              final double nouveauRequisPourCeMois = widget.fraisScolaires.getRequiredForMonth(
                 selectedMonthForException!,
                 selectedSectionForException!,
                 selectedClasseScopeForException,
               );
-              final bool montantEstPlusBas =
-                  nouveauRequisPourCeMois < ancienRequisPourCeMois;
+              final bool montantEstPlusBas = nouveauRequisPourCeMois < ancienRequisPourCeMois;
 
-              // ⚡ NOUVEAU — le choix du mode n'est proposé que si le
-              // montant a baissé pour ce mois précis ; sinon on garde
-              // directement le comportement intelligent habituel.
               String mode = 'intelligent';
               if (montantEstPlusBas && mounted) {
                 final choix = await _askRecalculMode(context);
                 if (choix != null) mode = choix;
               }
 
-              // ⚡ NOUVEAU — même logique de recalcul automatique que
-              // pour un changement de frais mensuel classique : par
-              // défaut on redistribue intelligemment sur toute l'année
-              // (mode "intelligent"), ou, si l'utilisateur l'a choisi
-              // pour une baisse de montant, on ajuste UNIQUEMENT ce mois
-              // précis sans rien reporter sur les mois suivants (mode
-              // "constant").
               final int nbRecalcules = mode == 'constant'
-                  ? await widget.fraisScolaires
-                  .recalculerPaiementsPourModeConstant(
+                  ? await widget.fraisScolaires.recalculerPaiementsPourModeConstant(
                 section: selectedSectionForException,
                 classeNumero: selectedClasseScopeForException,
-                anciensRequisParMois: {
-                  selectedMonthForException!: ancienRequisPourCeMois,
-                },
+                anciensRequisParMois: {selectedMonthForException!: ancienRequisPourCeMois},
               )
-                  : await widget.fraisScolaires
-                  .recalculerPaiementsPour(
+                  : await widget.fraisScolaires.recalculerPaiementsPour(
                 section: selectedSectionForException,
                 classeNumero: selectedClasseScopeForException,
               );
@@ -2816,7 +2478,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _addAdministration() async {
     if (!await _verifyBackupPassword()) return;
-    final nomController     = TextEditingController();
+    final nomController = TextEditingController();
     final percentController = TextEditingController();
     showDialog(
       context: context,
@@ -2825,33 +2487,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
-                controller: nomController,
-                decoration:
-                const InputDecoration(labelText: "Nom")),
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
             TextField(
               controller: percentController,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                  labelText: "Pourcentage (%)"),
+              decoration: const InputDecoration(labelText: "Pourcentage (%)"),
             ),
           ],
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final percent =
-              double.tryParse(percentController.text);
-              if (nomController.text.isNotEmpty &&
-                  percent != null) {
+              final percent = double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty && percent != null) {
                 widget.fraisScolaires.config.administrations
-                    .add(Administration(
-                  nom:         nomController.text,
-                  pourcentage: percent,
-                ));
+                    .add(Administration(nom: nomController.text, pourcentage: percent));
                 widget.fraisScolaires.saveData();
                 if (mounted) setState(() {});
                 Navigator.pop(ctx);
@@ -2866,10 +2517,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _editAdministration(Administration admin) async {
     if (!await _verifyBackupPassword()) return;
-    final nomController =
-    TextEditingController(text: admin.nom);
-    final percentController =
-    TextEditingController(text: admin.pourcentage.toString());
+    final nomController = TextEditingController(text: admin.nom);
+    final percentController = TextEditingController(text: admin.pourcentage.toString());
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2877,29 +2526,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
-                controller: nomController,
-                decoration:
-                const InputDecoration(labelText: "Nom")),
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
             TextField(
               controller: percentController,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                  labelText: "Pourcentage (%)"),
+              decoration: const InputDecoration(labelText: "Pourcentage (%)"),
             ),
           ],
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              final percent =
-              double.tryParse(percentController.text);
-              if (nomController.text.isNotEmpty &&
-                  percent != null) {
-                admin.nom         = nomController.text;
+              final percent = double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty && percent != null) {
+                admin.nom = nomController.text;
                 admin.pourcentage = percent;
                 widget.fraisScolaires.saveData();
                 if (mounted) setState(() {});
@@ -2913,6 +2554,117 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  void _addAutreFraisAdministration() async {
+    if (!await _verifyBackupPassword()) return;
+    final nomController = TextEditingController();
+    final percentController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Nouvelle Administration (Autres Frais)"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
+            TextField(
+              controller: percentController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Pourcentage (%)"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () async {
+              final percent = double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty && percent != null) {
+                await widget.fraisScolaires.addAutreFraisAdministration(
+                  nom: nomController.text,
+                  pourcentage: percent,
+                );
+                if (mounted) {
+                  setState(() {});
+                  Navigator.pop(ctx);
+                }
+              }
+            },
+            child: const Text("Ajouter"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _editAutreFraisAdministration(AutreFraisAdministration admin) async {
+    if (!await _verifyBackupPassword()) return;
+    final nomController = TextEditingController(text: admin.nom);
+    final percentController = TextEditingController(text: admin.pourcentage.toString());
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Modifier Administration (Autres Frais)"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nomController, decoration: const InputDecoration(labelText: "Nom")),
+            TextField(
+              controller: percentController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Pourcentage (%)"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () async {
+              final percent = double.tryParse(percentController.text);
+              if (nomController.text.isNotEmpty && percent != null) {
+                await widget.fraisScolaires.updateAutreFraisAdministration(
+                  admin.id,
+                  nom: nomController.text,
+                  pourcentage: percent,
+                );
+                if (mounted) {
+                  setState(() {});
+                  Navigator.pop(ctx);
+                }
+              }
+            },
+            child: const Text("Enregistrer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteAutreFraisAdministration(AutreFraisAdministration admin) async {
+    if (!await _verifyBackupPassword()) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Supprimer cette administration ?"),
+        content: Text(
+          "Voulez-vous vraiment supprimer \"${admin.nom}\" de la répartition des Autres Frais ?",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Supprimer"),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await widget.fraisScolaires.deleteAutreFraisAdministration(admin.id);
+      if (mounted) setState(() {});
+    }
+  }
+
   void _setSchoolCode(BuildContext context, AppState appState) {
     final codeController = TextEditingController();
     showDialog(
@@ -2921,13 +2673,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text("Code de Récupération"),
         content: TextField(
           controller: codeController,
-          decoration:
-          const InputDecoration(labelText: "Code unique (ex: MAPENDO)"),
+          decoration: const InputDecoration(labelText: "Code unique (ex: MAPENDO)"),
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               if (codeController.text.trim().isNotEmpty) {
@@ -2951,22 +2700,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: TextField(
           controller: passController,
           obscureText: true,
-          decoration: const InputDecoration(
-              labelText: "Mot de passe (min 6 caractères)"),
+          decoration: const InputDecoration(labelText: "Mot de passe (min 6 caractères)"),
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
               if (passController.text.trim().length >= 6) {
-                appState.setBackupPassword(
-                    passController.text.trim());
+                appState.setBackupPassword(passController.text.trim());
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text("Mot de passe enregistré")),
+                  const SnackBar(content: Text("Mot de passe enregistré")),
                 );
               }
             },

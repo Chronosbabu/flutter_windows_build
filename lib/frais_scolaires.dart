@@ -1,8 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
-import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
@@ -12,8 +10,10 @@ import 'package:file_selector/file_selector.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
 import 'services/epson_printer_service.dart';
+import 'dart:math';
 
 const String serverUrl = "https://jsinf.onrender.com";
+
 class Depense {
   String id;
   String motif;
@@ -46,13 +46,13 @@ class Depense {
     'enregistrePar': enregistrePar,
   };
 
-  /// Ex: "14/08/2026 à 10:32"
   String get dateFormatee {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${two(date.day)}/${two(date.month)}/${date.year} à '
         '${two(date.hour)}:${two(date.minute)}';
   }
 }
+
 class AutreFrais {
   String id;
   String nom;
@@ -61,50 +61,6 @@ class AutreFrais {
   String? section;
   String? classe;
   DateTime dateCreation;
-
-  // ==========================================================================
-  // ⚡ NOUVEAU — MONTANTS VARIABLES SELON LA SECTION OU LA CLASSE
-  // ==========================================================================
-  // Demande de la direction : un "Autre Frais" (ex: "Frais de l'État") doit
-  // pouvoir s'appliquer à TOUTE l'école (scope = 'all') — donc une seule
-  // répartition par administration pour ce frais — tout en étant payé à un
-  // montant DIFFÉRENT selon la section ou la classe de l'élève (ex: le
-  // Secondaire paie plus que le Primaire).
-  //
-  // Avant cette version, un `AutreFrais` n'avait qu'UN SEUL montant valable
-  // pour tous les élèves éligibles. Créer plusieurs frais séparés (un par
-  // section/classe) aurait cassé la répartition globale par administration,
-  // puisque chaque frais a ses propres paiements et ses propres totaux.
-  //
-  // Solution : ce même frais garde un montant par défaut (`montant`), et
-  // peut désormais définir des EXCEPTIONS optionnelles :
-  //   - `montantsParSection` : nom de section -> montant (remplace le
-  //     montant par défaut pour TOUS les élèves de cette section, sauf
-  //     exception plus précise par classe).
-  //   - `montantsParClasse`  : clé "section|classeNumero" -> montant
-  //     (PRIORITÉ ABSOLUE, même au-dessus d'une exception par section).
-  // La clé de `montantsParClasse` utilise le même format que
-  // `FraisScolaires._classeKey` (section + numéro de classe SANS la
-  // sous-classe A/B/C), exactement comme pour les frais mensuels
-  // principaux (`config.feesByClasse`), pour rester cohérent avec le reste
-  // de l'application.
-  //
-  // Ces deux cartes sont optionnelles et VIDES par défaut : un frais créé
-  // sans aucune exception continue de fonctionner exactement comme avant
-  // (un seul montant pour tous les élèves éligibles). L'ÉLIGIBILITÉ (qui
-  // doit payer ce frais) reste déterminée UNIQUEMENT par `scope` /
-  // `section` / `classe`, comme avant — ces deux nouvelles cartes ne
-  // déterminent QUE le montant, une fois l'élève déjà reconnu éligible.
-  //
-  // Voir `FraisScolaires.getMontantAutreFraisPourEleve` pour la résolution
-  // du montant, utilisée automatiquement par `FraisScolaires.payAutreFrais`
-  // et `FraisScolaires.printOrQueueAutreFraisReceipt`. La répartition par
-  // administration (`getAdminDistributionForAutreFrais`) et les totaux
-  // (`getTotalPaidForAutreFrais`) n'ont besoin d'AUCUNE modification : ils
-  // sont déjà calculés à partir des paiements RÉELLEMENT enregistrés
-  // (`AutreFraisPaiement.montant`), qui reflètent maintenant automatiquement
-  // le montant correct par élève.
-  // ==========================================================================
   Map<String, double> montantsParSection;
   Map<String, double> montantsParClasse;
 
@@ -132,8 +88,6 @@ class AutreFrais {
     dateCreation:
     DateTime.tryParse(json['dateCreation'] as String? ?? '') ??
         DateTime.now(),
-    // ⚡ NOUVEAU — absentes d'une ancienne sauvegarde, ces cartes restent
-    // simplement vides : aucune erreur, comportement identique à avant.
     montantsParSection:
     (json['montantsParSection'] as Map<String, dynamic>?)?.map(
           (key, value) => MapEntry(key, (value as num).toDouble()),
@@ -154,11 +108,11 @@ class AutreFrais {
     'section': section,
     'classe': classe,
     'dateCreation': dateCreation.toIso8601String(),
-    // ⚡ NOUVEAU
     'montantsParSection': montantsParSection,
     'montantsParClasse': montantsParClasse,
   };
 }
+
 class AutreFraisPaiement {
   String id;
   String autreFraisId;
@@ -206,23 +160,7 @@ class AutreFraisPaiement {
         '${two(date.hour)}:${two(date.minute)}';
   }
 }
-// ==========================================================================
-// ⚡ NOUVEAU — ADMINISTRATION DÉDIÉE AUX "AUTRES FRAIS DE PAIEMENT"
-// ==========================================================================
-// ⚠️ IMPORTANT — Cette classe est VOLONTAIREMENT SÉPARÉE de la classe
-// `Administration` utilisée par `config.administrations` (celle des frais
-// mensuels PRINCIPAUX, définie dans models.dart et gérée dans Paramètres >
-// "Administrations & Répartition (%)"). Les deux ne partagent AUCUNE
-// donnée, AUCUNE liste, AUCUN calcul commun :
-//   - `config.administrations`         -> UNIQUEMENT les frais principaux.
-//   - `autresFraisAdministrations`     -> UNIQUEMENT les "Autres Frais".
-// Cette séparation stricte est intentionnelle et ne doit JAMAIS être
-// fusionnée : l'application est utilisée par plusieurs écoles, et un
-// mélange entre les deux systèmes de répartition casserait la confiance
-// des utilisateurs dans des calculs financiers déjà validés et utilisés en
-// production pour les frais principaux. Ne jamais faire pointer l'une vers
-// l'autre, ni partager un pourcentage ou un nom entre les deux listes.
-// ==========================================================================
+
 class AutreFraisAdministration {
   String id;
   String nom;
@@ -247,6 +185,7 @@ class AutreFraisAdministration {
     'pourcentage': pourcentage,
   };
 }
+
 class RepartitionDetail {
   final String label;
   final double total;
@@ -258,9 +197,10 @@ class RepartitionDetail {
     required this.parAdministration,
   });
 }
+
 class AdminAuditLog {
   String id;
-  String action; // 'annulation' | 'modification'
+  String action;
   String eleveId;
   String eleveNomComplet;
   String classe;
@@ -311,6 +251,7 @@ class AdminAuditLog {
         '${two(date.hour)}:${two(date.minute)}';
   }
 }
+
 class Signataire {
   String id;
   String nom;
@@ -347,13 +288,7 @@ class FraisScolaires {
   Map<String, List<Depense>> depensesByYear = {};
   List<AutreFrais> autresFrais = [];
   Map<String, List<AutreFraisPaiement>> autresFraisPaiementsByYear = {};
-  // ⚡ NOUVEAU — Liste d'administrations DÉDIÉE aux "Autres Frais de
-  // Paiement", totalement indépendante de `config.administrations` (qui
-  // reste réservée aux frais mensuels principaux). Voir les commentaires
-  // détaillés sur la classe `AutreFraisAdministration` plus haut.
   List<AutreFraisAdministration> autresFraisAdministrations = [];
-  String? hiddenCodeHash;
-  String? hiddenCodeSalt;
   List<AdminAuditLog> adminAuditLog = [];
   List<Signataire> signataires = [];
   String? lastReportCity;
@@ -378,20 +313,23 @@ class FraisScolaires {
   ];
 
   FraisScolaires() : config = SchoolConfig(schoolName: "EduPay School RDC");
+
   int _schoolMonthIndexForToday() {
-    final calendarMonth = DateTime.now().month; // 1 (Janvier)..12 (Décembre)
+    final calendarMonth = DateTime.now().month;
     if (calendarMonth >= 9 && calendarMonth <= 12) {
-      return calendarMonth - 9; // Sept->0, Oct->1, Nov->2, Dec->3
+      return calendarMonth - 9;
     } else if (calendarMonth >= 1 && calendarMonth <= 6) {
-      return calendarMonth + 3; // Jan->4, Fev->5, Mar->6, Avr->7, Mai->8, Jun->9
+      return calendarMonth + 3;
     }
     return -1;
   }
+
   String? get currentSchoolMonthName {
     final idx = _schoolMonthIndexForToday();
     if (idx < 0 || idx >= months.length) return null;
     return months[idx];
   }
+
   String get _dateGenerationFormatee {
     final now = DateTime.now();
     String two(int n) => n.toString().padLeft(2, '0');
@@ -399,6 +337,7 @@ class FraisScolaires {
     return '$jour ${two(now.day)}/${two(now.month)}/${now.year} à '
         '${two(now.hour)}:${two(now.minute)}';
   }
+
   String getMoisPayesPourDate(Eleve eleve, [String? date]) {
     final targetDate = date ?? DateTime.now().toString().split(' ')[0];
     final moisDuJour = <String>[];
@@ -414,6 +353,7 @@ class FraisScolaires {
             (a, b) => months.indexOf(a).compareTo(months.indexOf(b)));
     return moisDuJour.join(', ');
   }
+
   List<pw.Widget> _buildSignatureSection([String? city]) {
     if (signataires.isEmpty) return [];
 
@@ -433,9 +373,7 @@ class FraisScolaires {
           child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.stretch,
             children: [
-              // Espace réservé à la signature manuscrite.
               pw.SizedBox(height: 34),
-              // Ligne de signature.
               pw.Container(
                 decoration: const pw.BoxDecoration(
                   border: pw.Border(
@@ -494,42 +432,6 @@ class FraisScolaires {
     ];
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — MISE EN PAGE ROBUSTE DES TABLEAUX PDF
-  // ==========================================================================
-  // Problème résolu : sans largeurs de colonnes explicites, la librairie
-  // PDF calcule des largeurs "intrinsèques" par colonne (une largeur qui
-  // dépend du contenu, sans tenir compte de la largeur totale disponible).
-  // Dès qu'un rapport contient beaucoup de colonnes (typiquement une
-  // colonne par administration configurée) ou des textes un peu longs
-  // (noms de classes composés, noms d'administrations...), la somme de
-  // ces largeurs "idéales" dépasse la largeur de la page : la librairie
-  // réduit alors TOUTES les colonnes proportionnellement pour que ça
-  // tienne, au point qu'une colonne peut devenir plus étroite qu'un seul
-  // caractère — ce qui produit le rendu illisible parfois observé (texte
-  // étalé lettre par lettre à la verticale).
-  //
-  // La solution appliquée à TOUS les tableaux de rapports ci-dessous :
-  //   1. Des largeurs de colonnes EXPLICITES et proportionnées
-  //      (`FlexColumnWidth`), toujours assez généreuses pour les colonnes
-  //      à texte long (Nom, Classe, Type de frais...), jamais écrasées
-  //      même avec beaucoup de colonnes numériques à côté.
-  //   2. Une taille de police qui s'adapte AUTOMATIQUEMENT au nombre de
-  //      colonnes (plus il y en a — ex: beaucoup d'administrations —
-  //      plus elle est réduite), mais jamais en dessous d'un seuil
-  //      lisible à l'impression.
-  //   3. Une orientation PAYSAGE pour tous les rapports à plusieurs
-  //      colonnes, qui donne nettement plus de largeur disponible et
-  //      garde un rendu net et présentable devant la direction, quel que
-  //      soit le nombre de colonnes ou la longueur des noms.
-  //   4. Des en-têtes harmonisés (fond indigo, texte blanc, gras) sur
-  //      tous les tableaux, pour un rendu homogène d'un rapport à l'autre.
-  // ==========================================================================
-
-  /// Construit une carte {index de colonne -> largeur relative} à partir
-  /// d'une liste de proportions (ex: [0.7, 2.4, 1.1, 1.2] pour ID / Nom
-  /// Complet / Section / Classe). Les proportions n'ont pas besoin de
-  /// totaliser 1 : seul leur ratio les unes par rapport aux autres compte.
   Map<int, pw.TableColumnWidth> _buildColumnWidths(List<double> flexRatios) {
     return {
       for (var i = 0; i < flexRatios.length; i++)
@@ -537,10 +439,6 @@ class FraisScolaires {
     };
   }
 
-  /// Taille de police des CELLULES d'un tableau, réduite automatiquement
-  /// quand il y a beaucoup de colonnes (typiquement à cause du nombre
-  /// d'administrations configurées), mais jamais en dessous de 6.5pt pour
-  /// rester lisible à l'impression.
   double _tableCellFontSize(int columnCount) {
     if (columnCount <= 6) return 9;
     if (columnCount <= 8) return 8.5;
@@ -549,10 +447,6 @@ class FraisScolaires {
     return 6.5;
   }
 
-  /// Taille de police des EN-TÊTES — suit la même logique de réduction
-  /// progressive que `_tableCellFontSize`, avec un plancher légèrement
-  /// plus haut car les en-têtes portent souvent des libellés importants
-  /// (ex: nom d'une administration + son pourcentage).
   double _tableHeaderFontSize(int columnCount) {
     if (columnCount <= 6) return 9;
     if (columnCount <= 8) return 8.5;
@@ -561,49 +455,190 @@ class FraisScolaires {
     return 7;
   }
 
-  bool get hiddenCodeIsConfigured =>
-      hiddenCodeHash != null && hiddenCodeHash!.isNotEmpty;
+  // ==========================================================================
+  // DEMANDES PROMOTEUR (remplace l'ancien système de code masqué)
+  // ==========================================================================
+  Future<Map<String, dynamic>> createPromoterRequest({
+    required String type,
+    required Eleve eleve,
+    Map<String, dynamic>? transaction,
+    String? mois,
+    double? nouveauMontant,
+  }) async {
+    if (schoolCode == null || schoolCode!.isEmpty) {
+      return {
+        'success': false,
+        'error': "Code école manquant. Sauvegardez d'abord sur le serveur."
+      };
+    }
+    try {
+      final response = await http.post(
+        Uri.parse('$serverUrl/school/create_promoter_request'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'school_code': schoolCode,
+          'type': type,
+          'eleve_id': eleve.id,
+          'eleve_nom': '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+          'classe': eleve.classe,
+          'section': eleve.section,
+          'mois': mois ?? transaction?['mois'] ?? '',
+          'transaction_id': transaction?['id'] ?? '',
+          'montant_actuel': (transaction?['amount'] as num?)?.toDouble(),
+          'nouveau_montant': nouveauMontant,
+        }),
+      ).timeout(const Duration(seconds: 15));
 
-  String _hashWithSalt(String code, String salt) {
-    final bytes = utf8.encode('$salt::$code');
-    return sha256.convert(bytes).toString();
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {'success': true, 'request_id': data['request_id']};
+      }
+      return {
+        'success': false,
+        'error': 'Statut ${response.statusCode} : ${response.body}',
+      };
+    } on SocketException catch (e) {
+      return {'success': false, 'error': 'Aucune connexion réseau : $e'};
+    } catch (e) {
+      return {'success': false, 'error': 'Erreur inattendue : $e'};
+    }
   }
-  Future<void> setHiddenCode(String code) async {
-    final trimmed = code.trim();
-    if (trimmed.isEmpty) return;
-    final rand = Random.secure();
-    final saltBytes = List<int>.generate(16, (_) => rand.nextInt(256));
-    final salt = base64Url.encode(saltBytes);
-    hiddenCodeSalt = salt;
-    hiddenCodeHash = _hashWithSalt(trimmed, salt);
-    await saveData();
+
+  Future<Map<String, dynamic>> checkPromoterRequestStatus(
+      String requestId) async {
+    if (schoolCode == null || schoolCode!.isEmpty) {
+      return {'status': 'pending'};
+    }
+    try {
+      final response = await http
+          .get(Uri.parse(
+          '$serverUrl/school/get_request_status?school_code=$schoolCode&request_id=$requestId'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return Map<String, dynamic>.from(json.decode(response.body));
+      }
+      return {'status': 'pending'};
+    } catch (_) {
+      return {'status': 'pending'};
+    }
   }
-  bool verifyHiddenCode(String code) {
-    if (!hiddenCodeIsConfigured) return false;
-    return _hashWithSalt(code.trim(), hiddenCodeSalt!) == hiddenCodeHash;
+
+  Future<void> applyApprovedRequest(
+      String type,
+      Eleve eleve,
+      Map<String, dynamic> transaction,
+      Map<String, dynamic> requestData,
+      ) async {
+    if (type == 'cancel') {
+      await cancelTransaction(eleve: eleve, transaction: transaction);
+    } else if (type == 'modify') {
+      final nouveau = (requestData['nouveau_montant'] as num?)?.toDouble();
+      if (nouveau != null) {
+        await modifyTransactionAmount(
+            eleve: eleve, transaction: transaction, newAmount: nouveau);
+      }
+    } else if (type == 'reprint') {
+      await forceReprintTransactionReceipt(
+          eleve: eleve, transaction: transaction);
+    }
+  }
+
+  Future<bool> forceReprintTransactionReceipt({
+    required Eleve eleve,
+    required Map<String, dynamic> transaction,
+  }) async {
+    final printerName = await _currentPrinterName();
+    if (printerName.isEmpty) return false;
+    final logoBytes = await _loadLogoBytesForPrinting();
+    final bool ok = await EscPosPrinterService.printTransactionsReceipt(
+      printerName: printerName,
+      schoolName: config.schoolName,
+      currentYear: currentYear,
+      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      studentId: eleve.id,
+      classe: eleve.classe,
+      section: eleve.section,
+      transactions: [transaction],
+      logoBytes: logoBytes,
+      duplicata: true,
+    );
+    if (ok) {
+      transaction['receiptConfirmed'] = true;
+      await saveData();
+    }
+    return ok;
   }
 
   // ==========================================================================
-  // ⚡ CORRIGÉ — ANNULATION / MODIFICATION D'UN PAIEMENT PAR L'ADMIN
+  // RÉSUMÉ PROMOTEUR — calculé et poussé au serveur après chaque sauvegarde
   // ==========================================================================
-  // Avant : ces deux fonctions ne touchaient QUE le mois concerné par la
-  // transaction annulée/modifiée. Si un mois suivant avait déjà reçu un
-  // trop-perçu (reporté automatiquement lors d'un paiement), ce trop-perçu
-  // restait bloqué sur le mois suivant après l'annulation/modification, et
-  // le mois concerné pouvait se retrouver mal soldé alors que l'argent
-  // existait bel et bien ailleurs dans l'année.
-  //
-  // Maintenant : après avoir touché la transaction, on appelle le même
-  // moteur de recalcul intelligent que celui utilisé lors d'un changement
-  // de frais dans les Paramètres (`recalculerRepartitionMoisPourEleve`).
-  // Il reprend le total RÉELLEMENT payé par l'élève (jamais modifié, jamais
-  // perdu) et le redistribue mois par mois selon les montants requis
-  // ACTUELS. Les reçus "principal" encore en attente d'impression pour cet
-  // élève sont automatiquement rafraîchis au passage (jamais les reçus déjà
-  // imprimés). Le comportement est donc désormais cohérent, que le
-  // désalignement vienne d'un changement de frais OU d'une annulation /
-  // modification manuelle d'un paiement.
-  // ==========================================================================
+  Map<String, dynamic> computePromoterSummary() {
+    final today = DateTime.now().toString().split(' ')[0];
+
+    double moneyTodayPrincipal = 0;
+    for (final e in currentData.eleves) {
+      for (final t in e.transactions) {
+        if (t['date'] == today) {
+          moneyTodayPrincipal += (t['amount'] as num?)?.toDouble() ?? 0.0;
+        }
+      }
+    }
+
+    double moneyTodayAutresFrais = 0;
+    for (final p in (autresFraisPaiementsByYear[currentYear] ?? [])) {
+      if (p.date.toString().split(' ')[0] == today) {
+        moneyTodayAutresFrais += p.montant;
+      }
+    }
+
+    final adminDistToday = calculateAdminDistribution(moneyTodayPrincipal);
+    final autresFraisAdminDistToday =
+    calculateAutresFraisAdminDistribution(moneyTodayAutresFrais);
+
+    final Map<String, int> studentsBySection = {};
+    final Map<String, int> studentsByClass = {};
+    for (final e in currentData.eleves) {
+      studentsBySection[e.section] = (studentsBySection[e.section] ?? 0) + 1;
+      final key = "${e.section} - ${e.classe}";
+      studentsByClass[key] = (studentsByClass[key] ?? 0) + 1;
+    }
+
+    final double totalPrincipal = getYearTotalCollected();
+    final double totalAutresFrais =
+    (autresFraisPaiementsByYear[currentYear] ?? [])
+        .fold(0.0, (sum, p) => sum + p.montant);
+
+    return {
+      'schoolName': config.schoolName,
+      'currentYear': currentYear,
+      'moneyToday': moneyTodayPrincipal + moneyTodayAutresFrais,
+      'moneyTodayPrincipal': moneyTodayPrincipal,
+      'moneyTodayAutresFrais': moneyTodayAutresFrais,
+      'adminDistributionToday': adminDistToday,
+      'autresFraisAdminDistributionToday': autresFraisAdminDistToday,
+      'totalStudents': currentData.eleves.length,
+      'studentsBySection': studentsBySection,
+      'studentsByClass': studentsByClass,
+      'totalAmountGlobal': totalPrincipal + totalAutresFrais,
+      'totalAmountBySection': getTotalBySection(),
+      'totalAmountByClass': getTotalByClass(),
+      'totalDepenses': getTotalDepenses(),
+      'soldeNet': getSoldeNetActuel(),
+    };
+  }
+
+  Future<void> pushPromoterSummary() async {
+    if (schoolCode == null || schoolCode!.isEmpty) return;
+    try {
+      final summary = computePromoterSummary();
+      await http.post(
+        Uri.parse('$serverUrl/school/push_promoter_summary'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'school_code': schoolCode, 'summary': summary}),
+      ).timeout(const Duration(seconds: 15));
+    } catch (_) {}
+  }
+
   Future<void> cancelTransaction({
     required Eleve eleve,
     required Map<String, dynamic> transaction,
@@ -618,9 +653,6 @@ class FraisScolaires {
 
     eleve.transactions.remove(transaction);
 
-    // ⚡ NOUVEAU — recalcul intelligent de toute l'année après l'annulation,
-    // pour que les mois suivants (et leurs éventuels trop-perçus déjà
-    // reportés) restent parfaitement cohérents avec le nouveau total payé.
     recalculerRepartitionMoisPourEleve(eleve);
 
     adminAuditLog.add(AdminAuditLog(
@@ -636,6 +668,7 @@ class FraisScolaires {
 
     await saveData();
   }
+
   Future<void> modifyTransactionAmount({
     required Eleve eleve,
     required Map<String, dynamic> transaction,
@@ -650,11 +683,9 @@ class FraisScolaires {
     eleve.paid[mois] = newPaid;
 
     transaction['amount'] = newAmount;
-    transaction['modifiePar'] = 'Admin';
+    transaction['modifiePar'] = 'Promoteur';
     transaction['modifieLe'] = DateTime.now().toString().split(' ')[0];
 
-    // ⚡ NOUVEAU — même recalcul intelligent que pour l'annulation, pour que
-    // toute l'année de l'élève reste cohérente avec le nouveau montant.
     recalculerRepartitionMoisPourEleve(eleve);
 
     adminAuditLog.add(AdminAuditLog(
@@ -670,12 +701,15 @@ class FraisScolaires {
 
     await saveData();
   }
+
   List<AdminAuditLog> getAdminAuditLog() {
     final list = List<AdminAuditLog>.from(adminAuditLog);
     list.sort((a, b) => b.date.compareTo(a.date));
     return list;
   }
+
   List<Signataire> getSignataires() => List<Signataire>.from(signataires);
+
   Future<Signataire> addSignataire({
     required String nom,
     required String fonction,
@@ -689,6 +723,7 @@ class FraisScolaires {
     await saveData();
     return signataire;
   }
+
   Future<void> updateSignataire(
       String id, {
         required String nom,
@@ -703,16 +738,20 @@ class FraisScolaires {
     }
     await saveData();
   }
+
   Future<void> deleteSignataire(String id) async {
     signataires.removeWhere((s) => s.id == id);
     await saveData();
   }
+
   Future<void> setLastReportCity(String city) async {
     final trimmed = city.trim();
     lastReportCity = trimmed.isEmpty ? null : trimmed;
     await saveData();
   }
+
   bool isReceiptPrinted(String key) => printedReceiptKeys.contains(key);
+
   Future<Uint8List?> _loadLogoBytesForPrinting() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -733,6 +772,7 @@ class FraisScolaires {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('printer_name') ?? '';
   }
+
   Future<void> _markReceiptPrinted(String key) async {
     if (!printedReceiptKeys.contains(key)) {
       printedReceiptKeys.add(key);
@@ -740,6 +780,7 @@ class FraisScolaires {
     receiptQueue.removeWhere((r) => r['key'] == key);
     await saveData();
   }
+
   Future<void> _enqueueReceipt({
     required String key,
     required String type,
@@ -761,12 +802,19 @@ class FraisScolaires {
     }
     await saveData();
   }
+
   Future<bool> printOrQueuePrincipalReceipt({
     required Eleve eleve,
-    required String mois,
-    required double montantPaye,
+    required Map<String, dynamic> transaction,
   }) async {
-    final key = 'principal|${eleve.id}|$mois';
+    final String transactionId = transaction['id']?.toString() ?? '';
+    final String mois = transaction['mois']?.toString() ?? '';
+    final double montantPaye =
+        (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+
+    final key = transactionId.isNotEmpty
+        ? 'principal|${eleve.id}|$transactionId'
+        : 'principal|${eleve.id}|$mois|${DateTime.now().microsecondsSinceEpoch}';
     if (isReceiptPrinted(key)) return false;
 
     final double montantRequis =
@@ -788,6 +836,7 @@ class FraisScolaires {
       'resteAPayerMois': resteAPayerMois,
       'totalDejaPayeAnnee': totalPaye,
       'totalRequis': totalRequis,
+      'transactionId': transactionId,
       'historiqueTransactions':
       eleve.transactions.map((t) => Map<String, dynamic>.from(t)).toList(),
     };
@@ -827,6 +876,7 @@ class FraisScolaires {
     );
     return false;
   }
+
   Future<bool> printOrQueueAutreFraisReceipt({
     required Eleve eleve,
     required AutreFrais frais,
@@ -834,11 +884,6 @@ class FraisScolaires {
     final key = 'autre_frais|${eleve.id}|${frais.id}';
     if (isReceiptPrinted(key)) return false;
 
-    // ⚡ NOUVEAU — le montant imprimé sur le reçu doit refléter le montant
-    // RÉELLEMENT dû par CET élève précis (peut désormais varier selon sa
-    // section/classe si des exceptions ont été configurées pour ce frais —
-    // voir `getMontantAutreFraisPourEleve`), jamais un montant unique
-    // supposé valable pour tout le monde.
     final double montant = getMontantAutreFraisPourEleve(frais, eleve);
 
     final data = <String, dynamic>{
@@ -874,6 +919,7 @@ class FraisScolaires {
     );
     return false;
   }
+
   Future<int> flushReceiptQueue() async {
     if (receiptQueue.isEmpty) return 0;
     final printerName = await _currentPrinterName();
@@ -937,6 +983,7 @@ class FraisScolaires {
 
     return printedCount;
   }
+
   String generateLocalStudentId(String nom) {
     final yearShort = currentYear.length >= 2
         ? currentYear.substring(currentYear.length - 2)
@@ -983,6 +1030,7 @@ class FraisScolaires {
       }
     }
   }
+
   Eleve? findStudentByFullName(
       String nom, String postNom, String prenom, [String? year]) {
     final targetKey =
@@ -997,6 +1045,7 @@ class FraisScolaires {
     }
     return null;
   }
+
   Eleve? findDuplicateFullName({
     required String nom,
     required String postNom,
@@ -1016,6 +1065,7 @@ class FraisScolaires {
     }
     return null;
   }
+
   Map<String, dynamic> exportSnapshotForClients() {
     return {
       'config': config.toJson(),
@@ -1033,20 +1083,16 @@ class FraisScolaires {
             (key, value) =>
             MapEntry(key, value.map((p) => p.toJson()).toList()),
       ),
-      // ⚡ NOUVEAU — administrations dédiées aux Autres Frais (séparées de
-      // config.administrations, incluses dans config.toJson() ci-dessus).
       'autresFraisAdministrations':
       autresFraisAdministrations.map((a) => a.toJson()).toList(),
-      'hiddenCodeHash': hiddenCodeHash,
-      'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
-      // ⚡ NOUVEAU
       'signataires': signataires.map((s) => s.toJson()).toList(),
       'printedReceiptKeys': printedReceiptKeys,
       'receiptQueue': receiptQueue,
       'backup_password': null,
     };
   }
+
   Future<Map<String, dynamic>> generateLocalKey({
     required List<String> sections,
     required String type,
@@ -1078,6 +1124,7 @@ class FraisScolaires {
     await saveData();
     return entry;
   }
+
   Future<Map<String, dynamic>?> verifyLocalKey(String key) async {
     for (final entry in localAccessKeys) {
       if (entry['key'] == key) {
@@ -1086,10 +1133,12 @@ class FraisScolaires {
     }
     return null;
   }
+
   Future<void> revokeLocalKey(String key) async {
     localAccessKeys.removeWhere((e) => e['key'] == key);
     await saveData();
   }
+
   Future<Map<String, dynamic>> addLocalPendingPayment({
     required String eleveId,
     required String mois,
@@ -1118,6 +1167,7 @@ class FraisScolaires {
     await saveData();
     return entry;
   }
+
   Future<int> validateLocalPendingPayments(List<String> ids) async {
     int count = 0;
     final toValidate =
@@ -1145,6 +1195,7 @@ class FraisScolaires {
     await saveData();
     return count;
   }
+
   Future<Map<String, dynamic>> addLocalPendingRegistration(
       Map<String, dynamic> data) async {
     final entry = <String, dynamic>{
@@ -1155,6 +1206,7 @@ class FraisScolaires {
     await saveData();
     return entry;
   }
+
   Future<int> validateLocalPendingRegistrations(List<String> ids) async {
     int count = 0;
     final toValidate = localPendingRegistrations
@@ -1193,6 +1245,7 @@ class FraisScolaires {
     await saveData();
     return count;
   }
+
   Future<Map<String, dynamic>> addLocalPendingAutreFraisPayment({
     required String eleveId,
     required String autreFraisId,
@@ -1268,6 +1321,7 @@ class FraisScolaires {
     await saveData();
     return count;
   }
+
   Future<void> recordLocalAbsences({
     required String classe,
     required String section,
@@ -1292,6 +1346,7 @@ class FraisScolaires {
   List<String> getLocalAttendance(String classe, String date) {
     return localAttendance['$classe|$date'] ?? [];
   }
+
   Future<void> logLocalCommunication(Map<String, dynamic> entry) async {
     localCommunicationsLog.add({
       ...entry,
@@ -1300,6 +1355,7 @@ class FraisScolaires {
     });
     await saveData();
   }
+
   String _classeKey(String section, String classeNumero) =>
       "$section|$classeNumero";
 
@@ -1324,12 +1380,12 @@ class FraisScolaires {
       await saveData();
     }
   }
+
   Future<void> renameClasseNumero(
       String section, String oldNumero, String newNumero) async {
     final trimmedNew = newNumero.trim();
     if (trimmedNew.isEmpty || trimmedNew == oldNumero) return;
 
-    // 1. Liste des numéros de classe de la section.
     final list = config.classesBySection[section];
     if (list != null) {
       final idx = list.indexOf(oldNumero);
@@ -1374,12 +1430,26 @@ class FraisScolaires {
         }
       }
     }
+
+    for (var frais in autresFrais) {
+      if (frais.scope == 'classe' &&
+          frais.section == section &&
+          frais.classe == oldNumero) {
+        frais.classe = trimmedNew;
+      }
+      if (frais.montantsParClasse.containsKey(oldKey)) {
+        final montant = frais.montantsParClasse.remove(oldKey)!;
+        frais.montantsParClasse[newKey] = montant;
+      }
+    }
+
     if (lastSelectedClassFilter == oldNumero) {
       lastSelectedClassFilter = trimmedNew;
     }
 
     await saveData();
   }
+
   Future<Map<String, dynamic>> deleteClasseNumero(
       String section,
       String numero, {
@@ -1395,25 +1465,57 @@ class FraisScolaires {
       }
     }
 
-    if (studentCount > 0 && !force) {
-      return {'success': false, 'studentCount': studentCount};
+    final key = _classeKey(section, numero);
+
+    int autresFraisCount = 0;
+    for (var frais in autresFrais) {
+      if (frais.scope == 'classe' &&
+          frais.section == section &&
+          frais.classe == numero) {
+        autresFraisCount++;
+      } else if (frais.montantsParClasse.containsKey(key)) {
+        autresFraisCount++;
+      }
+    }
+
+    if ((studentCount > 0 || autresFraisCount > 0) && !force) {
+      return {
+        'success': false,
+        'studentCount': studentCount,
+        'autresFraisCount': autresFraisCount,
+      };
     }
 
     config.classesBySection[section]?.remove(numero);
-    final key = _classeKey(section, numero);
     config.subClassesByClasse.remove(key);
     config.feesByClasse.remove(key);
     config.monthlyExceptionsByClasse.remove(key);
+
+    for (var frais in autresFrais) {
+      if (frais.scope == 'classe' &&
+          frais.section == section &&
+          frais.classe == numero) {
+        frais.scope = 'section';
+        frais.classe = null;
+      }
+      frais.montantsParClasse.remove(key);
+    }
 
     if (lastSelectedClassFilter == numero) {
       lastSelectedClassFilter = null;
     }
     await saveData();
-    return {'success': true, 'studentCount': studentCount};
+    return {
+      'success': true,
+      'studentCount': studentCount,
+      'autresFraisCount': autresFraisCount,
+    };
   }
+
   List<String> getSubClassesFor(String section, String classeNumero) {
     return config.subClassesByClasse[_classeKey(section, classeNumero)] ?? [];
   }
+
   Future<void> addSubClasse(
       String section, String classeNumero, String subClasse) async {
     final trimmed = subClasse.trim();
@@ -1425,16 +1527,45 @@ class FraisScolaires {
       await saveData();
     }
   }
-  Future<void> removeSubClasse(
-      String section, String classeNumero, String subClasse) async {
+
+  Future<Map<String, dynamic>> removeSubClasse(
+      String section,
+      String classeNumero,
+      String subClasse, {
+        bool force = false,
+      }) async {
+    int studentCount = 0;
+    for (var yearData in history.values) {
+      for (var eleve in yearData.eleves) {
+        if (eleve.section == section &&
+            classeNumeroFromFullClasse(eleve.classe) == classeNumero &&
+            subClasseFromFullClasse(eleve.classe) == subClasse) {
+          studentCount++;
+        }
+      }
+    }
+
+    if (studentCount > 0 && !force) {
+      return {
+        'success': false,
+        'studentCount': studentCount,
+      };
+    }
+
     final key = _classeKey(section, classeNumero);
     config.subClassesByClasse[key]?.remove(subClasse);
     await saveData();
+    return {
+      'success': true,
+      'studentCount': studentCount,
+    };
   }
+
   String buildFullClasseName(String classeNumero, String? subClasse) {
     if (subClasse == null || subClasse.trim().isEmpty) return classeNumero;
     return "$classeNumero ${subClasse.trim()}";
   }
+
   String classeNumeroFromFullClasse(String classeComplete) {
     final trimmed = classeComplete.trim();
     if (trimmed.isEmpty) return trimmed;
@@ -1472,6 +1603,36 @@ class FraisScolaires {
     }
     return result.toList();
   }
+
+  List<Map<String, String>> getAllDisplayClassesWithSection() {
+    final List<MapEntry<String, String>> paires = [];
+    for (var section in config.sections) {
+      for (var classe in getAllDisplayClassesForSection(section)) {
+        paires.add(MapEntry(classe, section));
+      }
+    }
+
+    final Map<String, int> occurrences = {};
+    for (var p in paires) {
+      occurrences[p.key] = (occurrences[p.key] ?? 0) + 1;
+    }
+
+    final Set<String> dejaVus = {};
+    final result = <Map<String, String>>[];
+    for (var p in paires) {
+      final cleUnique = '${p.value}|${p.key}';
+      if (dejaVus.contains(cleUnique)) continue;
+      dejaVus.add(cleUnique);
+      final bool ambigu = (occurrences[p.key] ?? 0) > 1;
+      result.add({
+        'classe': p.key,
+        'section': p.value,
+        'label': ambigu ? '${p.key} (${p.value})' : p.key,
+      });
+    }
+    return result;
+  }
+
   String? getNextClasseNumero(String section, String classeNumero) {
     final list = getClassesForSection(section);
     final idx  = list.indexOf(classeNumero);
@@ -1546,6 +1707,7 @@ class FraisScolaires {
       'redoublants': redoublants,
     };
   }
+
   List<Eleve> getStudentsBySection(String section) =>
       currentData.eleves.where((e) => e.section == section).toList();
 
@@ -1560,6 +1722,18 @@ class FraisScolaires {
       return matchSection && matchClass;
     }).toList();
   }
+
+  static const double _montantSecoursSiNonConfigure = 35000;
+
+  bool sectionAFraisConfigure(String section) =>
+      config.feesBySection.containsKey(section);
+
+  List<String> getSectionsSansFraisConfigure() {
+    return config.sections
+        .where((s) => !sectionAFraisConfigure(s))
+        .toList();
+  }
+
   double getRequiredForMonth(String mois, String section,
       [String? classe]) {
     if (classe != null && classe.trim().isNotEmpty) {
@@ -1575,7 +1749,7 @@ class FraisScolaires {
     }
     final exc = config.monthlyExceptionsBySection[section];
     if (exc != null && exc.containsKey(mois)) return exc[mois]!;
-    return config.feesBySection[section] ?? 35000;
+    return config.feesBySection[section] ?? _montantSecoursSiNonConfigure;
   }
 
   Map<String, double> getTotalBySection() {
@@ -1602,6 +1776,7 @@ class FraisScolaires {
           sum +
               currentData.eleves.fold(
                   0.0, (s, e) => s + (e.paid[m] ?? 0)));
+
   double getCurrentMonthTotalCollected() {
     final idx = _schoolMonthIndexForToday();
     if (idx < 0 || idx >= months.length) return 0.0;
@@ -1616,6 +1791,7 @@ class FraisScolaires {
         .where((e) => e.transactions.any((t) => t['date'] == today))
         .toList();
   }
+
   List<Eleve> getPaidStudentsThisMonth() {
     final idx = _schoolMonthIndexForToday();
     if (idx < 0 || idx >= months.length) return [];
@@ -1634,17 +1810,23 @@ class FraisScolaires {
     }
     return distribution;
   }
+
+  double getTotalPourcentageAdministrations() =>
+      config.administrations.fold(0.0, (sum, a) => sum + a.pourcentage);
+
   List<Depense> getDepensesForYear([String? year]) {
     final y = year ?? currentYear;
     final list = List<Depense>.from(depensesByYear[y] ?? []);
     list.sort((a, b) => b.date.compareTo(a.date));
     return list;
   }
+
   double getTotalDepenses([String? year]) {
     final y = year ?? currentYear;
     return (depensesByYear[y] ?? [])
         .fold(0.0, (sum, d) => sum + d.montant);
   }
+
   double getSoldeNetActuel([String? year]) {
     final y = year ?? currentYear;
     final totalCollecte = (y == currentYear)
@@ -1659,6 +1841,7 @@ class FraisScolaires {
     );
     return totalCollecte - getTotalDepenses(y);
   }
+
   Future<Depense> addDepense({
     required String motif,
     required double montant,
@@ -1675,21 +1858,25 @@ class FraisScolaires {
     await saveData();
     return depense;
   }
+
   Future<void> deleteDepense(String id, [String? year]) async {
     final y = year ?? currentYear;
     depensesByYear[y]?.removeWhere((d) => d.id == id);
     await saveData();
   }
+
   Future<void> clearDepensesForYear([String? year]) async {
     final y = year ?? currentYear;
     depensesByYear[y] = [];
     await saveData();
   }
+
   List<AutreFrais> getAutresFrais() {
     final list = List<AutreFrais>.from(autresFrais);
     list.sort((a, b) => a.nom.toLowerCase().compareTo(b.nom.toLowerCase()));
     return list;
   }
+
   Future<AutreFrais> addAutreFrais({
     required String nom,
     required double montant,
@@ -1709,22 +1896,12 @@ class FraisScolaires {
     await saveData();
     return frais;
   }
+
   Future<void> deleteAutreFrais(String id) async {
     autresFrais.removeWhere((f) => f.id == id);
     await saveData();
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — MODIFICATION D'UN "AUTRE FRAIS" DÉJÀ CRÉÉ
-  // ==========================================================================
-  // Permet de corriger le nom, le montant par défaut et l'éligibilité
-  // (toute l'école / une section / une classe) d'un frais additionnel déjà
-  // créé, sans avoir à le supprimer et le recréer (ce qui aurait cassé
-  // l'historique des paiements déjà liés à son id). Les éventuelles
-  // exceptions par section/classe (`montantsParSection`/`montantsParClasse`)
-  // ne sont JAMAIS touchées par cette fonction — elles se gèrent séparément
-  // via les fonctions ci-dessous.
-  // ==========================================================================
   Future<void> updateAutreFrais(
       String id, {
         required String nom,
@@ -1746,15 +1923,6 @@ class FraisScolaires {
     await saveData();
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — GESTION DES MONTANTS PAR SECTION / PAR CLASSE POUR UN
-  // "AUTRE FRAIS" PRÉCIS (ex: Frais de l'État payé différemment selon la
-  // section ou la classe, tout en restant UN SEUL frais pour toute l'école)
-  // ==========================================================================
-  /// Définit (ou remplace) le montant spécifique à payer pour [autreFraisId]
-  /// par TOUS les élèves de [section], sans toucher au montant par défaut
-  /// ni aux éventuelles exceptions par classe (qui restent prioritaires —
-  /// voir `getMontantAutreFraisPourEleve`).
   Future<void> setMontantSectionPourAutreFrais(
       String autreFraisId, String section, double montant) async {
     for (var f in autresFrais) {
@@ -1777,11 +1945,6 @@ class FraisScolaires {
     await saveData();
   }
 
-  /// Définit (ou remplace) le montant spécifique à payer pour
-  /// [autreFraisId] par les élèves d'une classe précise ([section] +
-  /// [classeNumero], sans la sous-classe A/B/C). Cette exception est
-  /// TOUJOURS prioritaire sur une exception par section et sur le montant
-  /// par défaut — voir `getMontantAutreFraisPourEleve`.
   Future<void> setMontantClassePourAutreFrais(
       String autreFraisId,
       String section,
@@ -1815,12 +1978,16 @@ class FraisScolaires {
       case 'section':
         return frais.section != null && eleve.section == frais.section;
       case 'classe':
-        return frais.classe != null && eleve.classe == frais.classe;
+        return frais.section != null &&
+            frais.classe != null &&
+            eleve.section == frais.section &&
+            classeNumeroFromFullClasse(eleve.classe) == frais.classe;
       case 'all':
       default:
         return true;
     }
   }
+
   List<Eleve> getEligibleStudentsForAutreFrais(AutreFrais frais) {
     final students = currentData.eleves
         .where((e) => autreFraisAppliesToStudent(frais, e))
@@ -1833,34 +2000,6 @@ class FraisScolaires {
     return students;
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — RÉSOLUTION DU MONTANT À PAYER PAR ÉLÈVE POUR UN "AUTRE
-  // FRAIS" (ex: Frais de l'État), QUAND CE MONTANT VARIE SELON LA SECTION
-  // OU LA CLASSE
-  // ==========================================================================
-  // Problème résolu : jusqu'ici, un "Autre Frais" avait UN SEUL montant,
-  // valable pour tous les élèves éligibles (toute l'école, une section, ou
-  // une classe). Or certains frais (ex: Frais de l'État) doivent s'appliquer
-  // à TOUTE l'école mais avec un montant différent selon la section ou la
-  // classe de l'élève (ex: le Secondaire paie plus que le Primaire).
-  //
-  // Chaque `AutreFrais` peut désormais définir, en plus de son montant par
-  // défaut (`montant`), des exceptions optionnelles :
-  //   - `montantsParSection` (nom de section -> montant),
-  //   - `montantsParClasse`  (section + classe -> montant, priorité
-  //     absolue).
-  // L'ÉLIGIBILITÉ (qui doit payer ce frais) continue de dépendre
-  // UNIQUEMENT de `scope`/`section`/`classe` (inchangé, voir
-  // `autreFraisAppliesToStudent` ci-dessus) ; cette fonction ne détermine
-  // QUE le montant, une fois l'élève déjà reconnu éligible.
-  //
-  // Priorité : exception par classe > exception par section > montant par
-  // défaut. Si aucune exception n'est définie pour ce frais, le
-  // comportement est strictement identique à avant (montant unique pour
-  // tout le monde). Utilisée automatiquement par `payAutreFrais` et
-  // `printOrQueueAutreFraisReceipt` — aucun appelant externe n'a besoin de
-  // calculer ce montant lui-même.
-  // ==========================================================================
   double getMontantAutreFraisPourEleve(AutreFrais frais, Eleve eleve) {
     final classeNumero = classeNumeroFromFullClasse(eleve.classe);
     final classeKey = _classeKey(eleve.section, classeNumero);
@@ -1878,16 +2017,12 @@ class FraisScolaires {
     return (autresFraisPaiementsByYear[y] ?? []).any(
             (p) => p.autreFraisId == frais.id && p.eleveId == eleve.id);
   }
+
   Future<AutreFraisPaiement> payAutreFrais({
     required AutreFrais frais,
     required Eleve eleve,
     String enregistrePar = 'Direction',
   }) async {
-    // ⚡ NOUVEAU — le montant réellement facturé dépend désormais de la
-    // section/classe de l'élève (voir `getMontantAutreFraisPourEleve`),
-    // et non plus systématiquement de `frais.montant`. La répartition par
-    // administration reste correcte car elle se base sur ce montant
-    // réellement enregistré dans le paiement, jamais sur `frais.montant`.
     final double montant = getMontantAutreFraisPourEleve(frais, eleve);
     final paiement = AutreFraisPaiement(
       id: 'AFP${DateTime.now().millisecondsSinceEpoch}',
@@ -1904,11 +2039,13 @@ class FraisScolaires {
     await saveData();
     return paiement;
   }
+
   Future<void> deleteAutreFraisPaiement(String id, [String? year]) async {
     final y = year ?? currentYear;
     autresFraisPaiementsByYear[y]?.removeWhere((p) => p.id == id);
     await saveData();
   }
+
   List<AutreFraisPaiement> getAutresFraisPaiementsForYear([String? year]) {
     final y = year ?? currentYear;
     final list = List<AutreFraisPaiement>.from(
@@ -1917,58 +2054,6 @@ class FraisScolaires {
     return list;
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — RÉPARTITION PAR ADMINISTRATION POUR UN "AUTRE FRAIS" PRÉCIS
-  // ==========================================================================
-  // Demande de la direction : pouvoir gérer des administrations et consulter
-  // leur répartition en %, DIRECTEMENT depuis l'écran "Autres Frais de
-  // Paiement" (et non plus depuis les Paramètres), pour l'argent collecté
-  // sur le frais additionnel actuellement sélectionné (ex: "Frais de
-  // l'État", "Frais d'Aide"...).
-  //
-  // ⚡ Cette répartition se base sur le TOTAL RÉELLEMENT PERÇU
-  // (`AutreFraisPaiement.montant`), qui reflète désormais automatiquement
-  // le montant correct par élève même si ce frais a des montants
-  // différents par section/classe (voir `getMontantAutreFraisPourEleve`).
-  // Aucune modification n'a donc été nécessaire dans ce bloc : une seule
-  // répartition par administration continue de couvrir TOUT l'argent
-  // collecté pour ce frais, quel que soit le montant payé par chaque
-  // élève.
-  //
-  // ⚠️⚠️⚠️ SÉPARATION TOTALE ET DÉFINITIVE AVEC LES FRAIS PRINCIPAUX ⚠️⚠️⚠️
-  // Ce bloc utilise EXCLUSIVEMENT :
-  //   - la liste `autresFraisAdministrations` (nouvelle, dédiée),
-  //   - la fonction `calculateAutresFraisAdminDistribution` (nouvelle,
-  //     dédiée),
-  //   - les paiements de `autresFraisPaiementsByYear`.
-  // Il n'utilise JAMAIS, et ne doit JAMAIS utiliser :
-  //   - `config.administrations` (réservée aux frais principaux),
-  //   - `calculateAdminDistribution` (réservée aux frais principaux),
-  //   - `eleve.paid` / `getStudentTotalPaid` (alimentés uniquement par les
-  //     frais principaux via `handlePayment`).
-  // La page "Répartition" des frais PRINCIPAUX (`getRepartitionForOption` /
-  // `getSousSectionsForOption`) reste donc strictement intacte et ne peut
-  // structurellement recevoir aucune donnée issue des "Autres Frais" — les
-  // deux systèmes ne se croisent à aucun moment, dans aucune direction.
-  // Cette règle est absolue : l'application sert plusieurs écoles et une
-  // fuite entre les deux calculs financiers casserait la confiance des
-  // utilisateurs. Si une évolution future doit toucher à ce bloc, elle doit
-  // continuer à n'utiliser que les éléments listés ci-dessus.
-  //
-  // Si aucune administration n'a été ajoutée pour les "Autres Frais"
-  // (`autresFraisAdministrations` vide), tout le reste de l'application
-  // continue de fonctionner normalement : le paiement des autres frais, les
-  // reçus, les totaux par classe/option restent inchangés. Seule la
-  // répartition par administration affiche alors "aucune administration
-  // configurée" au lieu d'une liste vide silencieuse.
-  //
-  // Filtres [sectionFilter] / [classFilter] optionnels : permettent de
-  // limiter le calcul à une section ou une classe précise (utilisés par le
-  // rapport PDF). Laissés à `null` (par défaut), le calcul porte sur TOUS
-  // les élèves ayant payé ce frais pour l'année en cours (ou l'année
-  // [year] si fournie) — c'est ce que l'écran "Autres Frais de Paiement"
-  // utilise pour son bouton de répartition rapide.
-  // ==========================================================================
   double getTotalPaidForAutreFrais(
       AutreFrais frais, {
         String? year,
@@ -2003,11 +2088,6 @@ class FraisScolaires {
     return paiements.fold(0.0, (sum, p) => sum + p.montant);
   }
 
-  /// ⚡ NOUVEAU — Calcule la répartition (nom -> montant en FC) UNIQUEMENT à
-  /// partir de `autresFraisAdministrations` (jamais `config.administrations`).
-  /// Fonction miroir de `calculateAdminDistribution`, mais totalement isolée
-  /// et dédiée aux "Autres Frais de Paiement". Si `autresFraisAdministrations`
-  /// est vide, retourne une carte vide sans erreur.
   Map<String, double> calculateAutresFraisAdminDistribution(
       double totalAmount) {
     final distribution = <String, double>{};
@@ -2017,10 +2097,9 @@ class FraisScolaires {
     return distribution;
   }
 
-  /// Répartition par administration (nom -> montant en FC) pour le total
-  /// réellement collecté sur [frais]. Calcul isolé, basé uniquement sur
-  /// `autresFraisPaiementsByYear` et sur les administrations dédiées
-  /// `autresFraisAdministrations` — jamais sur celles des frais principaux.
+  double getTotalPourcentageAutresFraisAdministrations() =>
+      autresFraisAdministrations.fold(0.0, (sum, a) => sum + a.pourcentage);
+
   Map<String, double> getAdminDistributionForAutreFrais(
       AutreFrais frais, {
         String? year,
@@ -2036,15 +2115,6 @@ class FraisScolaires {
     return calculateAutresFraisAdminDistribution(total);
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — GESTION (CRUD) DES ADMINISTRATIONS DÉDIÉES AUX "AUTRES
-  // FRAIS DE PAIEMENT"
-  // ==========================================================================
-  // Ajout, modification et suppression d'administrations pour les "Autres
-  // Frais" — accessible DIRECTEMENT depuis l'écran "Autres Frais de
-  // Paiement" (voir AutresFraisScreen), sans jamais passer par les
-  // Paramètres et sans jamais toucher à `config.administrations`.
-  // ==========================================================================
   List<AutreFraisAdministration> getAutresFraisAdministrations() =>
       List<AutreFraisAdministration>.from(autresFraisAdministrations);
 
@@ -2083,6 +2153,7 @@ class FraisScolaires {
   }
 
   List<String> getOptions() => List<String>.from(config.sections);
+
   RepartitionDetail getRepartitionForOption(String option) {
     final total = getStudentsBySection(option)
         .fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
@@ -2092,6 +2163,7 @@ class FraisScolaires {
       parAdministration: calculateAdminDistribution(total),
     );
   }
+
   String _sousSectionLabelFor(Eleve eleve) {
     final sousClasse = subClasseFromFullClasse(eleve.classe);
     if (sousClasse != null && sousClasse.trim().isNotEmpty) {
@@ -2100,6 +2172,7 @@ class FraisScolaires {
     final numero = classeNumeroFromFullClasse(eleve.classe);
     return "Éducation de Base ($numero)";
   }
+
   List<RepartitionDetail> getSousSectionsForOption(String option) {
     final students = getStudentsBySection(option);
     final Map<String, double> totalsByLabel = {};
@@ -2124,12 +2197,14 @@ class FraisScolaires {
     });
     return details;
   }
+
   bool optionHasSousSections(String option) {
     return getStudentsBySection(option).any((e) {
       final sc = subClasseFromFullClasse(e.classe);
       return sc != null && sc.trim().isNotEmpty;
     });
   }
+
   List<double> getMonthlyEvolution({
     String? option,
     String? sousSectionLabel,
@@ -2152,6 +2227,7 @@ class FraisScolaires {
         students.fold<double>(0.0, (sum, e) => sum + (e.paid[m] ?? 0)))
         .toList();
   }
+
   List<String> getClassesForOptionAndSousSection(
       String option, [
         String? sousSectionLabel,
@@ -2166,6 +2242,7 @@ class FraisScolaires {
       return label == sousSectionLabel;
     }).toList();
   }
+
   bool isStudentEnOrdrePourMois(Eleve eleve, String mois) {
     final required     = getRequiredForMonth(mois, eleve.section, eleve.classe);
     final paidForMonth = eleve.paid[mois] ?? 0;
@@ -2197,70 +2274,76 @@ class FraisScolaires {
     return students;
   }
 
-  // ==========================================================================
-  // ⚡ RECALCUL INTELLIGENT DES PAIEMENTS APRÈS CORRECTION D'UN FRAIS
-  // (utilisé aussi désormais par cancelTransaction / modifyTransactionAmount
-  // ci-dessus, pour garder toute l'année cohérente après une action admin)
-  // ==========================================================================
-  // Problème résolu : un frais mensuel mal configuré (ex: laissé au montant
-  // par défaut de 35000 FC alors qu'il devait être 45000 FC) peut être
-  // corrigé APRÈS que des élèves aient déjà commencé à payer sur base de
-  // l'ancien montant. Sans recalcul, un mois resterait marqué "entièrement
-  // payé" alors qu'il ne l'est plus au tarif réel, et l'excédent versé sur
-  // les mois suivants ne "redescendrait" jamais compenser le manque.
-  //
-  // La fonction ci-dessous répare cela : elle prend le total RÉELLEMENT payé
-  // par un élève (jamais modifié, jamais perdu, jamais inventé) et le
-  // redistribue mois par mois, dans l'ordre chronologique de l'année
-  // scolaire, en appliquant les montants requis ACTUELS (donc les
-  // exceptions et frais par classe/section en vigueur au moment du
-  // recalcul). Un mois n'est donc à nouveau considéré comme "payé" que
-  // s'il l'est vraiment ; l'éventuel trop-perçu sur un mois suivant vient
-  // automatiquement compléter un mois précédent resté en défaut, et
-  // inversement un excédent redescend sur les mois suivants si un frais a
-  // été réduit.
-  //
-  // L'historique des transactions (montants, dates, qui a encaissé) n'est
-  // JAMAIS modifié par cette fonction : il reste une trace fidèle de ce qui
-  // a réellement été perçu, jour par jour. Seule la répartition "combien
-  // pour quel mois" (eleve.paid) est recalculée.
-  //
-  // ⚡ NOUVEAU — Ce recalcul "intelligent" reste le comportement PAR DÉFAUT
-  // et n'a pas changé. Il existe désormais, juste après, une ALTERNATIVE
-  // appelée mode "constant" (voir `recalculerPaiementsPourModeConstant`
-  // plus bas), proposée UNIQUEMENT depuis les Paramètres et UNIQUEMENT
-  // quand le nouveau montant d'un frais/exception est plus bas que
-  // l'ancien, pour les écoles qui ne veulent PAS que l'argent déjà payé se
-  // reporte automatiquement sur les mois suivants dans ce cas précis.
-  // ==========================================================================
-
-  /// Recalcule la répartition mois par mois du total déjà payé par [eleve],
-  /// selon les montants requis ACTUELS de sa section/classe, et met à jour
-  /// les éventuels reçus "principal" encore en attente d'impression pour
-  /// cet élève. N'enregistre pas sur disque : à appeler avant un
-  /// `saveData()` (voir `recalculerPaiementsPour` pour la version qui
-  /// traite plusieurs élèves d'un coup et sauvegarde automatiquement).
   void recalculerRepartitionMoisPourEleve(Eleve eleve) {
-    final double totalPaye = getStudentTotalPaid(eleve);
-    double restant = totalPaye;
-    final Map<String, double> nouveauPaid = {};
-
-    for (final mois in months) {
-      if (restant <= 0) break;
-      final double requis =
-      getRequiredForMonth(mois, eleve.section, eleve.classe);
-      if (requis <= 0) continue;
-      final double aAffecter = restant >= requis ? requis : restant;
-      nouveauPaid[mois] = aAffecter;
-      restant -= aAffecter;
+    if (eleve.transactions.isEmpty) {
+      final double totalPayeSansTransactions = getStudentTotalPaid(eleve);
+      if (totalPayeSansTransactions > 0) {
+        double restant = totalPayeSansTransactions;
+        final Map<String, double> paidSansTransactions = {};
+        for (final mois in months) {
+          if (restant <= 0) break;
+          final double requis =
+          getRequiredForMonth(mois, eleve.section, eleve.classe);
+          if (requis <= 0) continue;
+          final double aAffecter = restant >= requis ? requis : restant;
+          paidSansTransactions[mois] = aAffecter;
+          restant -= aAffecter;
+        }
+        if (restant > 0 && months.isNotEmpty) {
+          final dernierMois = months.last;
+          paidSansTransactions[dernierMois] =
+              (paidSansTransactions[dernierMois] ?? 0) + restant;
+        }
+        eleve.paid
+          ..clear()
+          ..addAll(paidSansTransactions);
+        _rafraichirRecusEnAttentePourEleve(eleve);
+        return;
+      }
+      eleve.paid.clear();
+      _rafraichirRecusEnAttentePourEleve(eleve);
+      return;
     }
 
-    // Élève ayant payé plus que le total requis sur toute l'année (ou
-    // reliquat après un frais réduit) : on ne fait JAMAIS disparaître cet
-    // argent, on le garde sur le dernier mois de l'année scolaire.
-    if (restant > 0 && months.isNotEmpty) {
-      final dernierMois = months.last;
-      nouveauPaid[dernierMois] = (nouveauPaid[dernierMois] ?? 0) + restant;
+    final indexees = <MapEntry<int, Map<String, dynamic>>>[
+      for (var i = 0; i < eleve.transactions.length; i++)
+        MapEntry(i, eleve.transactions[i]),
+    ];
+    indexees.sort((a, b) {
+      final parDate = (a.value['date'] ?? '')
+          .toString()
+          .compareTo((b.value['date'] ?? '').toString());
+      if (parDate != 0) return parDate;
+      return a.key.compareTo(b.key);
+    });
+
+    final Map<String, double> nouveauPaid = {};
+    int monthIndex = 0;
+
+    for (final transaction in indexees.map((e) => e.value)) {
+      final double montant =
+          (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+      if (montant <= 0) continue;
+
+      while (monthIndex < months.length) {
+        final mois = months[monthIndex];
+        final requis =
+        getRequiredForMonth(mois, eleve.section, eleve.classe);
+        final dejaAffecte = nouveauPaid[mois] ?? 0;
+        if (requis > 0 && dejaAffecte < requis) break;
+        monthIndex++;
+      }
+
+      if (monthIndex < months.length) {
+        final mois = months[monthIndex];
+        transaction['mois'] = mois;
+        nouveauPaid[mois] = (nouveauPaid[mois] ?? 0) + montant;
+      } else if (months.isNotEmpty) {
+        final dernierMois = months.last;
+        transaction['mois'] = dernierMois;
+        transaction['excedent'] = true;
+        nouveauPaid[dernierMois] = (nouveauPaid[dernierMois] ?? 0) + montant;
+      }
     }
 
     eleve.paid
@@ -2270,12 +2353,6 @@ class FraisScolaires {
     _rafraichirRecusEnAttentePourEleve(eleve);
   }
 
-  /// Met à jour les données (montant requis, reste à payer, total payé...)
-  /// des reçus de type "principal" encore en file d'attente (donc pas
-  /// encore imprimés) pour [eleve], afin qu'ils reflètent l'état à jour
-  /// après un recalcul. Les reçus DÉJÀ imprimés ne sont jamais modifiés :
-  /// ils restent une trace fidèle de ce qui a réellement été remis au
-  /// parent à l'époque de l'impression.
   void _rafraichirRecusEnAttentePourEleve(Eleve eleve) {
     for (var i = 0; i < receiptQueue.length; i++) {
       final r = receiptQueue[i];
@@ -2304,19 +2381,6 @@ class FraisScolaires {
     }
   }
 
-  /// Recalcule, pour tous les élèves de l'ANNÉE SCOLAIRE EN COURS
-  /// correspondant aux filtres donnés (ou tous les élèves si aucun filtre
-  /// n'est fourni), la répartition mois par mois de leurs paiements selon
-  /// les montants requis ACTUELS. À appeler après toute correction d'un
-  /// frais mensuel (section ou classe) ou d'une exception mensuelle.
-  ///
-  /// [section] : ne recalcule que les élèves de cette section.
-  /// [classeNumero] : ne recalcule que les élèves de ce numéro de classe
-  /// (ex: "6eme", sans la sous-classe A/B/C) au sein de la section.
-  ///
-  /// Retourne le nombre d'élèves effectivement recalculés. Enregistre les
-  /// données automatiquement (un seul `saveData()` à la fin, même pour un
-  /// grand nombre d'élèves).
   Future<int> recalculerPaiementsPour({
     String? section,
     String? classeNumero,
@@ -2335,57 +2399,6 @@ class FraisScolaires {
     return count;
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — MODE "CONSTANT" DE RECALCUL (ALTERNATIVE AU RECALCUL
-  // INTELLIGENT, UNIQUEMENT UTILISABLE QUAND LE NOUVEAU MONTANT EST PLUS BAS)
-  // ==========================================================================
-  // Le recalcul "intelligent" ci-dessus est parfait dans la grande majorité
-  // des cas : il reprend le total réellement payé par l'élève et le
-  // redistribue mois par mois selon les montants requis actuels, sans
-  // jamais perdre un centime. MAIS certaines écoles ne veulent PAS de cet
-  // effet de "report automatique" dans un cas précis : quand elles baissent
-  // le montant d'UN mois précis (ou d'une classe/section entière) pour que
-  // les élèves paient moins ce mois-là, elles ne veulent pas que
-  // l'excédent déjà payé aille se reporter tout seul sur les mois suivants
-  // (ce qui marquerait les mois suivants comme "partiellement payés" alors
-  // que l'élève n'a strictement rien versé pour eux).
-  //
-  // Le mode "constant" répond exactement à ce besoin, et UNIQUEMENT à
-  // celui-là : il ne doit être proposé/utilisé que lorsque le nouveau
-  // montant requis est STRICTEMENT INFÉRIEUR à l'ancien (voir les écrans de
-  // Paramètres, qui ne proposent ce choix que dans ce cas précis — pour une
-  // hausse de tarif, le mode intelligent habituel s'applique directement
-  // sans rien demander).
-  //
-  // Pour chaque mois présent dans [anciensRequisParMois] :
-  //   - Si le nouveau montant requis pour ce mois est plus bas que
-  //     l'ancien montant fourni, ET que l'élève avait déjà payé plus que ce
-  //     nouveau montant pour ce mois (que ce soit tout ou une partie), son
-  //     paiement enregistré pour ce mois est simplement RAMENÉ au nouveau
-  //     montant. Le mois reste donc directement coché comme "payé"
-  //     (puisque paid == nouveau requis), SANS qu'aucun report automatique
-  //     ne soit fait vers un autre mois.
-  //   - Si l'élève avait payé MOINS que le nouveau montant (le mois
-  //     n'était de toute façon pas encore soldé), rien ne change : il
-  //     devra simplement compléter jusqu'au nouveau montant, plus bas,
-  //     comme avant.
-  //   - Si le montant n'a PAS baissé pour un mois donné (égal ou en
-  //     hausse), ce mois est ignoré : le mode "constant" n'agit jamais à
-  //     la hausse.
-  //   - Tous les autres mois de l'élève (ceux absents de
-  //     [anciensRequisParMois]) ne sont JAMAIS touchés par ce mode : pas de
-  //     cascade, pas de report, pas de compensation croisée entre mois.
-  //
-  // [anciensRequisParMois] doit contenir, pour chaque mois à examiner, le
-  // montant qui était requis AVANT le changement de configuration (donc
-  // calculé juste avant de modifier le frais ou l'exception — voir
-  // `snapshotRequisTousMoisPour` ci-dessous). Seuls les mois présents dans
-  // cette carte sont examinés.
-  //
-  // ⚡ Fonctionnalité volontairement discrète et peu mise en avant : elle
-  // n'est proposée à l'utilisateur que lorsque le nouveau montant est
-  // effectivement plus bas que l'ancien, et reste invisible le reste du
-  // temps pour ne pas alourdir l'usage courant de l'application.
   Future<int> recalculerPaiementsPourModeConstant({
     String? section,
     String? classeNumero,
@@ -2407,15 +2420,10 @@ class FraisScolaires {
         final double nouveauRequis =
         getRequiredForMonth(mois, eleve.section, eleve.classe);
 
-        // On n'agit que si le montant a réellement baissé pour ce mois ;
-        // sinon on laisse ce mois totalement intact.
         if (nouveauRequis >= ancienRequis) continue;
 
         final double paidActuel = eleve.paid[mois] ?? 0;
         if (paidActuel > nouveauRequis) {
-          // On ramène le paiement enregistré pour ce mois au nouveau
-          // montant requis (le mois reste "payé"), sans reporter le reste
-          // vers un autre mois.
           eleve.paid[mois] = nouveauRequis;
           modifie = true;
         }
@@ -2430,12 +2438,6 @@ class FraisScolaires {
     return count;
   }
 
-  /// Calcule, pour [section] et [classeNumero] (optionnel), le montant
-  /// requis ACTUEL pour chaque mois de l'année scolaire. À utiliser pour
-  /// prendre un "instantané" des montants requis AVANT d'appliquer un
-  /// changement de frais ou d'exception, afin de pouvoir ensuite proposer
-  /// et exécuter le mode "constant" si le nouveau montant s'avère plus bas
-  /// (voir `recalculerPaiementsPourModeConstant` ci-dessus).
   Map<String, double> snapshotRequisTousMoisPour(
       String section, String? classeNumero) {
     return {
@@ -2443,23 +2445,6 @@ class FraisScolaires {
     };
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — NOMBRE D'ÉLÈVES CONCERNÉS PAR UN RAPPORT (comptage
-  // automatique)
-  // ==========================================================================
-  // Problème résolu : jusqu'ici, savoir combien d'élèves avaient payé un
-  // jour donné (ou sur un mois, ou sur l'année) obligeait à parcourir
-  // manuellement toute la liste des élèves du rapport PDF, un par un.
-  // Cette fonction calcule automatiquement, à partir de la liste des
-  // élèves déjà filtrée par `generatePdf` (rapport journalier, mensuel ou
-  // annuel, avec les filtres Section/Classe déjà appliqués) :
-  //   - le nombre total d'élèves concernés,
-  //   - le détail par section (nombre d'élèves par section),
-  //   - le détail par classe (nombre d'élèves par "Section - Classe").
-  // Le résultat est affiché tout en haut du rapport PDF, juste après les
-  // totaux financiers, pour que l'utilisateur n'ait plus jamais besoin de
-  // compter manuellement.
-  // ==========================================================================
   Map<String, dynamic> _computeStudentCounts(List<Eleve> students) {
     final Map<String, int> parSection = {};
     final Map<String, int> parClasse = {};
@@ -2470,7 +2455,6 @@ class FraisScolaires {
       parClasse[classeKey] = (parClasse[classeKey] ?? 0) + 1;
     }
 
-    // Tri alphabétique pour un affichage stable et lisible.
     final sectionsTriees = parSection.keys.toList()..sort();
     final classesTriees = parClasse.keys.toList()..sort();
 
@@ -2485,10 +2469,6 @@ class FraisScolaires {
     };
   }
 
-  /// Construit le bloc PDF "NOMBRE D'ÉLÈVES" affiché en haut du rapport :
-  /// total général, puis détail par section, puis détail par classe. Un
-  /// titre personnalisable (`label`) permet de préciser le contexte (ex:
-  /// "élèves ayant payé aujourd'hui", "élèves du rapport").
   List<pw.Widget> _buildStudentCountSection(
       List<Eleve> students, {
         String label = "Élèves concernés par ce rapport",
@@ -2570,6 +2550,48 @@ class FraisScolaires {
     ];
   }
 
+  List<pw.Widget> _buildCenteredReportHeader({
+    required String title,
+    String? subtitle,
+  }) {
+    return [
+      pw.Center(
+        child: pw.Text(
+          config.schoolName.toUpperCase(),
+          style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
+        ),
+      ),
+      pw.SizedBox(height: 4),
+      pw.Center(
+        child: pw.Text(
+          title,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+        ),
+      ),
+      if (subtitle != null && subtitle.trim().isNotEmpty) ...[
+        pw.SizedBox(height: 4),
+        pw.Center(
+          child: pw.Text(
+            subtitle,
+            textAlign: pw.TextAlign.center,
+            style: const pw.TextStyle(fontSize: 11),
+          ),
+        ),
+      ],
+      pw.SizedBox(height: 2),
+      pw.Center(
+        child: pw.Text(
+          'Généré le : $_dateGenerationFormatee',
+          style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700),
+        ),
+      ),
+      pw.SizedBox(height: 16),
+      pw.Divider(thickness: 1),
+      pw.SizedBox(height: 10),
+    ];
+  }
+
   Future<Map<String, dynamic>> generatePdf({
     required String filename,
     required String reportType,
@@ -2589,8 +2611,6 @@ class FraisScolaires {
     final pdf     = pw.Document();
     List<Eleve> students;
     String title;
-    // ⚡ NOUVEAU — libellé du bloc de comptage, adapté selon le type de
-    // rapport, pour que le total affiché ait toujours un sens clair.
     String countLabel;
 
     if (reportType == "daily") {
@@ -2660,20 +2680,13 @@ class FraisScolaires {
     final List<double> recapMensuel =
     reportType == "annual" ? getMonthlyEvolution() : const [];
 
-    // ⚡ NOUVEAU — largeurs de colonnes explicites et police adaptative
-    // (voir commentaire détaillé plus haut sur `_buildColumnWidths` et
-    // consorts) : évite tout écrasement du tableau, même avec beaucoup
-    // d'administrations configurées. Les colonnes à texte long (Nom
-    // Complet, Classe, Mois Concerné(s)) reçoivent une part généreuse ;
-    // chaque colonne d'administration reste compacte mais toujours
-    // lisible.
     final List<double> mainTableFlex = [
-      0.7, // ID
-      2.5, // Nom Complet
-      1.1, // Section
-      1.3, // Classe
-      1.3, // Montant Payé (FC)
-      if (showMoisConcerne) 1.7, // Mois Concerné(s)
+      0.7,
+      2.5,
+      1.1,
+      1.3,
+      1.3,
+      if (showMoisConcerne) 1.7,
       ...List<double>.filled(config.administrations.length, 1.3),
     ];
     final mainTableColumnWidths = _buildColumnWidths(mainTableFlex);
@@ -2682,41 +2695,48 @@ class FraisScolaires {
 
     pdf.addPage(
       pw.MultiPage(
-        // ⚡ NOUVEAU — orientation paysage : donne nettement plus de
-        // largeur disponible pour les tableaux à plusieurs colonnes
-        // (frais principaux + une colonne par administration), ce qui
-        // évite tout écrasement du texte quel que soit le nombre
-        // d'administrations configurées ou la longueur des noms.
         pageFormat: PdfPageFormat.a4.landscape,
         margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
-          pw.Text(title,
-              style: pw.TextStyle(
-                  fontSize: 22, fontWeight: pw.FontWeight.bold)),
-          pw.Text('${config.schoolName} - $currentYear'),
-          pw.Text('Généré le : $_dateGenerationFormatee'),
-          pw.SizedBox(height: 20),
-          pw.Text(
-            "Total Collecté (ce rapport) : ${total.toStringAsFixed(0)} FC",
-            style: pw.TextStyle(
-                fontSize: 18, fontWeight: pw.FontWeight.bold),
+          ..._buildCenteredReportHeader(
+            title: title,
+            subtitle: 'Année scolaire $currentYear',
           ),
-          pw.SizedBox(height: 6),
-          pw.Text(
-            "Total ce Mois ($currentMonthName) : "
-                "${totalMoisEcole.toStringAsFixed(0)} FC",
-            style: const pw.TextStyle(fontSize: 12),
-          ),
-          pw.Text(
-            "Total cette Année ($currentYear) : "
-                "${totalAnneeEcole.toStringAsFixed(0)} FC",
-            style: const pw.TextStyle(fontSize: 12),
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(12),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.indigo50,
+              border: pw.Border.all(color: PdfColors.indigo200, width: 0.8),
+              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(
+                  "Total Collecté (ce rapport) : ${total.toStringAsFixed(0)} FC",
+                  style: pw.TextStyle(
+                    fontSize: 15,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.indigo900,
+                  ),
+                ),
+                pw.SizedBox(height: 5),
+                pw.Text(
+                  "Total ce Mois ($currentMonthName) : "
+                      "${totalMoisEcole.toStringAsFixed(0)} FC",
+                  style: const pw.TextStyle(fontSize: 11),
+                ),
+                pw.SizedBox(height: 2),
+                pw.Text(
+                  "Total cette Année ($currentYear) : "
+                      "${totalAnneeEcole.toStringAsFixed(0)} FC",
+                  style: const pw.TextStyle(fontSize: 11),
+                ),
+              ],
+            ),
           ),
           pw.SizedBox(height: 16),
-          // ⚡ NOUVEAU — bloc "NOMBRE D'ÉLÈVES" (total général + détail
-          // par section + détail par classe), affiché juste après les
-          // totaux financiers et avant la liste détaillée des élèves,
-          // pour une lecture immédiate sans avoir à compter manuellement.
           ..._buildStudentCountSection(students, label: countLabel),
           pw.SizedBox(height: 16),
           pw.Text("LISTE DES ÉLÈVES",
@@ -2796,6 +2816,7 @@ class FraisScolaires {
 
     return await _savePdf(pdf, filename, reportType);
   }
+
   Future<Map<String, dynamic>> _generateStudentListPdf({
     required String filename,
     String? sectionFilter,
@@ -2819,7 +2840,6 @@ class FraisScolaires {
 
     final sectionLabel = sectionFilter ?? "Toutes les sections";
     final classeLabel  = classFilter   ?? "Toutes les classes";
-    // ⚡ CORRIGÉ — date + jour, voir `_dateGenerationFormatee`.
     final dateStr      = _dateGenerationFormatee;
 
     final rows = <List<String>>[];
@@ -2828,15 +2848,11 @@ class FraisScolaires {
       rows.add(['${i + 1}', e.nom, e.postNom, e.prenom, e.classe]);
     }
 
-    // ⚡ NOUVEAU — largeurs de colonnes explicites : la colonne "Classe"
-    // (souvent un nom composé, ex: "6eme Informatique Management A") ne
-    // sera plus jamais écrasée par les colonnes voisines.
     final columnWidths = _buildColumnWidths([0.5, 1.6, 1.6, 1.6, 1.5]);
 
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
-        // ⚡ NOUVEAU — paysage : plus de place pour les noms longs.
         pageFormat: PdfPageFormat.a4.landscape,
         margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
@@ -2905,6 +2921,7 @@ class FraisScolaires {
 
     return await _savePdf(pdf, filename, "student_list");
   }
+
   Future<Map<String, dynamic>> generateOrderStatusPdf({
     required String filename,
     required String mois,
@@ -2939,21 +2956,18 @@ class FraisScolaires {
         e.nom,
         e.postNom,
         e.prenom,
+        e.section,
         e.classe,
         '${montantPaye.toStringAsFixed(0)} / ${montantRequis.toStringAsFixed(0)} FC',
       ]);
     }
 
-    // ⚡ NOUVEAU — largeurs de colonnes explicites : "Classe" et la
-    // colonne "Payé / Requis" (qui contient deux montants) reçoivent
-    // suffisamment de place pour ne jamais être écrasées.
     final columnWidths =
-    _buildColumnWidths([0.5, 1.5, 1.5, 1.5, 1.4, 1.9]);
+    _buildColumnWidths([0.5, 1.4, 1.4, 1.4, 1.1, 1.3, 1.8]);
 
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
-        // ⚡ NOUVEAU — paysage : plus de largeur pour les six colonnes.
         pageFormat: PdfPageFormat.a4.landscape,
         margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
@@ -2994,7 +3008,7 @@ class FraisScolaires {
           pw.SizedBox(height: 10),
           pw.TableHelper.fromTextArray(
             headers: [
-              'N°', 'Nom', 'Post-nom', 'Prénom', 'Classe',
+              'N°', 'Nom', 'Post-nom', 'Prénom', 'Section', 'Classe',
               'Payé / Requis ($mois)',
             ],
             data: rows,
@@ -3017,7 +3031,8 @@ class FraisScolaires {
               2: pw.Alignment.centerLeft,
               3: pw.Alignment.centerLeft,
               4: pw.Alignment.centerLeft,
-              5: pw.Alignment.center,
+              5: pw.Alignment.centerLeft,
+              6: pw.Alignment.center,
             },
             oddRowDecoration: pw.BoxDecoration(
               color: enOrdre ? PdfColors.green50 : PdfColors.red50,
@@ -3034,22 +3049,6 @@ class FraisScolaires {
     );
   }
 
-  // ==========================================================================
-  // RAPPORT "AUTRES FRAIS DE PAIEMENT"
-  // ==========================================================================
-  // ⚡ RAPPEL — ce rapport contenait DÉJÀ le bloc "RÉPARTITION GLOBALE PAR
-  // ADMINISTRATION" (basé sur `calculateAdminDistribution(total)`, le total
-  // étant calculé uniquement à partir des paiements d'"Autres Frais"
-  // filtrés ci-dessous — jamais mélangé avec les frais principaux). Ce
-  // comportement est conservé tel quel, il fonctionnait déjà correctement,
-  // et continue de fonctionner correctement même si ce frais a des
-  // montants différents par section/classe (le total est toujours la
-  // somme des montants RÉELLEMENT payés). Le nouveau bouton ajouté dans
-  // l'écran "Autres Frais de Paiement" (`getAdminDistributionForAutreFrais`)
-  // permet simplement de consulter le même type d'information EN AMONT,
-  // avant même de générer le PDF, pour un frais précis actuellement
-  // sélectionné.
-  // ==========================================================================
   Future<Map<String, dynamic>> generateAutresFraisPdf({
     required String filename,
     String? autreFraisId,
@@ -3075,9 +3074,6 @@ class FraisScolaires {
 
     final rows = <List<String>>[];
     double total = 0;
-    // ⚡ NOUVEAU — on garde trace des élèves DISTINCTS concernés par ce
-    // rapport (un même élève peut avoir payé plusieurs frais différents,
-    // il ne doit être compté qu'une seule fois dans le total général).
     final Map<String, Eleve> elevesDistincts = {};
 
     for (final p in paiements) {
@@ -3111,9 +3107,6 @@ class FraisScolaires {
       }
     }
 
-    // ⚡ NOUVEAU — utilise EXCLUSIVEMENT les administrations dédiées aux
-    // "Autres Frais" (`autresFraisAdministrations`), jamais
-    // `config.administrations` (réservée aux frais principaux).
     final adminDistribution = calculateAutresFraisAdminDistribution(total);
 
     String title = "RAPPORT — AUTRES FRAIS DE PAIEMENT";
@@ -3134,9 +3127,6 @@ class FraisScolaires {
       'Montant (FC)', 'Date de Paiement',
     ];
 
-    // ⚡ NOUVEAU — largeurs explicites : "Nom Complet" et "Type de Frais"
-    // reçoivent la part la plus généreuse, les colonnes numériques/date
-    // restent compactes sans jamais être écrasées.
     final columnWidths =
     _buildColumnWidths([0.6, 2.1, 1.0, 1.1, 1.5, 1.0, 1.3]);
     final double cellFontSize = _tableCellFontSize(headers.length);
@@ -3145,32 +3135,41 @@ class FraisScolaires {
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
-        // ⚡ NOUVEAU — paysage : plus de largeur pour les sept colonnes.
         pageFormat: PdfPageFormat.a4.landscape,
         margin: const pw.EdgeInsets.all(28),
         build: (pw.Context context) => [
-          pw.Text(
-            title,
-            style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold),
+          ..._buildCenteredReportHeader(
+            title: title,
+            subtitle: 'Année scolaire $currentYear',
           ),
-          pw.Text('${config.schoolName} - $currentYear'),
-          pw.Text('Généré le : $_dateGenerationFormatee'),
-          pw.SizedBox(height: 20),
-          pw.Text(
-            "Total Collecté (ce rapport) : ${total.toStringAsFixed(0)} FC",
-            style:
-            pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
-          ),
-          pw.SizedBox(height: 4),
-          pw.Text(
-            "Nombre de paiements : ${rows.length}",
-            style: const pw.TextStyle(fontSize: 11),
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(12),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.indigo50,
+              border: pw.Border.all(color: PdfColors.indigo200, width: 0.8),
+              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(
+                  "Total Collecté (ce rapport) : ${total.toStringAsFixed(0)} FC",
+                  style: pw.TextStyle(
+                    fontSize: 15,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.indigo900,
+                  ),
+                ),
+                pw.SizedBox(height: 5),
+                pw.Text(
+                  "Nombre de paiements : ${rows.length}",
+                  style: const pw.TextStyle(fontSize: 11),
+                ),
+              ],
+            ),
           ),
           pw.SizedBox(height: 16),
-          // ⚡ NOUVEAU — bloc "NOMBRE D'ÉLÈVES" pour le rapport "Autres
-          // Frais", basé sur les élèves DISTINCTS ayant au moins un
-          // paiement dans ce rapport (et non le nombre de paiements, qui
-          // peut être supérieur si un élève a payé plusieurs frais).
           ..._buildStudentCountSection(
             elevesDistincts.values.toList(),
             label: "ont payé au moins un frais de ce rapport",
@@ -3207,12 +3206,6 @@ class FraisScolaires {
               const pw.BoxDecoration(color: PdfColors.indigo50),
             ),
           pw.SizedBox(height: 30),
-          // ⚡ NOUVEAU — répartition par administration DÉDIÉE aux "Autres
-          // Frais" (basée sur `autresFraisAdministrations`, totalement
-          // indépendante de `config.administrations`). Basée sur `total`,
-          // calculé ci-dessus exclusivement à partir des paiements de ce
-          // rapport. Elle n'apparaît QUE dans ce rapport-ci et n'est
-          // jamais ajoutée au rapport de répartition des frais principaux.
           pw.Text(
             "RÉPARTITION GLOBALE PAR ADMINISTRATION (AUTRES FRAIS)",
             style:
@@ -3245,6 +3238,7 @@ class FraisScolaires {
 
     return await _savePdf(pdf, filename, "autres_frais");
   }
+
   Future<Map<String, dynamic>> _savePdf(
       pw.Document pdf, String filename, String reportType) async {
     try {
@@ -3276,6 +3270,7 @@ class FraisScolaires {
       return {'success': false, 'error': e.toString()};
     }
   }
+
   Future<void> loadData() async {
     final dir       = await getApplicationDocumentsDirectory();
     _dataFilePath   = '${dir.path}/school_fees_data.json';
@@ -3292,8 +3287,6 @@ class FraisScolaires {
         lastSelectedSectionFilter = data['lastSelectedSectionFilter'];
         lastReportCity = data['lastReportCity'] as String?;
         schoolCode = data['schoolCode'] as String?;
-        hiddenCodeHash = data['hiddenCodeHash'] as String?;
-        hiddenCodeSalt = data['hiddenCodeSalt'] as String?;
         if (data['adminAuditLog'] != null) {
           adminAuditLog = (data['adminAuditLog'] as List<dynamic>)
               .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
@@ -3340,10 +3333,6 @@ class FraisScolaires {
             ),
           );
         }
-        // ⚡ NOUVEAU — chargement des administrations dédiées aux Autres
-        // Frais. Absentes d'une ancienne sauvegarde (avant cette version),
-        // la liste reste simplement vide : aucune erreur, aucun impact sur
-        // le reste des données.
         if (data['autresFraisAdministrations'] != null) {
           autresFraisAdministrations =
               (data['autresFraisAdministrations'] as List<dynamic>)
@@ -3473,24 +3462,17 @@ class FraisScolaires {
       'schoolCode':              schoolCode,
       'history':                 history.map(
               (key, value) => MapEntry(key, value.toJson())),
-      // ⚡ NOUVEAU
       'depensesByYear': depensesByYear.map(
             (key, value) =>
             MapEntry(key, value.map((d) => d.toJson()).toList()),
       ),
-      // ⚡ NOUVEAU
       'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
       'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
             (key, value) =>
             MapEntry(key, value.map((p) => p.toJson()).toList()),
       ),
-      // ⚡ NOUVEAU — administrations dédiées aux Autres Frais, sauvegardées
-      // séparément de config.administrations (déjà incluses dans
-      // config.toJson()).
       'autresFraisAdministrations':
       autresFraisAdministrations.map((a) => a.toJson()).toList(),
-      'hiddenCodeHash': hiddenCodeHash,
-      'hiddenCodeSalt': hiddenCodeSalt,
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
       'signataires': signataires.map((s) => s.toJson()).toList(),
       'localAccessKeys': localAccessKeys,
@@ -3504,6 +3486,7 @@ class FraisScolaires {
     };
     await file.writeAsString(json.encode(data));
   }
+
   Future<void> clearLocalData() async {
     if (_dataFilePath == null) {
       final dir     = await getApplicationDocumentsDirectory();
@@ -3520,24 +3503,22 @@ class FraisScolaires {
     _localIdCounter = 0;
     lastSelectedClassFilter   = null;
     lastSelectedSectionFilter = null;
-    lastReportCity = null; // ⚡ NOUVEAU
+    lastReportCity = null;
     schoolCode  = null;
-    depensesByYear = {}; // ⚡ NOUVEAU
-    autresFrais = []; // ⚡ NOUVEAU
-    autresFraisPaiementsByYear = {}; // ⚡ NOUVEAU
-    autresFraisAdministrations = []; // ⚡ NOUVEAU
-    hiddenCodeHash = null; // ⚡ NOUVEAU
-    hiddenCodeSalt = null; // ⚡ NOUVEAU
-    adminAuditLog = []; // ⚡ NOUVEAU
-    signataires = []; // ⚡ NOUVEAU
-    localAccessKeys = []; // ⚡ NOUVEAU
-    localPendingPayments = []; // ⚡ NOUVEAU
-    localPendingRegistrations = []; // ⚡ NOUVEAU
-    localPendingAutresFraisPayments = []; // ⚡ NOUVEAU
-    localAttendance = {}; // ⚡ NOUVEAU
-    localCommunicationsLog = []; // ⚡ NOUVEAU
-    printedReceiptKeys = []; // ⚡ NOUVEAU
-    receiptQueue = []; // ⚡ NOUVEAU
+    depensesByYear = {};
+    autresFrais = [];
+    autresFraisPaiementsByYear = {};
+    autresFraisAdministrations = [];
+    adminAuditLog = [];
+    signataires = [];
+    localAccessKeys = [];
+    localPendingPayments = [];
+    localPendingRegistrations = [];
+    localPendingAutresFraisPayments = [];
+    localAttendance = {};
+    localCommunicationsLog = [];
+    printedReceiptKeys = [];
+    receiptQueue = [];
   }
 
   Future<void> changeYear(String newYear) async {
@@ -3553,13 +3534,18 @@ class FraisScolaires {
     await saveData();
   }
 
-  void handlePayment(Eleve eleve, String mois, double payment) {
+  List<Map<String, dynamic>> handlePayment(
+      Eleve eleve, String mois, double payment) {
     int    index     = months.indexOf(mois);
-    if (index == -1) return;
+    if (index == -1) return [];
 
     final String today     = DateTime.now().toString().split(' ')[0];
     double       remaining = payment;
     String       currentMonth = mois;
+    final List<Map<String, dynamic>> nouvellesTransactions = [];
+
+    String genererIdTransaction() =>
+        'TX${DateTime.now().microsecondsSinceEpoch}_${nouvellesTransactions.length}';
 
     while (remaining > 0 && index < months.length) {
       double required    =
@@ -3570,17 +3556,38 @@ class FraisScolaires {
       if (needed > 0) {
         double toAdd = remaining > needed ? needed : remaining;
         eleve.paid[currentMonth] = alreadyPaid + toAdd;
-        eleve.transactions.add({
+        final transaction = <String, dynamic>{
+          'id': genererIdTransaction(),
           'date':   today,
           'mois':   currentMonth,
           'amount': toAdd,
-        });
+        };
+        eleve.transactions.add(transaction);
+        nouvellesTransactions.add(transaction);
         remaining -= toAdd;
       }
 
       index++;
       if (index < months.length) currentMonth = months[index];
     }
+
+    if (remaining > 0 && months.isNotEmpty) {
+      final dernierMois = months.last;
+      final double dejaPayeDernierMois = eleve.paid[dernierMois] ?? 0;
+      eleve.paid[dernierMois] = dejaPayeDernierMois + remaining;
+      final transaction = <String, dynamic>{
+        'id': genererIdTransaction(),
+        'date': today,
+        'mois': dernierMois,
+        'amount': remaining,
+        'excedent': true,
+      };
+      eleve.transactions.add(transaction);
+      nouvellesTransactions.add(transaction);
+      remaining = 0;
+    }
+
+    return nouvellesTransactions;
   }
 
   double getStudentTotalPaid(Eleve eleve) =>
@@ -3594,6 +3601,7 @@ class FraisScolaires {
             (getRequiredForMonth(m, eleve.section, eleve.classe) -
                 (eleve.paid[m] ?? 0)));
   }
+
   Future<Map<String, dynamic>> backupToServer(
       String schoolCodeParam, String password) async {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
@@ -3618,12 +3626,8 @@ class FraisScolaires {
               (key, value) =>
               MapEntry(key, value.map((p) => p.toJson()).toList()),
         ),
-        // ⚡ NOUVEAU — administrations dédiées aux Autres Frais, envoyées
-        // au serveur séparément de config.administrations.
         'autresFraisAdministrations':
         autresFraisAdministrations.map((a) => a.toJson()).toList(),
-        'hiddenCodeHash': hiddenCodeHash,
-        'hiddenCodeSalt': hiddenCodeSalt,
         'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
         'signataires': signataires.map((s) => s.toJson()).toList(),
         'printedReceiptKeys': printedReceiptKeys,
@@ -3647,6 +3651,7 @@ class FraisScolaires {
           _applyIdCorrections(corrections);
           await saveData();
         }
+        await pushPromoterSummary();
         return {'success': true};
       }
       return {
@@ -3779,12 +3784,48 @@ class FraisScolaires {
                   : localEleve.id;
               localEleve.classe   = serverEleve.classe;
               localEleve.section  = serverEleve.section;
-              localEleve.paid
-                ..clear()
-                ..addAll(serverEleve.paid);
+
+              final Map<String, Map<String, dynamic>> transactionsFusionnees =
+              {};
+              int compteurSansId = 0;
+
+              void ajouterTransaction(Map<String, dynamic> t) {
+                final tid = t['id']?.toString() ?? '';
+                final String cle = tid.isNotEmpty
+                    ? 'id:$tid'
+                    : 'legacy:${t['date']}|${t['mois']}|${t['amount']}|'
+                    '${compteurSansId++}';
+                transactionsFusionnees.putIfAbsent(cle, () => t);
+              }
+
+              for (var t in localEleve.transactions) {
+                ajouterTransaction(Map<String, dynamic>.from(t));
+              }
+              for (var t in serverEleve.transactions) {
+                ajouterTransaction(Map<String, dynamic>.from(t));
+              }
+
+              final mergedTransactions = transactionsFusionnees.values
+                  .toList()
+                ..sort((a, b) => (a['date'] ?? '')
+                    .toString()
+                    .compareTo((b['date'] ?? '').toString()));
+
               localEleve.transactions
                 ..clear()
-                ..addAll(serverEleve.transactions);
+                ..addAll(mergedTransactions);
+
+              final Map<String, double> paidReconstruit = {};
+              for (var t in mergedTransactions) {
+                final mois = t['mois']?.toString() ?? '';
+                if (mois.isEmpty) continue;
+                final montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
+                paidReconstruit[mois] =
+                    (paidReconstruit[mois] ?? 0) + montant;
+              }
+              localEleve.paid
+                ..clear()
+                ..addAll(paidReconstruit);
             } else {
               localEleves.add(serverEleve);
             }
@@ -3863,11 +3904,6 @@ class FraisScolaires {
         }
       }
     }
-    // ⚡ NOUVEAU — fusion des administrations dédiées aux Autres Frais,
-    // anti-doublon par id, exactement comme pour `autresFrais` ci-dessus.
-    // Totalement indépendant de la fusion de `config.administrations`
-    // (qui se fait via `config = SchoolConfig.fromJson(...)` plus haut et
-    // reste réservée aux frais principaux).
     if (serverData['autresFraisAdministrations'] != null) {
       final serverAutresFraisAdmins =
       (serverData['autresFraisAdministrations'] as List<dynamic>)
@@ -3881,12 +3917,6 @@ class FraisScolaires {
           autresFraisAdministrations.add(a);
         }
       }
-    }
-    if (!hiddenCodeIsConfigured) {
-      hiddenCodeHash =
-          serverData['hiddenCodeHash'] as String? ?? hiddenCodeHash;
-      hiddenCodeSalt =
-          serverData['hiddenCodeSalt'] as String? ?? hiddenCodeSalt;
     }
     if (serverData['adminAuditLog'] != null) {
       final serverAudit = (serverData['adminAuditLog'] as List<dynamic>)
@@ -3942,6 +3972,7 @@ class FraisScolaires {
 
     await _assignMissingIds();
   }
+
   Future<Map<String, dynamic>> recordAbsences({
     required List<String> absentIds,
     required String classe,
@@ -3990,6 +4021,7 @@ class FraisScolaires {
       return {'success': false, 'error': 'Erreur inattendue : $e'};
     }
   }
+
   Future<Map<String, dynamic>> getAttendance({
     required String classe,
     String? date,
@@ -4016,6 +4048,7 @@ class FraisScolaires {
       return {'success': false, 'absents': <String>[]};
     }
   }
+
   Future<Map<String, dynamic>> sendConvocation({
     required String studentId,
     required String title,
@@ -4046,10 +4079,11 @@ class FraisScolaires {
       return {'success': false, 'error': 'Erreur inattendue : $e'};
     }
   }
+
   Future<Map<String, dynamic>> sendAnnouncement({
     required String title,
     required String message,
-    required String target, // 'all' | 'section' | 'classe' | 'students'
+    required String target,
     String? classe,
     String? section,
     List<String>? studentIds,

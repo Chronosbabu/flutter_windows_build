@@ -633,11 +633,19 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
       // ==========================================================================
       // APPLICATION DES DEUX PAIEMENTS OPTIONNELS, DE MANIÈRE CUMULABLE.
+      //
+      // ⚡ CORRIGÉ — `handlePayment` renvoie désormais la liste des
+      // transactions qu'il vient de créer (une par mois affecté, plus
+      // l'éventuelle transaction d'excédent sur le dernier mois si le
+      // montant dépasse un mois). On conserve cette liste pour pouvoir
+      // imprimer (ou mettre en file d'attente) UN REÇU PAR TRANSACTION,
+      // exactement comme dans l'écran "Paiements des Élèves".
       // ==========================================================================
       String? moisPrincipalPaye;
+      List<Map<String, dynamic>> transactionsPrincipal = [];
       if (_payerPrincipal && montantPrincipalAPayer != null) {
         moisPrincipalPaye = widget.fraisScolaires.months.first;
-        widget.fraisScolaires.handlePayment(
+        transactionsPrincipal = widget.fraisScolaires.handlePayment(
           nouvelEleve,
           moisPrincipalPaye,
           montantPrincipalAPayer,
@@ -666,23 +674,34 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       // jamais vérifier si un reçu identique avait déjà été imprimé
       // ailleurs, et sans jamais mettre en file d'attente si l'imprimante
       // était débranchée. Maintenant :
-      //   - Si un reçu identique (même élève + même mois, ou même élève +
-      //     même frais additionnel) a déjà été imprimé une fois, peu importe
-      //     depuis quel écran, il ne sera JAMAIS réimprimé.
+      //   - Si un reçu identique (même transaction) a déjà été imprimé une
+      //     fois, peu importe depuis quel écran, il ne sera JAMAIS
+      //     réimprimé.
       //   - Si aucune imprimante n'est branchée, le reçu est mis en attente
       //     et sortira automatiquement dès qu'une imprimante redevient
       //     disponible (même après extinction complète de l'ordinateur ou
       //     de l'application), voir `flushReceiptQueue`.
+      //
+      // ⚡ CORRIGÉ #2 — `printOrQueuePrincipalReceipt` attend désormais un
+      // paramètre `transaction:` (et non plus `mois:` / `montantPaye:`).
+      // On imprime donc UN REÇU PAR TRANSACTION créée par `handlePayment`.
       // ==========================================================================
-      bool principalRecuImprimeMaintenant = false;
-      if (moisPrincipalPaye != null && montantPrincipalAPayer != null) {
-        principalRecuImprimeMaintenant =
-        await widget.fraisScolaires.printOrQueuePrincipalReceipt(
+      int nbRecusPrincipalImprimes = 0;
+      for (final transaction in transactionsPrincipal) {
+        final printed = await widget.fraisScolaires.printOrQueuePrincipalReceipt(
           eleve: nouvelEleve,
-          mois: moisPrincipalPaye,
-          montantPaye: montantPrincipalAPayer,
+          transaction: transaction,
         );
+        transaction['receiptConfirmed'] = printed;
+        if (printed) nbRecusPrincipalImprimes++;
       }
+      if (transactionsPrincipal.isNotEmpty) {
+        await widget.fraisScolaires.saveData();
+      }
+      final bool principalRecuImprimeMaintenant =
+          transactionsPrincipal.isNotEmpty &&
+              nbRecusPrincipalImprimes == transactionsPrincipal.length;
+
       bool autreFraisRecuImprimeMaintenant = false;
       if (autreFraisPaye != null) {
         autreFraisRecuImprimeMaintenant =
