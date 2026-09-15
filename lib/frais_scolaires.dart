@@ -2848,6 +2848,196 @@ class FraisScolaires {
     ];
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — RÉPARTITION PAR SECTION ET PAR ADMINISTRATION
+  //
+  // Inspiré du modèle papier fourni ("RAPPORT FINANCIER MOIS DE ...") :
+  // un grand tableau où chaque LIGNE est une section de l'école, chaque
+  // COLONNE est une administration configurée (avec son pourcentage), et
+  // chaque cellule est le montant qui revient à cette administration pour
+  // cette section. Une dernière colonne donne le Total (FC) de la
+  // section. Juste en dessous, un second petit tableau (mis en
+  // évidence) donne le TOTAL GÉNÉRAL toutes sections et classes
+  // confondues — exactement la répartition globale déjà calculée
+  // ailleurs dans le rapport, mais présentée ici sous forme de tableau
+  // pour rester cohérente avec le tableau détaillé par section.
+  //
+  // N'est affiché que lorsque le rapport couvre TOUTES les sections ET
+  // TOUTES les classes (aucun filtre Section/Classe appliqué), puisque
+  // c'est le seul cas où une ventilation par section a du sens.
+  //
+  // `students` doit déjà être la liste des élèves correspondant au type
+  // de rapport demandé (journalier / mensuel / annuel) — la même liste
+  // que celle utilisée pour construire le tableau principal du rapport.
+  // ==========================================================================
+  List<pw.Widget> _buildRepartitionParSectionEtAdministration(
+      List<Eleve> students) {
+    if (config.administrations.isEmpty || students.isEmpty) return [];
+
+    // Total (frais principal) par section, pour les élèves du rapport.
+    final Map<String, double> totalBySection = {};
+    for (final e in students) {
+      totalBySection[e.section] =
+          (totalBySection[e.section] ?? 0) + getStudentTotalPaid(e);
+    }
+    totalBySection.removeWhere((_, v) => v <= 0);
+    if (totalBySection.isEmpty) return [];
+
+    // On respecte l'ordre des sections tel que défini dans la
+    // configuration de l'école, puis on ajoute en fin de liste les
+    // sections "orphelines" (non présentes dans la config), triées par
+    // ordre alphabétique, pour ne perdre aucune donnée.
+    final List<String> sectionsOrdonnees = [
+      ...config.sections.where((s) => totalBySection.containsKey(s)),
+      ...(totalBySection.keys
+          .where((s) => !config.sections.contains(s))
+          .toList()
+        ..sort()),
+    ];
+
+    final headers = [
+      'Section',
+      'Effectif',
+      'Montant Total (FC)',
+      ...config.administrations
+          .map((a) => '${a.nom}\n(${a.pourcentage.toStringAsFixed(0)}%)'),
+    ];
+
+    final Map<String, int> effectifParSection = {};
+    for (final e in students) {
+      if ((totalBySection[e.section] ?? 0) <= 0) continue;
+      effectifParSection[e.section] =
+          (effectifParSection[e.section] ?? 0) + 1;
+    }
+
+    final rows = <List<String>>[];
+    for (final section in sectionsOrdonnees) {
+      final double total = totalBySection[section] ?? 0;
+      final dist = calculateAdminDistribution(total);
+      rows.add([
+        section,
+        '${effectifParSection[section] ?? 0}',
+        total.toStringAsFixed(0),
+        ...config.administrations
+            .map((a) => (dist[a.nom] ?? 0).toStringAsFixed(0)),
+      ]);
+    }
+
+    final double totalGeneral =
+    totalBySection.values.fold(0.0, (sum, v) => sum + v);
+    final int effectifGeneral =
+    effectifParSection.values.fold(0, (sum, v) => sum + v);
+    final distGenerale = calculateAdminDistribution(totalGeneral);
+
+    final columnWidths = _buildColumnWidths([
+      1.7,
+      0.9,
+      1.5,
+      ...List<double>.filled(config.administrations.length, 1.3),
+    ]);
+    final double cellFontSize = _tableCellFontSize(headers.length);
+    final double headerFontSize = _tableHeaderFontSize(headers.length);
+
+    return [
+      pw.Text(
+        "RÉPARTITION PAR SECTION ET PAR ADMINISTRATION",
+        style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
+      ),
+      pw.SizedBox(height: 4),
+      pw.Text(
+        "Détail du montant collecté et de sa répartition entre "
+            "administrations, section par section. Le total général "
+            "toutes sections et classes confondues figure dans le "
+            "tableau récapitulatif juste en dessous.",
+        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+      ),
+      pw.SizedBox(height: 10),
+      pw.TableHelper.fromTextArray(
+        headers: headers,
+        data: rows,
+        columnWidths: columnWidths,
+        headerStyle: pw.TextStyle(
+          fontSize: headerFontSize,
+          fontWeight: pw.FontWeight.bold,
+          color: PdfColors.white,
+        ),
+        headerDecoration: const pw.BoxDecoration(color: PdfColors.indigo),
+        headerAlignment: pw.Alignment.center,
+        cellStyle: pw.TextStyle(fontSize: cellFontSize),
+        cellAlignment: pw.Alignment.centerRight,
+        cellAlignments: {
+          0: pw.Alignment.centerLeft,
+          1: pw.Alignment.center,
+        },
+        cellPadding:
+        const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        oddRowDecoration: const pw.BoxDecoration(color: PdfColors.indigo50),
+      ),
+      pw.SizedBox(height: 16),
+      // ---- Petit tableau récapitulatif : TOTAL GÉNÉRAL toutes sections
+      // et classes confondues, clairement mis en évidence. ----
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(10),
+        decoration: pw.BoxDecoration(
+          color: PdfColors.indigo50,
+          border: pw.Border.all(color: PdfColors.indigo400, width: 1),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+        ),
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              "TOTAL GÉNÉRAL — TOUTES SECTIONS ET CLASSES CONFONDUES "
+                  "($effectifGeneral élève(s))",
+              style: pw.TextStyle(
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.indigo900,
+              ),
+            ),
+            pw.SizedBox(height: 8),
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'Montant Total (FC)',
+                ...config.administrations.map((a) =>
+                '${a.nom}\n(${a.pourcentage.toStringAsFixed(0)}%)'),
+              ],
+              data: [
+                [
+                  totalGeneral.toStringAsFixed(0),
+                  ...config.administrations.map(
+                          (a) => (distGenerale[a.nom] ?? 0).toStringAsFixed(0)),
+                ],
+              ],
+              columnWidths: _buildColumnWidths([
+                1.5,
+                ...List<double>.filled(config.administrations.length, 1.3),
+              ]),
+              headerStyle: pw.TextStyle(
+                fontSize: headerFontSize,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration:
+              const pw.BoxDecoration(color: PdfColors.indigo900),
+              headerAlignment: pw.Alignment.center,
+              cellStyle: pw.TextStyle(
+                fontSize: cellFontSize + 0.5,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.indigo900,
+              ),
+              cellAlignment: pw.Alignment.center,
+              cellPadding:
+              const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+            ),
+          ],
+        ),
+      ),
+      pw.SizedBox(height: 24),
+    ];
+  }
+
   List<pw.Widget> _buildCenteredReportHeader({
     required String title,
     String? subtitle,
@@ -2924,6 +3114,14 @@ class FraisScolaires {
       title    = "RAPPORT ANNUEL";
       countLabel = "figurent dans ce rapport";
     }
+
+    // ⚡ NOUVEAU — La ventilation par section n'a de sens que si le rapport
+    // couvre TOUTES les sections ET TOUTES les classes (aucun filtre
+    // appliqué). On capture donc la liste des élèves AVANT application
+    // des filtres Section/Classe, pour construire ce tableau plus loin.
+    final List<Eleve> studentsAvantFiltres = List<Eleve>.from(students);
+    final bool afficherRepartitionParSection =
+        sectionFilter == null && classFilter == null;
 
     if (sectionFilter != null) {
       students = students
@@ -3094,6 +3292,12 @@ class FraisScolaires {
             ),
           ],
           pw.SizedBox(height: 30),
+          // ⚡ NOUVEAU — Tableau détaillé de répartition PAR SECTION et par
+          // administration, affiché uniquement lorsque le rapport couvre
+          // toutes les sections et toutes les classes (aucun filtre).
+          if (afficherRepartitionParSection)
+            ..._buildRepartitionParSectionEtAdministration(
+                studentsAvantFiltres),
           pw.Text(
             "RÉPARTITION GLOBALE PAR ADMINISTRATION",
             style: pw.TextStyle(
