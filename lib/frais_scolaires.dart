@@ -571,18 +571,20 @@ class FraisScolaires {
 
   // ==========================================================================
   // RÉSUMÉ PROMOTEUR — calculé et poussé au serveur après chaque sauvegarde
+  // ⚡ ENRICHI : inclut désormais la répartition Aujourd'hui / Ce mois /
+  // Cette année, globale ET par section, pour que le promoteur puisse voir
+  // combien chaque administration (enseignants, gestionnaire, etc.) a déjà
+  // accumulé — pas seulement pour la journée, mais aussi pour le mois en
+  // cours, l'année, et pour chaque section de l'école.
   // ==========================================================================
   Map<String, dynamic> computePromoterSummary() {
     final today = DateTime.now().toString().split(' ')[0];
 
-    double moneyTodayPrincipal = 0;
-    for (final e in currentData.eleves) {
-      for (final t in e.transactions) {
-        if (t['date'] == today) {
-          moneyTodayPrincipal += (t['amount'] as num?)?.toDouble() ?? 0.0;
-        }
-      }
-    }
+    // --- Aujourd'hui, par section (frais principaux) ---
+    final Map<String, double> moneyTodayBySection =
+    getMoneyCollectedTodayBySection();
+    final double moneyTodayPrincipal =
+    moneyTodayBySection.values.fold(0.0, (sum, v) => sum + v);
 
     double moneyTodayAutresFrais = 0;
     for (final p in (autresFraisPaiementsByYear[currentYear] ?? [])) {
@@ -591,9 +593,55 @@ class FraisScolaires {
       }
     }
 
+    // --- Ce mois-ci, par section (frais principaux) ---
+    final Map<String, double> moneyThisMonthBySection =
+    getMoneyCollectedThisMonthBySection();
+    final double moneyThisMonthPrincipal =
+    moneyThisMonthBySection.values.fold(0.0, (sum, v) => sum + v);
+
+    double moneyThisMonthAutresFrais = 0;
+    final DateTime now = DateTime.now();
+    for (final p in (autresFraisPaiementsByYear[currentYear] ?? [])) {
+      if (p.date.year == now.year && p.date.month == now.month) {
+        moneyThisMonthAutresFrais += p.montant;
+      }
+    }
+
+    // --- Cette année (déjà existant) ---
+    final double totalPrincipalYear = getYearTotalCollected();
+    final double totalAutresFraisYear =
+    (autresFraisPaiementsByYear[currentYear] ?? [])
+        .fold(0.0, (sum, p) => sum + p.montant);
+    final Map<String, double> moneyThisYearBySection = getTotalBySection();
+
+    // --- Répartition GLOBALE par administration (toute l'école) ---
     final adminDistToday = calculateAdminDistribution(moneyTodayPrincipal);
+    final adminDistThisMonth =
+    calculateAdminDistribution(moneyThisMonthPrincipal);
+    final adminDistThisYear = calculateAdminDistribution(totalPrincipalYear);
+
     final autresFraisAdminDistToday =
     calculateAutresFraisAdminDistribution(moneyTodayAutresFrais);
+    final autresFraisAdminDistThisMonth =
+    calculateAutresFraisAdminDistribution(moneyThisMonthAutresFrais);
+    final autresFraisAdminDistThisYear =
+    calculateAutresFraisAdminDistribution(totalAutresFraisYear);
+
+    // --- Répartition PAR SECTION par administration ---
+    Map<String, Map<String, double>> distBySection(
+        Map<String, double> amountsBySection) {
+      final result = <String, Map<String, double>>{};
+      amountsBySection.forEach((section, amount) {
+        result[section] = calculateAdminDistribution(amount);
+      });
+      return result;
+    }
+
+    final adminDistributionTodayBySection = distBySection(moneyTodayBySection);
+    final adminDistributionThisMonthBySection =
+    distBySection(moneyThisMonthBySection);
+    final adminDistributionThisYearBySection =
+    distBySection(moneyThisYearBySection);
 
     final Map<String, int> studentsBySection = {};
     final Map<String, int> studentsByClass = {};
@@ -603,23 +651,41 @@ class FraisScolaires {
       studentsByClass[key] = (studentsByClass[key] ?? 0) + 1;
     }
 
-    final double totalPrincipal = getYearTotalCollected();
-    final double totalAutresFrais =
-    (autresFraisPaiementsByYear[currentYear] ?? [])
-        .fold(0.0, (sum, p) => sum + p.montant);
-
     return {
       'schoolName': config.schoolName,
       'currentYear': currentYear,
+      'currentMonthName': currentSchoolMonthName ?? '',
+
+      // Aujourd'hui
       'moneyToday': moneyTodayPrincipal + moneyTodayAutresFrais,
       'moneyTodayPrincipal': moneyTodayPrincipal,
       'moneyTodayAutresFrais': moneyTodayAutresFrais,
       'adminDistributionToday': adminDistToday,
       'autresFraisAdminDistributionToday': autresFraisAdminDistToday,
+      'moneyTodayBySection': moneyTodayBySection,
+      'adminDistributionTodayBySection': adminDistributionTodayBySection,
+
+      // Ce mois-ci
+      'moneyThisMonth': moneyThisMonthPrincipal + moneyThisMonthAutresFrais,
+      'moneyThisMonthPrincipal': moneyThisMonthPrincipal,
+      'moneyThisMonthAutresFrais': moneyThisMonthAutresFrais,
+      'adminDistributionThisMonth': adminDistThisMonth,
+      'autresFraisAdminDistributionThisMonth': autresFraisAdminDistThisMonth,
+      'moneyThisMonthBySection': moneyThisMonthBySection,
+      'adminDistributionThisMonthBySection':
+      adminDistributionThisMonthBySection,
+
+      // Cette année / global
+      'adminDistributionThisYear': adminDistThisYear,
+      'autresFraisAdminDistributionThisYear': autresFraisAdminDistThisYear,
+      'moneyThisYearBySection': moneyThisYearBySection,
+      'adminDistributionThisYearBySection':
+      adminDistributionThisYearBySection,
+
       'totalStudents': currentData.eleves.length,
       'studentsBySection': studentsBySection,
       'studentsByClass': studentsByClass,
-      'totalAmountGlobal': totalPrincipal + totalAutresFrais,
+      'totalAmountGlobal': totalPrincipalYear + totalAutresFraisYear,
       'totalAmountBySection': getTotalBySection(),
       'totalAmountByClass': getTotalByClass(),
       'totalDepenses': getTotalDepenses(),
@@ -1785,6 +1851,58 @@ class FraisScolaires {
         .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0));
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — Montants collectés (frais principaux) groupés PAR SECTION,
+  // pour "Aujourd'hui" et pour "Ce mois-ci". Le total par section pour
+  // "Cette année" existe déjà via getTotalBySection().
+  // ==========================================================================
+  Map<String, double> getMoneyCollectedTodayBySection() {
+    final today = DateTime.now().toString().split(' ')[0];
+    final Map<String, double> result = {};
+    for (final e in currentData.eleves) {
+      double sumToday = 0;
+      for (final t in e.transactions) {
+        if (t['date'] == today) {
+          sumToday += (t['amount'] as num?)?.toDouble() ?? 0.0;
+        }
+      }
+      if (sumToday != 0) {
+        result[e.section] = (result[e.section] ?? 0) + sumToday;
+      }
+    }
+    return result;
+  }
+
+  Map<String, double> getMoneyCollectedThisMonthBySection() {
+    final idx = _schoolMonthIndexForToday();
+    if (idx < 0 || idx >= months.length) return {};
+    final moisCourant = months[idx];
+    final Map<String, double> result = {};
+    for (final e in currentData.eleves) {
+      final montant = e.paid[moisCourant] ?? 0;
+      if (montant != 0) {
+        result[e.section] = (result[e.section] ?? 0) + montant;
+      }
+    }
+    return result;
+  }
+
+  /// Montant total collecté (frais principaux, toutes sections) pour la
+  /// période demandée : 'today', 'month' ou 'year'.
+  double getMoneyCollectedForPeriod(String period) {
+    switch (period) {
+      case 'today':
+        return getMoneyCollectedTodayBySection()
+            .values
+            .fold(0.0, (a, b) => a + b);
+      case 'month':
+        return getCurrentMonthTotalCollected();
+      case 'year':
+      default:
+        return getYearTotalCollected();
+    }
+  }
+
   List<Eleve> getPaidStudentsToday() {
     final today = DateTime.now().toString().split(' ')[0];
     return currentData.eleves
@@ -1827,6 +1945,27 @@ class FraisScolaires {
         .fold(0.0, (sum, d) => sum + d.montant);
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — Dépenses "Aujourd'hui" et "Ce mois-ci" (basées sur le mois
+  // calendaire de la dépense, faute de notion de "mois scolaire" pour les
+  // dépenses).
+  // ==========================================================================
+  double getTotalDepensesToday([String? year]) {
+    final y = year ?? currentYear;
+    final today = DateTime.now().toString().split(' ')[0];
+    return (depensesByYear[y] ?? [])
+        .where((d) => d.date.toString().split(' ')[0] == today)
+        .fold(0.0, (sum, d) => sum + d.montant);
+  }
+
+  double getTotalDepensesThisMonth([String? year]) {
+    final y = year ?? currentYear;
+    final now = DateTime.now();
+    return (depensesByYear[y] ?? [])
+        .where((d) => d.date.year == now.year && d.date.month == now.month)
+        .fold(0.0, (sum, d) => sum + d.montant);
+  }
+
   double getSoldeNetActuel([String? year]) {
     final y = year ?? currentYear;
     final totalCollecte = (y == currentYear)
@@ -1840,6 +1979,22 @@ class FraisScolaires {
               0.0),
     );
     return totalCollecte - getTotalDepenses(y);
+  }
+
+  /// ⚡ NOUVEAU — Solde net (collecté - dépenses) pour une période donnée :
+  /// 'today', 'month' ou 'year'.
+  double getSoldeNetForPeriod(String period, [String? year]) {
+    switch (period) {
+      case 'today':
+        return getMoneyCollectedForPeriod('today') -
+            getTotalDepensesToday(year);
+      case 'month':
+        return getMoneyCollectedForPeriod('month') -
+            getTotalDepensesThisMonth(year);
+      case 'year':
+      default:
+        return getSoldeNetActuel(year);
+    }
   }
 
   Future<Depense> addDepense({
@@ -2154,9 +2309,27 @@ class FraisScolaires {
 
   List<String> getOptions() => List<String>.from(config.sections);
 
-  RepartitionDetail getRepartitionForOption(String option) {
-    final total = getStudentsBySection(option)
-        .fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
+  RepartitionDetail getRepartitionForOption(String option) =>
+      getRepartitionForOptionPeriod(option, 'year');
+
+  /// ⚡ NOUVEAU — Répartition (total + par administration) pour une
+  /// section (option) donnée, sur la période demandée : 'today', 'month'
+  /// ou 'year'.
+  RepartitionDetail getRepartitionForOptionPeriod(
+      String option, String period) {
+    double total;
+    switch (period) {
+      case 'today':
+        total = getMoneyCollectedTodayBySection()[option] ?? 0.0;
+        break;
+      case 'month':
+        total = getMoneyCollectedThisMonthBySection()[option] ?? 0.0;
+        break;
+      case 'year':
+      default:
+        total = getStudentsBySection(option)
+            .fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
+    }
     return RepartitionDetail(
       label: option,
       total: total,
@@ -2173,13 +2346,43 @@ class FraisScolaires {
     return "Éducation de Base ($numero)";
   }
 
-  List<RepartitionDetail> getSousSectionsForOption(String option) {
+  /// ⚡ NOUVEAU — Montant payé par un élève pour une période donnée :
+  /// 'today' (transactions du jour), 'month' (mois scolaire en cours) ou
+  /// 'year' (total annuel déjà payé).
+  double _getStudentAmountForPeriod(Eleve eleve, String period) {
+    switch (period) {
+      case 'today':
+        final today = DateTime.now().toString().split(' ')[0];
+        double sum = 0;
+        for (final t in eleve.transactions) {
+          if (t['date'] == today) {
+            sum += (t['amount'] as num?)?.toDouble() ?? 0.0;
+          }
+        }
+        return sum;
+      case 'month':
+        final idx = _schoolMonthIndexForToday();
+        if (idx < 0 || idx >= months.length) return 0.0;
+        return eleve.paid[months[idx]] ?? 0.0;
+      case 'year':
+      default:
+        return getStudentTotalPaid(eleve);
+    }
+  }
+
+  List<RepartitionDetail> getSousSectionsForOption(String option) =>
+      getSousSectionsForOptionPeriod(option, 'year');
+
+  /// ⚡ NOUVEAU — Répartition par sous-section (classe pédagogique) pour la
+  /// période demandée.
+  List<RepartitionDetail> getSousSectionsForOptionPeriod(
+      String option, String period) {
     final students = getStudentsBySection(option);
     final Map<String, double> totalsByLabel = {};
     for (var e in students) {
       final label = _sousSectionLabelFor(e);
-      totalsByLabel[label] =
-          (totalsByLabel[label] ?? 0) + getStudentTotalPaid(e);
+      final montant = _getStudentAmountForPeriod(e, period);
+      totalsByLabel[label] = (totalsByLabel[label] ?? 0) + montant;
     }
     final details = totalsByLabel.entries
         .map((entry) => RepartitionDetail(

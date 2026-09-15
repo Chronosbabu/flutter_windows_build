@@ -15,6 +15,10 @@ class RepartitionScreen extends StatefulWidget {
 class _RepartitionScreenState extends State<RepartitionScreen> {
   FraisScolaires get fraisScolaires => widget.fraisScolaires;
 
+  // ⚡ NOUVEAU — période sélectionnée pour la répartition globale par
+  // administration : 'today', 'month' ou 'year'.
+  String _periodeGlobale = 'year';
+
   // ==========================================================================
   // ⚡ VÉRIFICATION MOT DE PASSE (même principe que Paramètres)
   // Sécurise toute sortie de caisse (ajout d'une dépense) et toute
@@ -368,6 +372,53 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     );
   }
 
+  String _labelPeriode(String periode) {
+    switch (periode) {
+      case 'today':
+        return "Aujourd'hui";
+      case 'month':
+        return "Ce mois "
+            "(${fraisScolaires.currentSchoolMonthName ?? 'hors année'})";
+      case 'year':
+      default:
+        return "Cette Année (${fraisScolaires.currentYear})";
+    }
+  }
+
+  Widget _periodeChips(String selected, ValueChanged<String> onChanged) {
+    Widget chip(String value, String label) {
+      final bool isSelected = selected == value;
+      return Expanded(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 3),
+          child: ChoiceChip(
+            label: Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                color: isSelected ? Colors.white : Colors.black87,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+            selected: isSelected,
+            selectedColor: Colors.indigo,
+            backgroundColor: Colors.grey.shade200,
+            onSelected: (_) => onChanged(value),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        chip('today', "Aujourd'hui"),
+        chip('month', "Ce mois"),
+        chip('year', "Cette année"),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final totalCollecte = fraisScolaires.getYearTotalCollected();
@@ -376,6 +427,18 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final totalDepenses = fraisScolaires.getTotalDepenses();
     final soldeNet = totalCollecte - totalDepenses;
     final depensesApercu = depenses.take(3).toList();
+
+    // ⚡ NOUVEAU — valeurs pour la période choisie dans la répartition
+    // globale par administration.
+    final double collectePeriode =
+    fraisScolaires.getMoneyCollectedForPeriod(_periodeGlobale);
+    final double depensesPeriode = _periodeGlobale == 'today'
+        ? fraisScolaires.getTotalDepensesToday()
+        : _periodeGlobale == 'month'
+        ? fraisScolaires.getTotalDepensesThisMonth()
+        : totalDepenses;
+    final double soldeNetPeriode =
+    fraisScolaires.getSoldeNetForPeriod(_periodeGlobale);
 
     return Scaffold(
       appBar: AppBar(title: const Text("Répartition par Administration")),
@@ -393,7 +456,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text("Total Collecté Global",
+                    const Text("Total Collecté Global (Cette Année)",
                         style: TextStyle(
                             fontSize: 18, fontWeight: FontWeight.bold)),
                     Text("${totalCollecte.toStringAsFixed(0)} FC",
@@ -472,7 +535,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               child: OutlinedButton.icon(
                 onPressed: _openAutresRepartitions,
                 icon: const Icon(Icons.account_tree),
-                label: const Text("Autres Répartitions"),
+                label: const Text("Autres Répartitions (par Section)"),
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   foregroundColor: Colors.indigo,
@@ -531,9 +594,9 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             ],
 
             // ---------------------------------------------------------------
-            // Montant par classe (inchangé)
+            // Montant par classe (annuel, inchangé)
             // ---------------------------------------------------------------
-            const Text("Montant par Classe",
+            const Text("Montant par Classe (Cette Année)",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ...totalsByClass.entries.map((entry) => ListTile(
               title: Text(entry.key),
@@ -542,29 +605,83 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             const Divider(),
 
             // ---------------------------------------------------------------
-            // Répartition aux administrations — calculée sur le solde net
+            // ⚡ ENRICHI — Répartition GLOBALE aux administrations, avec
+            // choix de la période (Aujourd'hui / Ce mois / Cette année),
+            // pas seulement journalier.
             // ---------------------------------------------------------------
-            const Text("Répartition aux Administrations",
+            const Text("Répartition Globale aux Administrations",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            if (totalDepenses > 0)
-              const Padding(
-                padding: EdgeInsets.only(top: 4, bottom: 8),
-                child: Text(
-                  "Calculée sur le solde net (après déduction des dépenses)",
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontStyle: FontStyle.italic,
-                      color: Colors.black54),
-                ),
+            const SizedBox(height: 4),
+            const Text(
+              "Ce que chaque administration (enseignants, gestionnaire, "
+                  "etc.) a déjà accumulé pour TOUTE L'ÉCOLE, sur la période "
+                  "choisie ci-dessous.",
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            const SizedBox(height: 10),
+            _periodeChips(
+              _periodeGlobale,
+                  (value) => setState(() => _periodeGlobale = value),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.indigo.withAlpha(15),
+                borderRadius: BorderRadius.circular(8),
               ),
-            ...fraisScolaires.config.administrations.map((admin) {
-              double montant = soldeNet * (admin.pourcentage / 100);
-              return ListTile(
-                title: Text(admin.nom),
-                subtitle: Text("${admin.pourcentage}%"),
-                trailing: Text("${montant.toStringAsFixed(0)} FC"),
-              );
-            }).toList(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "Collecté — ${_labelPeriode(_periodeGlobale)}",
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.bold),
+                  ),
+                  Text("${collectePeriode.toStringAsFixed(0)} FC",
+                      style: const TextStyle(
+                          fontSize: 18,
+                          color: Colors.green,
+                          fontWeight: FontWeight.bold)),
+                  if (depensesPeriode > 0) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      "Dépenses sur cette période : "
+                          "-${depensesPeriode.toStringAsFixed(0)} FC",
+                      style: const TextStyle(fontSize: 12, color: Colors.red),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "Solde net sur cette période : "
+                          "${soldeNetPeriode.toStringAsFixed(0)} FC",
+                      style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.indigo),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            if (fraisScolaires.config.administrations.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  "Aucune administration configurée (Paramètres).",
+                  style: TextStyle(color: Colors.grey),
+                ),
+              )
+            else
+              ...fraisScolaires.config.administrations.map((admin) {
+                double montant = soldeNetPeriode * (admin.pourcentage / 100);
+                return ListTile(
+                  title: Text(admin.nom),
+                  subtitle: Text("${admin.pourcentage}%"),
+                  trailing: Text("${montant.toStringAsFixed(0)} FC"),
+                );
+              }).toList(),
           ],
         ),
       ),
@@ -578,6 +695,9 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
 // l'intérieur d'une option, par Section pédagogique (ex: Électricité,
 // Commerciale...) ou "Éducation de Base" pour les classes sans section
 // (7ème/8ème dans le système éducatif de la RDC).
+// ⚡ ENRICHI — sélecteur de période (Aujourd'hui / Ce mois / Cette année)
+// permettant de voir, PAR SECTION, ce que chaque administration a déjà
+// obtenu, pas seulement le total annuel.
 // ==============================================================================
 class _AutresRepartitionsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -591,12 +711,60 @@ class _AutresRepartitionsScreen extends StatefulWidget {
 class _AutresRepartitionsScreenState
     extends State<_AutresRepartitionsScreen> {
   String? selectedOption;
+  String _periode = 'year';
 
   @override
   void initState() {
     super.initState();
     final options = widget.fraisScolaires.getOptions();
     if (options.isNotEmpty) selectedOption = options.first;
+  }
+
+  String _labelPeriode(String periode) {
+    switch (periode) {
+      case 'today':
+        return "Aujourd'hui";
+      case 'month':
+        return "Ce mois "
+            "(${widget.fraisScolaires.currentSchoolMonthName ?? 'hors année'})";
+      case 'year':
+      default:
+        return "Cette Année (${widget.fraisScolaires.currentYear})";
+    }
+  }
+
+  Widget _periodeChips() {
+    Widget chip(String value, String label) {
+      final bool isSelected = _periode == value;
+      return Expanded(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 3),
+          child: ChoiceChip(
+            label: Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                color: isSelected ? Colors.white : Colors.black87,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+            selected: isSelected,
+            selectedColor: Colors.indigo,
+            backgroundColor: Colors.grey.shade200,
+            onSelected: (_) => setState(() => _periode = value),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        chip('today', "Aujourd'hui"),
+        chip('month', "Ce mois"),
+        chip('year', "Cette année"),
+      ],
+    );
   }
 
   @override
@@ -635,13 +803,22 @@ class _AutresRepartitionsScreenState
                 style: TextStyle(fontSize: 12, color: Colors.indigo),
               ),
             ),
+            const SizedBox(height: 12),
+
+            // ⚡ NOUVEAU — sélecteur de période, applicable à toute la page.
+            const Text("Période",
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            _periodeChips(),
             const SizedBox(height: 16),
 
-            const Text("Vue d'ensemble par Option",
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text("Vue d'ensemble par Option — ${_labelPeriode(_periode)}",
+                style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             ...options.map((option) {
-              final detail = fraisScolaires.getRepartitionForOption(option);
+              final detail = fraisScolaires.getRepartitionForOptionPeriod(
+                  option, _periode);
               return Card(
                 margin: const EdgeInsets.only(bottom: 8),
                 child: ListTile(
@@ -658,8 +835,9 @@ class _AutresRepartitionsScreenState
 
             const Divider(height: 32),
 
-            const Text("Détail par Option",
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text("Détail par Option — ${_labelPeriode(_periode)}",
+                style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               value: selectedOption,
@@ -685,9 +863,11 @@ class _AutresRepartitionsScreenState
   }
 
   Widget _buildOptionDetail(FraisScolaires fraisScolaires, String option) {
-    final detailOption = fraisScolaires.getRepartitionForOption(option);
+    final detailOption =
+    fraisScolaires.getRepartitionForOptionPeriod(option, _periode);
     final hasSousSections = fraisScolaires.optionHasSousSections(option);
-    final sousSections = fraisScolaires.getSousSectionsForOption(option);
+    final sousSections =
+    fraisScolaires.getSousSectionsForOptionPeriod(option, _periode);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -700,7 +880,7 @@ class _AutresRepartitionsScreenState
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  "Total $option (toutes classes confondues)",
+                  "Total $option — ${_labelPeriode(_periode)}",
                   style: const TextStyle(
                       fontSize: 16, fontWeight: FontWeight.bold),
                 ),
@@ -714,20 +894,29 @@ class _AutresRepartitionsScreenState
                 const SizedBox(height: 12),
                 const Text("Répartition par administration :",
                     style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-                ...detailOption.parAdministration.entries.map(
-                      (e) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(e.key),
-                        Text("${e.value.toStringAsFixed(0)} FC",
-                            style:
-                            const TextStyle(fontWeight: FontWeight.w600)),
-                      ],
+                if (detailOption.parAdministration.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Text(
+                      "Aucune administration configurée.",
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  )
+                else
+                  ...detailOption.parAdministration.entries.map(
+                        (e) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(e.key),
+                          Text("${e.value.toStringAsFixed(0)} FC",
+                              style:
+                              const TextStyle(fontWeight: FontWeight.w600)),
+                        ],
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -737,7 +926,7 @@ class _AutresRepartitionsScreenState
 
         if (hasSousSections) ...[
           Text(
-            "Détail par Section ($option)",
+            "Détail par Section ($option) — ${_labelPeriode(_periode)}",
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 4),
@@ -753,7 +942,19 @@ class _AutresRepartitionsScreenState
               title: Text(detail.label,
                   style: const TextStyle(fontWeight: FontWeight.bold)),
               subtitle: Text("${detail.total.toStringAsFixed(0)} FC"),
-              children: detail.parAdministration.entries
+              children: detail.parAdministration.isEmpty
+                  ? [
+                const Padding(
+                  padding: EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 8),
+                  child: Text(
+                    "Aucune administration configurée.",
+                    style:
+                    TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ),
+              ]
+                  : detail.parAdministration.entries
                   .map(
                     (e) => ListTile(
                   dense: true,

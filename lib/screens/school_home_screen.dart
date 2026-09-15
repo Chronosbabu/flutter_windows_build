@@ -32,6 +32,9 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   // chargement initial n'est pas terminé.
   bool _initialLoadDone = false;
 
+  // ⚡ NOUVEAU — état du bouton SOS de sauvegarde rapide
+  bool _sosBackupEnCours = false;
+
   @override
   void initState() {
     super.initState();
@@ -60,6 +63,127 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     if (mounted) setState(() {});
   }
 
+  // ============================================================
+  // ⚡ NOUVEAU — BOUTON SOS : SAUVEGARDE RAPIDE SUR LE SERVEUR
+  // ============================================================
+  Future<void> _confirmerSosBackup() async {
+    final appState = Provider.of<AppState>(context, listen: false);
+
+    // Si le code école ou le mot de passe de sauvegarde ne sont pas
+    // encore configurés, impossible de sauvegarder — on prévient
+    // l'utilisateur au lieu de planter silencieusement.
+    if (appState.schoolCode == null ||
+        appState.schoolCode!.isEmpty ||
+        appState.backupPassword == null ||
+        appState.backupPassword!.isEmpty) {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 28),
+              SizedBox(width: 8),
+              Text("Configuration requise"),
+            ],
+          ),
+          content: const Text(
+            "Pour utiliser la sauvegarde rapide, vous devez d'abord "
+                "définir un Code École et un Mot de Passe de Sauvegarde "
+                "dans les Paramètres (une seule fois).",
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Fermer"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        SettingsScreen(fraisScolaires: fraisScolaires),
+                  ),
+                );
+              },
+              child: const Text("Aller aux Paramètres"),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    // Boîte de dialogue d'alerte de confirmation rapide
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.cloud_upload, color: Colors.red, size: 28),
+            SizedBox(width: 8),
+            Text("Sauvegarde Rapide"),
+          ],
+        ),
+        content: const Text(
+          "Voulez-vous sauvegarder immédiatement toutes les données "
+              "sur le serveur ?\n\n"
+              "Cela mettra à jour le résumé du promoteur et permettra "
+              "aux parents de retrouver leurs enfants.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.cloud_upload),
+            label: const Text("Sauvegarder Maintenant"),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _sosBackupEnCours = true);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("⏳ Sauvegarde en cours..."),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+
+    final result = await fraisScolaires.backupToServer(
+      appState.schoolCode!,
+      appState.backupPassword!,
+    );
+
+    if (!mounted) return;
+
+    setState(() => _sosBackupEnCours = false);
+
+    final bool success = result['success'] == true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(success
+            ? "✅ Sauvegarde réussie ! Données à jour sur le serveur."
+            : "❌ Échec de la sauvegarde : ${result['error'] ?? 'erreur inconnue'}"),
+        backgroundColor: success ? Colors.green : Colors.red,
+        duration: Duration(seconds: success ? 3 : 6),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -79,6 +203,21 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
         ),
         centerTitle: true,
         actions: [
+          // ⚡ NOUVEAU — bouton SOS également accessible depuis l'AppBar
+          IconButton(
+            icon: _sosBackupEnCours
+                ? const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            )
+                : const Icon(Icons.cloud_upload),
+            tooltip: "Sauvegarde Rapide (SOS)",
+            onPressed: _sosBackupEnCours ? null : _confirmerSosBackup,
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => Navigator.push(
@@ -91,10 +230,72 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
           ),
         ],
       ),
+      // ⚡ NOUVEAU — Bouton SOS flottant, très visible, en forme d'alerte
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _sosBackupEnCours ? null : _confirmerSosBackup,
+        backgroundColor: Colors.red,
+        foregroundColor: Colors.white,
+        icon: _sosBackupEnCours
+            ? const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: Colors.white,
+          ),
+        )
+            : const Icon(Icons.sos),
+        label: Text(_sosBackupEnCours ? "Sauvegarde..." : "SOS Sauvegarde"),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            // ==================== BANDEAU SOS D'ALERTE ====================
+            Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.red.shade300, width: 1.2),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded,
+                      color: Colors.red.shade700, size: 28),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      "Besoin de sauvegarder rapidement ? Utilisez le "
+                          "bouton SOS ci-dessous ou en haut à droite — "
+                          "pas besoin d'aller dans les Paramètres.",
+                      style: TextStyle(fontSize: 12.5, color: Colors.black87),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    icon: _sosBackupEnCours
+                        ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                        : const Icon(Icons.sos, size: 18),
+                    label: const Text("SOS"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: _sosBackupEnCours ? null : _confirmerSosBackup,
+                  ),
+                ],
+              ),
+            ),
+
             // ==================== CARTE RÉSUMÉ ====================
             Card(
               child: Padding(
