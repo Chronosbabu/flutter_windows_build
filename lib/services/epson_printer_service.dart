@@ -34,11 +34,22 @@ import 'package:image/image.dart' as img;
 /// spouleur Windows (`Get-PrintJob`, même job id que celui renvoyé par
 /// `StartDocPrinter`) jusqu'à ce qu'il soit confirmé traité, en erreur
 /// (hors-ligne, bourrage, papier épuisé...), ou que le délai soit dépassé.
+///
+/// ⚡ CORRIGÉ — Auparavant, cette vérification relançait un NOUVEAU
+/// processus PowerShell toutes les 350ms depuis Dart, ce qui est lent
+/// (chaque lancement de processus coûte 100-300ms) et pouvait provoquer
+/// un timeout alors que le reçu était déjà correctement sorti — ce
+/// faux-échec renvoyait alors le reçu dans la file d'attente, causant une
+/// réimpression en double lors du prochain passage. Désormais, UN SEUL
+/// processus PowerShell est lancé ; c'est lui qui fait toute la boucle de
+/// vérification en interne (avec son propre `Start-Sleep`), ce qui est à
+/// la fois plus rapide et plus fiable.
+///
 /// Le booléen retourné par toutes les méthodes `print...` de cette classe
 /// (`printReceipt`, `printTransactionsReceipt`,
 /// `printAutreFraisReceipt`, `printAutresFraisTransactionsReceipt`)
-/// reflète donc désormais ce statut RÉEL, et non plus une simple
-/// acceptation par le spouleur.
+/// reflète donc ce statut RÉEL, et non plus une simple acceptation par le
+/// spouleur.
 ///
 /// ⚡ ÉCONOMIE DE PAPIER (reçu plus court)
 /// À la demande de l'employeur : le reçu doit occuper le MOINS de papier
@@ -185,75 +196,76 @@ class EscPosPrinterService {
 
     if (!sentOk) return false;
 
-    // ⚡ NOUVEAU — on ne s'arrête plus au retour de WritePrinter : on
-    // vérifie le VRAI statut du job auprès du spouleur Windows avant de
-    // considérer l'impression comme réussie.
+    // ⚡ on ne s'arrête plus au retour de WritePrinter : on vérifie le
+    // VRAI statut du job auprès du spouleur Windows avant de considérer
+    // l'impression comme réussie.
     return await _confirmJobPrinted(printerName, docId);
   }
 
   // ====================================================================
-  // ⚡ NOUVEAU — CONFIRMATION RÉELLE DU STATUT D'UN JOB D'IMPRESSION
+  // ⚡ CORRIGÉ — CONFIRMATION RÉELLE DU STATUT D'UN JOB D'IMPRESSION
   // ====================================================================
   // `jobId` correspond à l'identifiant renvoyé par `StartDocPrinter`, qui
   // est le même identifiant que celui utilisé par le spouleur Windows en
   // interne (visible aussi via `Get-PrintJob`/le Gestionnaire
-  // d'impression). On interroge ce statut en boucle, jusqu'à :
-  //   - constater que le job a disparu de la file -> le spouleur l'a
-  //     traité et retiré après l'avoir transmis avec succès à
-  //     l'imprimante -> on considère l'impression réussie.
-  //   - détecter un statut d'erreur explicite (hors-ligne, bourrage,
-  //     papier épuisé, intervention utilisateur requise, job supprimé...)
-  //     -> on considère l'impression échouée.
-  //   - dépasser le délai [timeout] sans certitude -> par sécurité, on
-  //     considère l'impression NON confirmée (mieux vaut proposer une
-  //     réimpression inutile de temps en temps que cacher un vrai échec).
+  // d'impression).
+  //
+  // Avant ce correctif, Dart relançait un NOUVEAU processus PowerShell
+  // toutes les 350ms pour sonder le statut — coûteux (spawn de processus)
+  // et donc lent, ce qui pouvait provoquer un timeout alors que le job
+  // avait déjà quitté la file depuis longtemps.
+  //
+  // Désormais, UN SEUL processus PowerShell est lancé : c'est lui qui
+  // fait toute la boucle de vérification en interne (avec son propre
+  // `Start-Sleep`), et ne renvoie qu'un seul résultat final ("OK",
+  // "ERROR" ou "TIMEOUT") une fois la boucle terminée. C'est beaucoup
+  // plus rapide (le cas normal — job qui disparaît de la file presque
+  // instantanément — est détecté dès la première itération de la boucle
+  // PowerShell, sans latence de spawn de processus Dart répétée) et donc
+  // beaucoup plus fiable.
   static Future<bool> _confirmJobPrinted(
       String printerName,
       int jobId, {
         Duration timeout = const Duration(seconds: 6),
       }) async {
     if (!Platform.isWindows) return false;
-    final deadline = DateTime.now().add(timeout);
     try {
-      while (DateTime.now().isBefore(deadline)) {
-        final result = await Process.run(
-          'powershell',
-          [
-            '-NoProfile',
-            '-Command',
-            'Get-PrintJob -PrinterName "$printerName" '
-                '-ErrorAction SilentlyContinue '
-                '| Where-Object { \$_.Id -eq $jobId } '
-                '| Select-Object -ExpandProperty JobStatus',
-          ],
-          runInShell: true,
-        );
+      final double timeoutSeconds = timeout.inMilliseconds / 1000.0;
 
-        final output = result.stdout.toString().trim();
+      final String script = '''
+\$deadline = (Get-Date).AddSeconds($timeoutSeconds)
+\$result = "TIMEOUT"
+while ((Get-Date) -lt \$deadline) {
+  \$status = Get-PrintJob -PrinterName "$printerName" -ErrorAction SilentlyContinue |
+    Where-Object { \$_.Id -eq $jobId } |
+    Select-Object -ExpandProperty JobStatus
+  if (-not \$status) {
+    \$result = "OK"
+    break
+  }
+  \$lower = \$status.ToString().ToLower()
+  if (\$lower -match 'error|offline|paperout|paper out|usernotified|userintervention|blocked|deleted') {
+    \$result = "ERROR"
+    break
+  }
+  Start-Sleep -Milliseconds 300
+}
+Write-Output \$result
+''';
 
-        if (output.isEmpty) {
-          // Le job n'apparaît plus dans la file d'attente : le spouleur
-          // l'a retiré après l'avoir transmis avec succès à l'imprimante.
-          return true;
-        }
+      final result = await Process.run(
+        'powershell',
+        ['-NoProfile', '-Command', script],
+        runInShell: true,
+      ).timeout(timeout + const Duration(seconds: 4));
 
-        final lower = output.toLowerCase();
-        final hasErrorState = lower.contains('error') ||
-            lower.contains('offline') ||
-            lower.contains('paperout') ||
-            lower.contains('paper out') ||
-            lower.contains('usernotified') ||
-            lower.contains('userintervention') ||
-            lower.contains('blocked') ||
-            lower.contains('deleted');
-        if (hasErrorState) return false;
-
-        await Future.delayed(const Duration(milliseconds: 350));
-      }
-      // Toujours présent dans la file après le délai : impossible de
-      // confirmer avec certitude que le papier est réellement sorti.
-      return false;
+      final output = result.stdout.toString().trim().toUpperCase();
+      return output.contains('OK');
     } catch (_) {
+      // En cas de doute (timeout du côté Dart, erreur d'exécution
+      // PowerShell...), on NE certifie PAS l'impression : mieux vaut
+      // proposer une réimpression en trop de temps en temps que masquer
+      // un vrai échec silencieux.
       return false;
     }
   }

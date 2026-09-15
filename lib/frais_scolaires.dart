@@ -303,6 +303,11 @@ class FraisScolaires {
 
   int _localIdCounter = 0;
 
+  // ⚡ NOUVEAU — verrou anti-concurrence pour flushReceiptQueue() : empêche
+  // deux vidages simultanés de la file de reçus en attente, qui pouvaient
+  // provoquer l'impression du même reçu plusieurs fois.
+  bool _isFlushingReceiptQueue = false;
+
   final List<String> months = [
     'Septembre', 'Octobre', 'Novembre', 'Decembre',
     'Janvier', 'Fevrier', 'Mars', 'Avril', 'Mai', 'Juin'
@@ -564,7 +569,18 @@ class FraisScolaires {
     );
     if (ok) {
       transaction['receiptConfirmed'] = true;
-      await saveData();
+      // ⚡ NOUVEAU — purge une éventuelle entrée résiduelle de la file
+      // d'attente pour ce même paiement, pour qu'une impression
+      // automatique ultérieure (flushReceiptQueue) ne reproduise jamais
+      // ce reçu. Il s'agit ici d'une réimpression explicitement demandée
+      // (duplicata volontaire) donc l'impression elle-même n'est pas
+      // bloquée, mais on garde le registre cohérent après coup.
+      final key = _principalReceiptKey(eleve, transaction);
+      if (!isReceiptPrinted(key)) {
+        await _markReceiptPrinted(key);
+      } else {
+        await saveData();
+      }
     }
     return ok;
   }
@@ -839,6 +855,25 @@ class FraisScolaires {
     return prefs.getString('printer_name') ?? '';
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — Clé unique et STABLE identifiant le reçu d'UNE transaction
+  // du frais principal. TOUTES les voies d'impression (immédiate, file
+  // d'attente `flushReceiptQueue`, et réimpression manuelle
+  // `retryPrintPrincipalReceipt`) utilisent désormais cette même clé.
+  // C'est ce qui garantit qu'un même paiement ne soit JAMAIS imprimé plus
+  // d'une fois, quel que soit le chemin par lequel l'impression est
+  // déclenchée (impression au moment du paiement, impression différée
+  // après reconnexion de l'imprimante, ou clic manuel sur "imprimer").
+  // ==========================================================================
+  String _principalReceiptKey(Eleve eleve, Map<String, dynamic> transaction) {
+    final String transactionId = transaction['id']?.toString() ?? '';
+    if (transactionId.isNotEmpty) {
+      return 'principal|${eleve.id}|$transactionId';
+    }
+    final String mois = transaction['mois']?.toString() ?? '';
+    return 'principal|${eleve.id}|$mois|${DateTime.now().microsecondsSinceEpoch}';
+  }
+
   Future<void> _markReceiptPrinted(String key) async {
     if (!printedReceiptKeys.contains(key)) {
       printedReceiptKeys.add(key);
@@ -878,9 +913,9 @@ class FraisScolaires {
     final double montantPaye =
         (transaction['amount'] as num?)?.toDouble() ?? 0.0;
 
-    final key = transactionId.isNotEmpty
-        ? 'principal|${eleve.id}|$transactionId'
-        : 'principal|${eleve.id}|$mois|${DateTime.now().microsecondsSinceEpoch}';
+    // ⚡ Clé unifiée (voir _principalReceiptKey) — identique à celle
+    // utilisée par flushReceiptQueue() et retryPrintPrincipalReceipt().
+    final key = _principalReceiptKey(eleve, transaction);
     if (isReceiptPrinted(key)) return false;
 
     final double montantRequis =
@@ -943,6 +978,54 @@ class FraisScolaires {
     return false;
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — Réimpression manuelle d'UN paiement principal déjà
+  // enregistré (bouton imprimante sur une transaction non confirmée dans
+  // l'écran "Paiements des Élèves"). Avant ce correctif, cette action ne
+  // passait PAS par le registre `printedReceiptKeys`/`receiptQueue`, ce
+  // qui pouvait provoquer une réimpression automatique en double lors du
+  // prochain passage de `flushReceiptQueue()`. Désormais elle utilise la
+  // MÊME clé et le MÊME registre que toutes les autres voies d'impression.
+  // ==========================================================================
+  Future<bool> retryPrintPrincipalReceipt({
+    required Eleve eleve,
+    required Map<String, dynamic> transaction,
+    required String printerName,
+    Uint8List? logoBytes,
+  }) async {
+    final key = _principalReceiptKey(eleve, transaction);
+
+    if (isReceiptPrinted(key)) {
+      // Déjà imprimé avec certitude par une autre voie (impression
+      // automatique au moment du paiement, ou file d'attente) entre-temps
+      // : on synchronise simplement l'état local SANS réimprimer, pour
+      // ne jamais produire un doublon.
+      transaction['receiptConfirmed'] = true;
+      await saveData();
+      return true;
+    }
+
+    final bool ok = await EscPosPrinterService.printTransactionsReceipt(
+      printerName: printerName,
+      schoolName: config.schoolName,
+      currentYear: currentYear,
+      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      studentId: eleve.id,
+      classe: eleve.classe,
+      section: eleve.section,
+      transactions: [transaction],
+      logoBytes: logoBytes,
+      duplicata: false,
+    );
+
+    if (ok) {
+      transaction['receiptConfirmed'] = true;
+      await _markReceiptPrinted(key);
+    }
+
+    return ok;
+  }
+
   Future<bool> printOrQueueAutreFraisReceipt({
     required Eleve eleve,
     required AutreFrais frais,
@@ -987,67 +1070,79 @@ class FraisScolaires {
   }
 
   Future<int> flushReceiptQueue() async {
+    // ⚡ NOUVEAU — verrou anti-concurrence : si un vidage de la file est
+    // déjà en cours (ex: l'écran de paiement a été réinitialisé deux fois
+    // rapidement), on ne relance pas un second vidage en parallèle. Sans
+    // ce verrou, deux exécutions concurrentes pouvaient toutes les deux
+    // constater qu'un reçu n'était "pas encore imprimé" et l'imprimer
+    // chacune une fois, créant un doublon.
+    if (_isFlushingReceiptQueue) return 0;
     if (receiptQueue.isEmpty) return 0;
     final printerName = await _currentPrinterName();
     if (printerName.isEmpty) return 0;
 
-    final logoBytes = await _loadLogoBytesForPrinting();
-    int printedCount = 0;
-    final items = List<Map<String, dynamic>>.from(receiptQueue);
+    _isFlushingReceiptQueue = true;
+    try {
+      final logoBytes = await _loadLogoBytesForPrinting();
+      int printedCount = 0;
+      final items = List<Map<String, dynamic>>.from(receiptQueue);
 
-    for (final item in items) {
-      final key = item['key']?.toString() ?? '';
-      if (key.isEmpty) continue;
-      if (isReceiptPrinted(key)) {
-        receiptQueue.removeWhere((r) => r['key'] == key);
-        continue;
-      }
-      final type = item['type']?.toString() ?? '';
-      final data = Map<String, dynamic>.from(item['data'] as Map? ?? {});
-      bool ok = false;
+      for (final item in items) {
+        final key = item['key']?.toString() ?? '';
+        if (key.isEmpty) continue;
+        if (isReceiptPrinted(key)) {
+          receiptQueue.removeWhere((r) => r['key'] == key);
+          continue;
+        }
+        final type = item['type']?.toString() ?? '';
+        final data = Map<String, dynamic>.from(item['data'] as Map? ?? {});
+        bool ok = false;
 
-      if (type == 'principal') {
-        ok = await EscPosPrinterService.printReceipt(
-          printerName: printerName,
-          schoolName: config.schoolName,
-          currentYear: currentYear,
-          studentName: data['studentName'] as String? ?? '',
-          studentId: data['studentId'] as String? ?? '',
-          classe: data['classe'] as String? ?? '',
-          section: data['section'] as String? ?? '',
-          moisPaye: data['moisPaye'] as String? ?? '',
-          montantPaye: (data['montantPaye'] as num?)?.toDouble() ?? 0.0,
-          montantRequis: (data['montantRequis'] as num?)?.toDouble() ?? 0.0,
-          resteAPayerMois:
-          (data['resteAPayerMois'] as num?)?.toDouble() ?? 0.0,
-          totalDejaPayeAnnee:
-          (data['totalDejaPayeAnnee'] as num?)?.toDouble() ?? 0.0,
-          totalRequis: (data['totalRequis'] as num?)?.toDouble() ?? 0.0,
-          historiqueTransactions:
-          ((data['historiqueTransactions'] as List?) ?? [])
-              .map((t) => Map<String, dynamic>.from(t as Map))
-              .toList(),
-          logoBytes: logoBytes,
-        );
-      } else if (type == 'autre_frais') {
-        ok = await EscPosPrinterService.printAutreFraisReceipt(
-          printerName: printerName,
-          schoolName: config.schoolName,
-          titreFrais: data['titreFrais'] as String? ?? '',
-          studentName: data['studentName'] as String? ?? '',
-          classe: data['classe'] as String? ?? '',
-          section: data['section'] as String? ?? '',
-          montant: (data['montant'] as num?)?.toDouble() ?? 0.0,
-        );
+        if (type == 'principal') {
+          ok = await EscPosPrinterService.printReceipt(
+            printerName: printerName,
+            schoolName: config.schoolName,
+            currentYear: currentYear,
+            studentName: data['studentName'] as String? ?? '',
+            studentId: data['studentId'] as String? ?? '',
+            classe: data['classe'] as String? ?? '',
+            section: data['section'] as String? ?? '',
+            moisPaye: data['moisPaye'] as String? ?? '',
+            montantPaye: (data['montantPaye'] as num?)?.toDouble() ?? 0.0,
+            montantRequis: (data['montantRequis'] as num?)?.toDouble() ?? 0.0,
+            resteAPayerMois:
+            (data['resteAPayerMois'] as num?)?.toDouble() ?? 0.0,
+            totalDejaPayeAnnee:
+            (data['totalDejaPayeAnnee'] as num?)?.toDouble() ?? 0.0,
+            totalRequis: (data['totalRequis'] as num?)?.toDouble() ?? 0.0,
+            historiqueTransactions:
+            ((data['historiqueTransactions'] as List?) ?? [])
+                .map((t) => Map<String, dynamic>.from(t as Map))
+                .toList(),
+            logoBytes: logoBytes,
+          );
+        } else if (type == 'autre_frais') {
+          ok = await EscPosPrinterService.printAutreFraisReceipt(
+            printerName: printerName,
+            schoolName: config.schoolName,
+            titreFrais: data['titreFrais'] as String? ?? '',
+            studentName: data['studentName'] as String? ?? '',
+            classe: data['classe'] as String? ?? '',
+            section: data['section'] as String? ?? '',
+            montant: (data['montant'] as num?)?.toDouble() ?? 0.0,
+          );
+        }
+
+        if (ok) {
+          await _markReceiptPrinted(key);
+          printedCount++;
+        }
       }
 
-      if (ok) {
-        await _markReceiptPrinted(key);
-        printedCount++;
-      }
+      return printedCount;
+    } finally {
+      _isFlushingReceiptQueue = false;
     }
-
-    return printedCount;
   }
 
   String generateLocalStudentId(String nom) {

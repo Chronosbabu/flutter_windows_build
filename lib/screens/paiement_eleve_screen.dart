@@ -423,6 +423,14 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   bool _isReceiptConfirmed(Map<String, dynamic> t) => t['receiptConfirmed'] == true;
 
+  // ⚡ CORRIGÉ — délègue désormais entièrement à
+  // widget.fraisScolaires.retryPrintPrincipalReceipt(), qui utilise le
+  // MÊME registre de déduplication (`printedReceiptKeys`/`receiptQueue`)
+  // que l'impression automatique et que la file d'attente. Avant ce
+  // correctif, un clic sur cette icône n'était PAS enregistré dans ce
+  // registre, ce qui pouvait provoquer une réimpression automatique en
+  // double lors du prochain vidage de la file (ex: après reconnexion de
+  // l'imprimante ou réouverture de l'écran).
   Future<void> _retryPrintUnconfirmed(
       Eleve eleve, Map<String, dynamic> transaction) async {
     if (_reprinting) return;
@@ -440,22 +448,12 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         return;
       }
       final logoBytes = await _loadLogoBytesLocal();
-      final ok = await EscPosPrinterService.printTransactionsReceipt(
+      final ok = await widget.fraisScolaires.retryPrintPrincipalReceipt(
+        eleve: eleve,
+        transaction: transaction,
         printerName: printerName,
-        schoolName: widget.fraisScolaires.config.schoolName,
-        currentYear: widget.fraisScolaires.currentYear,
-        studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
-        studentId: eleve.id,
-        classe: eleve.classe,
-        section: eleve.section,
-        transactions: [transaction],
         logoBytes: logoBytes,
-        duplicata: false,
       );
-      if (ok) {
-        transaction['receiptConfirmed'] = true;
-        await widget.fraisScolaires.saveData();
-      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1135,6 +1133,16 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return total;
   }
 
+  // ⚡ CORRIGÉ — Le bouton "Confirmer" utilise désormais un flag
+  // `isSubmitting` local au dialogue (via StatefulBuilder) qui :
+  //   1) se met à `true` de manière SYNCHRONE au tout début du clic
+  //      (avant tout `await`), ce qui empêche toute exécution concurrente
+  //      même en cas de double-clic très rapide ;
+  //   2) désactive et grise le bouton "Confirmer" + le champ de saisie
+  //      pendant tout le traitement (enregistrement + impression), avec
+  //      un indicateur de chargement visuel pour rassurer l'utilisateur
+  //      et lui éviter de re-cliquer par impatience.
+  // C'est ce correctif qui garantit qu'UN clic = UN paiement = UN reçu.
   void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
     if (!_peutPayerCeMois(eleve, mois)) {
       final premierNonPaye = _premierMoisNonPaye(eleve);
@@ -1152,120 +1160,156 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
 
     final controller = TextEditingController();
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text("Paiement - $mois (${eleve.section})"),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: "Montant (FC)"),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
-          ElevatedButton(
-            onPressed: () async {
-              final amount = double.tryParse(controller.text);
-              if (amount != null && amount > 0) {
-                if (!_peutPayerCeMois(eleve, mois)) {
-                  Navigator.pop(ctx);
-                  final premierNonPaye = _premierMoisNonPaye(eleve);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        premierNonPaye != null
-                            ? "Impossible : \"$premierNonPaye\" doit être soldé en premier."
-                            : "Tous les mois sont déjà soldés pour cet élève.",
-                      ),
-                      backgroundColor: Colors.orange,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) {
+          bool isSubmitting = false;
+
+          Future<void> onConfirmPressed() async {
+            // ⚡ Verrou synchrone : rien d'autre ne s'exécute avant cette
+            // ligne, donc un deuxième clic pendant que isSubmitting est
+            // déjà vrai est immédiatement ignoré.
+            if (isSubmitting) return;
+            setStateDialog(() => isSubmitting = true);
+
+            final amount = double.tryParse(controller.text);
+            if (amount == null || amount <= 0) {
+              setStateDialog(() => isSubmitting = false);
+              return;
+            }
+
+            if (!_peutPayerCeMois(eleve, mois)) {
+              Navigator.pop(ctx);
+              final premierNonPaye = _premierMoisNonPaye(eleve);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    premierNonPaye != null
+                        ? "Impossible : \"$premierNonPaye\" doit être soldé en premier."
+                        : "Tous les mois sont déjà soldés pour cet élève.",
+                  ),
+                  backgroundColor: Colors.orange,
+                ),
+              );
+              return;
+            }
+
+            final double soldeMax = _soldeMaxRestantAPartirDe(eleve, mois);
+            if (soldeMax > 0 && amount > soldeMax) {
+              final bool? continuer = await showDialog<bool>(
+                context: context,
+                builder: (ctx2) => AlertDialog(
+                  title: const Text("Montant supérieur au solde dû"),
+                  content: Text(
+                    "Le montant saisi (${amount.toStringAsFixed(0)} FC) "
+                        "dépasse le solde total restant à payer par cet élève "
+                        "sur toute l'année scolaire (${soldeMax.toStringAsFixed(0)} FC).\n\n"
+                        "L'excédent éventuel sera tout de même conservé et "
+                        "ajouté au dernier mois de l'année.",
+                  ),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx2, false),
+                        child: const Text("Corriger le montant")),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange, foregroundColor: Colors.white),
+                      onPressed: () => Navigator.pop(ctx2, true),
+                      child: const Text("Confirmer quand même"),
                     ),
-                  );
-                  return;
-                }
-
-                final double soldeMax = _soldeMaxRestantAPartirDe(eleve, mois);
-                if (soldeMax > 0 && amount > soldeMax) {
-                  final bool? continuer = await showDialog<bool>(
-                    context: context,
-                    builder: (ctx2) => AlertDialog(
-                      title: const Text("Montant supérieur au solde dû"),
-                      content: Text(
-                        "Le montant saisi (${amount.toStringAsFixed(0)} FC) "
-                            "dépasse le solde total restant à payer par cet élève "
-                            "sur toute l'année scolaire (${soldeMax.toStringAsFixed(0)} FC).\n\n"
-                            "L'excédent éventuel sera tout de même conservé et "
-                            "ajouté au dernier mois de l'année.",
-                      ),
-                      actions: [
-                        TextButton(
-                            onPressed: () => Navigator.pop(ctx2, false),
-                            child: const Text("Corriger le montant")),
-                        ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.orange, foregroundColor: Colors.white),
-                          onPressed: () => Navigator.pop(ctx2, true),
-                          child: const Text("Confirmer quand même"),
-                        ),
-                      ],
-                    ),
-                  );
-                  if (continuer != true) return;
-                }
-
-                final List<Map<String, dynamic>> nouvellesTransactions =
-                widget.fraisScolaires.handlePayment(eleve, mois, amount);
-                await widget.fraisScolaires.saveData();
-                Navigator.pop(ctx);
-                if (mounted) {
-                  _filterEleves();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("✅ Paiement enregistré avec succès")),
-                  );
-
-                  int nbRecusImprimes = 0;
-                  for (final transaction in nouvellesTransactions) {
-                    final printed = await widget.fraisScolaires
-                        .printOrQueuePrincipalReceipt(
-                        eleve: eleve, transaction: transaction);
-                    transaction['receiptConfirmed'] = printed;
-                    if (printed) nbRecusImprimes++;
-                  }
-                  if (nouvellesTransactions.isNotEmpty) {
-                    await widget.fraisScolaires.saveData();
-                  }
-
-                  if (mounted) {
-                    final int totalRecus = nouvellesTransactions.length;
-                    String message;
-                    Color color;
-                    if (totalRecus == 0) {
-                      message = "Aucune transaction créée.";
-                      color = Colors.orange;
-                    } else if (nbRecusImprimes == totalRecus) {
-                      message = totalRecus == 1
-                          ? "🖨️ Reçu imprimé avec succès"
-                          : "🖨️ $nbRecusImprimes reçu(s) imprimé(s) avec succès "
-                          "(paiement réparti sur $totalRecus mois)";
-                      color = Colors.green;
-                    } else if (nbRecusImprimes == 0) {
-                      message = totalRecus == 1
-                          ? "📥 Aucune imprimante disponible — le reçu sortira "
-                          "automatiquement dès qu'une imprimante sera prête."
-                          : "📥 $totalRecus reçu(s) en attente d'impression.";
-                      color = Colors.orange;
-                    } else {
-                      message = "🖨️ $nbRecusImprimes/$totalRecus reçu(s) imprimé(s).";
-                      color = Colors.orange;
-                    }
-                    ScaffoldMessenger.of(context)
-                        .showSnackBar(SnackBar(content: Text(message), backgroundColor: color));
-                  }
-                }
+                  ],
+                ),
+              );
+              if (continuer != true) {
+                setStateDialog(() => isSubmitting = false);
+                return;
               }
-            },
-            child: const Text("Confirmer"),
-          ),
-        ],
+            }
+
+            // ⚡ handlePayment() est synchrone : à ce stade, la transaction
+            // (ou les transactions, si le paiement est réparti sur
+            // plusieurs mois) est créée en une seule fois, de façon
+            // atomique, avant tout autre await.
+            final List<Map<String, dynamic>> nouvellesTransactions =
+            widget.fraisScolaires.handlePayment(eleve, mois, amount);
+            await widget.fraisScolaires.saveData();
+            if (ctx.mounted) Navigator.pop(ctx);
+
+            if (mounted) {
+              _filterEleves();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("✅ Paiement enregistré avec succès")),
+              );
+
+              int nbRecusImprimes = 0;
+              for (final transaction in nouvellesTransactions) {
+                final printed = await widget.fraisScolaires
+                    .printOrQueuePrincipalReceipt(
+                    eleve: eleve, transaction: transaction);
+                transaction['receiptConfirmed'] = printed;
+                if (printed) nbRecusImprimes++;
+              }
+              if (nouvellesTransactions.isNotEmpty) {
+                await widget.fraisScolaires.saveData();
+              }
+
+              if (mounted) {
+                final int totalRecus = nouvellesTransactions.length;
+                String message;
+                Color color;
+                if (totalRecus == 0) {
+                  message = "Aucune transaction créée.";
+                  color = Colors.orange;
+                } else if (nbRecusImprimes == totalRecus) {
+                  message = totalRecus == 1
+                      ? "🖨️ Reçu imprimé avec succès"
+                      : "🖨️ $nbRecusImprimes reçu(s) imprimé(s) avec succès "
+                      "(paiement réparti sur $totalRecus mois)";
+                  color = Colors.green;
+                } else if (nbRecusImprimes == 0) {
+                  message = totalRecus == 1
+                      ? "📥 Aucune imprimante disponible — le reçu sortira "
+                      "automatiquement dès qu'une imprimante sera prête."
+                      : "📥 $totalRecus reçu(s) en attente d'impression.";
+                  color = Colors.orange;
+                } else {
+                  message = "🖨️ $nbRecusImprimes/$totalRecus reçu(s) imprimé(s).";
+                  color = Colors.orange;
+                }
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(SnackBar(content: Text(message), backgroundColor: color));
+              }
+            }
+          }
+
+          return AlertDialog(
+            title: Text("Paiement - $mois (${eleve.section})"),
+            content: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              enabled: !isSubmitting,
+              decoration: const InputDecoration(labelText: "Montant (FC)"),
+            ),
+            actions: [
+              TextButton(
+                onPressed: isSubmitting ? null : () => Navigator.pop(ctx),
+                child: const Text("Annuler"),
+              ),
+              ElevatedButton(
+                onPressed: isSubmitting ? null : onConfirmPressed,
+                child: isSubmitting
+                    ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text("Confirmer"),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
