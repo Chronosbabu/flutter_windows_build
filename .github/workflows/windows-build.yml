@@ -59,30 +59,6 @@ jobs:
             exit 1
           }
 
-      # ==========================================================================
-      # Le pilote Epson et le script de configuration sont des fichiers du
-      # projet (pas de téléchargement pendant le build - voir §27 du
-      # cahier des charges). On vérifie juste qu'ils sont bien présents
-      # avant de compiler l'installateur, plutôt que de laisser Inno Setup
-      # échouer avec une erreur moins claire plus tard.
-      # ==========================================================================
-      - name: Verify Epson driver and configuration script
-        shell: powershell
-        run: |
-          if (!(Test-Path "windows\driver\APD_612_T20III_WM.exe")) {
-            Write-Error "Pilote Epson introuvable : windows\driver\APD_612_T20III_WM.exe"
-            exit 1
-          }
-          if (!(Test-Path "windows\scripts\configure_printer.ps1")) {
-            Write-Error "Script introuvable : windows\scripts\configure_printer.ps1"
-            exit 1
-          }
-          $driverSize = (Get-Item "windows\driver\APD_612_T20III_WM.exe").Length
-          if ($driverSize -lt 1000000) {
-            Write-Error "APD_612_T20III_WM.exe semble corrompu ou tronqué (taille anormale : $driverSize octets)."
-            exit 1
-          }
-
       - name: Install Inno Setup
         shell: powershell
         run: |

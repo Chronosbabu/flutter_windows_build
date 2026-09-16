@@ -1,140 +1,264 @@
-import 'dart:io' show Platform, Process;
+import 'dart:async';
+import 'dart:io' show Platform, Process, Directory, File, FileMode;
 import 'dart:typed_data';
 import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 import 'package:win32/win32.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:image/image.dart' as img;
+import 'package:flutter/foundation.dart' show debugPrint;
 
 /// ⚡ Remplace bluetooth_printer_service.dart.
 ///
 /// L'imprimante n'est plus une imprimante Bluetooth pilotée en port série
-/// (COM), mais une Epson TM-T20III branchée en USB. Sous Windows, une fois
-/// le pilote Epson officiel installé, l'imprimante apparaît comme une
-/// imprimante Windows normale (ex: "EPSON TM-T20III Receipt").
+/// (COM), mais une Epson TM-T20III branchée en USB.
 ///
-/// On envoie les commandes ESC/POS brutes directement au spouleur Windows
-/// en mode RAW (via winspool.drv), ce qui est la méthode standard et fiable
-/// pour piloter une imprimante ticket sous Windows — équivalent Dart de ce
-/// que fait python-escpos en interne. On n'a donc PAS besoin de connaître
-/// le Vendor ID / Product ID USB : on cible l'imprimante par son nom Windows,
-/// ce qui évite de devoir remplacer le pilote Epson par un pilote WinUSB
-/// générique (qui casserait l'impression normale de l'imprimante).
+/// - Sous Windows : une fois le pilote Epson officiel installé, l'imprimante
+///   apparaît comme une imprimante Windows normale (ex: "EPSON TM-T20III Receipt").
+///   On envoie les commandes ESC/POS brutes directement au spouleur Windows
+///   en mode RAW (via winspool.drv).
+///
+/// - Sous macOS : l'imprimante apparaît comme une file d'attente CUPS.
+///   On envoie les octets bruts via `lp -o raw` et on confirme réellement
+///   le statut du job avec `lpstat`.
 ///
 /// ⚡ NOUVEAU — CONFIRMATION RÉELLE DE L'IMPRESSION (anti faux-positif)
-/// PROBLÈME RÉSOLU : `WritePrinter()` qui répond "succès" signifie
-/// uniquement que Windows a bien reçu les octets et les a mis en file — PAS
-/// que le papier est réellement sorti de l'imprimante. Si le câble USB
-/// bouge ou se déconnecte juste après l'envoi, `WritePrinter` pouvait
-/// répondre "succès" alors que le reçu ressortait à moitié, ou pas du tout,
-/// ET l'application marquait quand même ce reçu comme "imprimé avec
-/// succès" de façon définitive (plus aucune tentative automatique possible
-/// ensuite pour ce paiement).
-/// SOLUTION : après l'envoi, on interroge le VRAI statut du job auprès du
-/// spouleur Windows (`Get-PrintJob`, même job id que celui renvoyé par
-/// `StartDocPrinter`) jusqu'à ce qu'il soit confirmé traité, en erreur
-/// (hors-ligne, bourrage, papier épuisé...), ou que le délai soit dépassé.
+/// PROBLÈME RÉSOLU : un simple "succès" d'écriture signifie uniquement que
+/// le système a bien reçu les octets et les a mis en file — PAS que le
+/// papier est réellement sorti. Si le câble USB bouge ou se déconnecte
+/// juste après l'envoi, l'application pouvait marquer le reçu comme
+/// "imprimé avec succès" de façon définitive.
+/// SOLUTION : après l'envoi, on interroge le VRAI statut du job jusqu'à
+/// ce qu'il soit confirmé traité, en erreur, ou que le délai soit dépassé.
 ///
-/// ⚡ CORRIGÉ — Auparavant, cette vérification relançait un NOUVEAU
-/// processus PowerShell toutes les 350ms depuis Dart, ce qui est lent
-/// (chaque lancement de processus coûte 100-300ms) et pouvait provoquer
-/// un timeout alors que le reçu était déjà correctement sorti — ce
-/// faux-échec renvoyait alors le reçu dans la file d'attente, causant une
-/// réimpression en double lors du prochain passage. Désormais, UN SEUL
-/// processus PowerShell est lancé ; c'est lui qui fait toute la boucle de
-/// vérification en interne (avec son propre `Start-Sleep`), ce qui est à
-/// la fois plus rapide et plus fiable.
+/// ⚡ CORRIGÉ — Auparavant (Windows), cette vérification relançait un
+/// NOUVEAU processus PowerShell toutes les 350ms. Désormais, UN SEUL
+/// processus PowerShell est lancé ; c'est lui qui fait toute la boucle.
+/// Sous macOS, la même logique est appliquée avec `lpstat`.
 ///
-/// Le booléen retourné par toutes les méthodes `print...` de cette classe
-/// (`printReceipt`, `printTransactionsReceipt`,
-/// `printAutreFraisReceipt`, `printAutresFraisTransactionsReceipt`)
-/// reflète donc ce statut RÉEL, et non plus une simple acceptation par le
-/// spouleur.
+/// Le booléen retourné par toutes les méthodes `print...` reflète donc
+/// ce statut RÉEL, et non plus une simple acceptation par le spouleur.
 ///
 /// ⚡ ÉCONOMIE DE PAPIER (reçu plus court)
 /// À la demande de l'employeur : le reçu doit occuper le MOINS de papier
-/// possible, sans qu'aucune information n'y soit retirée. Pour y arriver :
-///   1. Plusieurs informations combinées sur une même ligne (2 colonnes)
-///      au lieu d'une ligne par information.
-///   2. Suppression des sauts de ligne vides purement décoratifs.
-///   3. Espace de signature et marge de découpe réduits.
-///   4. En-tête (logo + nom) plus compact (marges réduites).
+/// possible, sans qu'aucune information n'y soit retirée.
 ///
 /// ⚡ NOUVEAU — LISIBILITÉ DU LOGO ET DU NOM DE L'ÉCOLE
-/// À la demande de l'employeur : le logo était flou et le nom de l'école
-/// pas assez visible par rapport au nom de l'élève. Deux correctifs :
-///   1. Le logo est maintenant redimensionné avec une interpolation de
-///      qualité (cubique en agrandissement, moyenne en réduction), puis
-///      converti en noir et blanc net à fort contraste — au lieu de
-///      laisser l'imprimante le tramer en niveaux de gris (ce qui le
-///      rendait flou/grisâtre sur du papier thermique).
-///   2. Le nom de l'école est dessiné avec une police bien plus grande
-///      (arial48 au lieu d'arial24) et en gras simulé (le trait est
-///      épaissi), MAIS uniquement lorsque le nom tient entier sur la
-///      ligne du logo — ce qui est le cas normal — pour ne JAMAIS
-///      augmenter la hauteur du reçu. Si un nom est exceptionnellement
-///      trop long pour cette police agrandie, l'ancien comportement
-///      (police normale + retour à la ligne si besoin) reprend
-///      automatiquement, pour ne jamais rien couper.
+/// Logo redimensionné avec interpolation de qualité + conversion N&B
+/// net à fort contraste. Nom de l'école en police plus grande (arial48)
+/// + gras simulé quand il tient sur la ligne.
 ///
-/// ⚡ RÉIMPRESSION MANUELLE (reçus perdus / mémoire d'impression
-/// perdue si l'ordinateur s'éteint avant que l'imprimante ne soit
-/// rebranchée)
-/// En plus de `printReceipt` (impression AUTOMATIQUE d'UN SEUL mois juste
-/// après un paiement — comportement inchangé et toujours utilisé tel
-/// quel) et de `printAutreFraisReceipt` (impression AUTOMATIQUE d'UN SEUL
-/// "autre frais" juste après son paiement — comportement inchangé), on
-/// ajoute deux méthodes génériques qui acceptent une LISTE de paiements
-/// déjà enregistrés et les impriment TOUS sur UN SEUL reçu :
-///   - `printTransactionsReceipt` pour les mois du frais scolaire
-///     principal (réimpression d'un seul paiement, d'une sélection, ou de
-///     tout l'historique d'un élève).
-///   - `printAutresFraisTransactionsReceipt` pour les "autres frais"
-///     (Frais de l'État, Frais d'Aide...), même logique.
-/// Ces deux méthodes sont aussi utilisées par le Dashboard Admin pour
-/// imprimer automatiquement, après validation d'un lot de paiements
-/// envoyés par un sous-utilisateur, UN SEUL reçu par élève regroupant
-/// tout ce qu'il vient de payer (même si plusieurs mois ou plusieurs
-/// frais d'un coup).
+/// ⚡ RÉIMPRESSION MANUELLE
+/// `printTransactionsReceipt` et `printAutresFraisTransactionsReceipt`
+/// permettent de regrouper plusieurs paiements déjà enregistrés sur
+/// un seul reçu (historique, sélection, ou validation de lot Admin).
+///
+/// ⚡ NOUVEAU — JOURNALISATION COMPLÈTE (DIAGNOSTIC WINDOWS)
+/// Chaque étape de l'envoi et de la confirmation d'impression est
+/// journalisée via `_log()`, avec le code d'erreur Windows natif
+/// (`GetLastError()`) quand disponible.
+///
+/// ⚡ NOUVEAU — FICHIER DE LOGS SUR LE BUREAU
+/// En plus de la console (debugPrint), chaque ligne de log est écrite
+/// automatiquement dans un fichier texte :
+///   <Bureau de l'utilisateur>\EduPay_Logs\printer_log.txt
+/// Ce fichier est créé tout seul au premier lancement, sans aucune
+/// action manuelle. Il se limite à 5 Mo : au-delà, l'ancien contenu
+/// est archivé dans "printer_log.ancien.txt" et un nouveau fichier
+/// repart de zéro. Une écriture de log qui échoue (ex: dossier
+/// protégé) n'interrompt jamais l'impression elle-même.
 class EscPosPrinterService {
   // ====================================================================
-  // LISTER LES IMPRIMANTES INSTALLÉES SUR WINDOWS
+  // ⚡ NOUVEAU — JOURNALISATION CENTRALISÉE (CONSOLE + FICHIER SUR BUREAU)
+  // ====================================================================
+  static File? _logFile;
+  static bool _logFileResolved = false;
+  static const int _maxLogSizeBytes = 5 * 1024 * 1024; // 5 Mo
+
+  /// Résout (une seule fois) le chemin du fichier de logs sur le Bureau
+  /// de l'utilisateur actuellement connecté, et crée le dossier/fichier
+  /// s'ils n'existent pas encore.
+  static Future<File?> _resolveLogFile() async {
+    if (_logFileResolved) return _logFile;
+    _logFileResolved = true;
+    try {
+      String? home;
+      if (Platform.isWindows) {
+        home = Platform.environment['USERPROFILE'];
+      } else if (Platform.isMacOS || Platform.isLinux) {
+        home = Platform.environment['HOME'];
+      }
+
+      if (home == null || home.isEmpty) {
+        debugPrint('[EPSON] Impossible de localiser le dossier utilisateur '
+            '(Bureau) — les logs resteront uniquement dans la console.');
+        return null;
+      }
+
+      final logsDir = Directory(
+          '$home${Platform.pathSeparator}Desktop${Platform.pathSeparator}EduPay_Logs');
+      if (!await logsDir.exists()) {
+        await logsDir.create(recursive: true);
+      }
+
+      final file =
+      File('${logsDir.path}${Platform.pathSeparator}printer_log.txt');
+      if (!await file.exists()) {
+        await file.create(recursive: true);
+      }
+
+      _logFile = file;
+      debugPrint('[EPSON] Fichier de logs prêt : ${file.path}');
+
+      // Marqueur de début de session pour repérer facilement chaque
+      // lancement de l'application dans le fichier.
+      final ts = DateTime.now().toIso8601String();
+      await file.writeAsString(
+        '\n========== NOUVELLE SESSION — $ts '
+            '(${Platform.operatingSystem}) ==========\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+
+      return file;
+    } catch (e, st) {
+      debugPrint('[EPSON] EXCEPTION lors de la création du fichier de '
+          'logs sur le Bureau : $e\n$st');
+      return null;
+    }
+  }
+
+  /// Archive le fichier de logs s'il dépasse la taille maximale, pour
+  /// qu'il ne grossisse jamais indéfiniment.
+  static Future<void> _rotateLogFileIfNeeded(File file) async {
+    try {
+      final size = await file.length();
+      if (size <= _maxLogSizeBytes) return;
+
+      final oldPath =
+          '${file.path.substring(0, file.path.length - 4)}.ancien.txt';
+      final oldFile = File(oldPath);
+      if (await oldFile.exists()) {
+        await oldFile.delete();
+      }
+      await file.copy(oldPath);
+      await file.writeAsString('', mode: FileMode.write, flush: true);
+      debugPrint('[EPSON] Fichier de logs archivé (dépassait 5 Mo) → '
+          '$oldPath — nouveau fichier repart de zéro.');
+    } catch (e, st) {
+      debugPrint('[EPSON] EXCEPTION lors de la rotation du fichier de '
+          'logs : $e\n$st');
+    }
+  }
+
+  static Future<void> _writeToLogFile(String line) async {
+    try {
+      final file = await _resolveLogFile();
+      if (file == null) return;
+      await _rotateLogFileIfNeeded(file);
+      await file.writeAsString('$line\n', mode: FileMode.append, flush: true);
+    } catch (e, st) {
+      // On ne casse JAMAIS l'impression à cause d'un souci d'écriture de
+      // log — on se contente de le signaler dans la console.
+      debugPrint('[EPSON] EXCEPTION lors de l\'écriture dans le fichier '
+          'de logs : $e\n$st');
+    }
+  }
+
+  /// Point d'entrée unique de journalisation : écrit dans la console
+  /// (utile en dev via `flutter run`) ET dans le fichier sur le Bureau
+  /// (utile partout, y compris sur l'app installée chez un client).
+  static void _log(String message) {
+    final ts = DateTime.now().toIso8601String();
+    final line = '[EPSON $ts] $message';
+    debugPrint(line);
+    unawaited(_writeToLogFile(line));
+  }
+
+  // ====================================================================
+  // LISTER LES IMPRIMANTES INSTALLÉES
   // ====================================================================
   static Future<List<String>> getAvailablePrinters() async {
-    if (!Platform.isWindows) return [];
     try {
-      final result = await Process.run(
-        'powershell',
-        [
-          '-NoProfile',
-          '-Command',
-          'Get-Printer | Select-Object -ExpandProperty Name',
-        ],
-        runInShell: true,
-      );
-      if (result.exitCode != 0) return [];
-      final output = result.stdout.toString();
-      return output
-          .split('\n')
-          .map((l) => l.trim())
-          .where((l) => l.isNotEmpty)
-          .toList();
-    } catch (_) {
+      if (Platform.isWindows) {
+        final result = await Process.run(
+          'powershell',
+          [
+            '-NoProfile',
+            '-Command',
+            'Get-Printer | Select-Object -ExpandProperty Name',
+          ],
+          runInShell: true,
+        );
+        if (result.exitCode != 0) {
+          _log('getAvailablePrinters (Windows) ÉCHEC — exitCode='
+              '${result.exitCode} stderr="${result.stderr}" '
+              'stdout="${result.stdout}"');
+          return [];
+        }
+        final list = result.stdout
+            .toString()
+            .split('\n')
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty)
+            .toList();
+        _log('getAvailablePrinters (Windows) OK — ${list.length} '
+            'imprimante(s) trouvée(s) : $list');
+        return list;
+      }
+
+      if (Platform.isMacOS) {
+        // lpstat -a → "PrinterName accepting requests since ..."
+        final result = await Process.run('lpstat', ['-a']);
+        if (result.exitCode != 0) {
+          _log('getAvailablePrinters (macOS) ÉCHEC — exitCode='
+              '${result.exitCode} stderr="${result.stderr}" '
+              'stdout="${result.stdout}"');
+          return [];
+        }
+        final list = result.stdout
+            .toString()
+            .split('\n')
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty)
+            .map((l) => l.split(RegExp(r'\s+')).first)
+            .where((name) => name.isNotEmpty)
+            .toList();
+        _log('getAvailablePrinters (macOS) OK — ${list.length} '
+            'imprimante(s) trouvée(s) : $list');
+        return list;
+      }
+
+      _log('getAvailablePrinters — plateforme non supportée '
+          '(${Platform.operatingSystem})');
+      return [];
+    } catch (e, st) {
+      _log('EXCEPTION dans getAvailablePrinters : $e\n$st');
       return [];
     }
   }
 
   // ====================================================================
-  // ENVOI DES OCTETS BRUTS AU SPOULEUR WINDOWS (MODE RAW)
+  // ENVOI DES OCTETS BRUTS + CONFIRMATION RÉELLE
   // ====================================================================
-  // Cible l'imprimante par son NOM Windows (ex: "EPSON TM-T20III Receipt"),
-  // pas par un identifiant USB. Fonctionne quelle que soit la connexion
-  // physique de l'imprimante (USB, réseau, etc.) tant qu'elle est installée
-  // comme imprimante Windows.
   static Future<bool> _sendRawBytes(
       String printerName, Uint8List data) async {
-    if (!Platform.isWindows) return false;
+    _log('_sendRawBytes → imprimante="$printerName" '
+        'taille=${data.length} octets plateforme=${Platform.operatingSystem}');
+    if (Platform.isWindows) {
+      return await _sendRawBytesWindows(printerName, data);
+    }
+    if (Platform.isMacOS) {
+      return await _sendRawBytesMacOS(printerName, data);
+    }
+    _log('_sendRawBytes — plateforme non supportée '
+        '(${Platform.operatingSystem})');
+    return false;
+  }
 
+  // -------------------- WINDOWS (winspool RAW) --------------------
+  static Future<bool> _sendRawBytesWindows(
+      String printerName, Uint8List data) async {
     final printerNamePtr = printerName.toNativeUtf16();
     final phPrinter = calloc<IntPtr>();
     Pointer<Utf16> docNamePtr = nullptr;
@@ -147,8 +271,17 @@ class EscPosPrinterService {
 
     try {
       final opened = OpenPrinter(printerNamePtr, phPrinter, nullptr);
-      if (opened == 0) return false;
+      if (opened == 0) {
+        final err = GetLastError();
+        _log('OpenPrinter ÉCHEC pour "$printerName" — code erreur Windows: '
+            '$err (ex: 1801=nom de file invalide, 5=accès refusé, '
+            '2=fichier/imprimante introuvable). Vérifie que ce nom exact '
+            'existe encore dans "Imprimantes et scanners" — un débranchement/'
+            're-branchement USB peut avoir recréé la file sous un autre nom.');
+        return false;
+      }
       final hPrinter = phPrinter.value;
+      _log('OpenPrinter OK pour "$printerName" (handle=$hPrinter)');
 
       docNamePtr = 'Recu EduPay'.toNativeUtf16();
       dataTypePtr = 'RAW'.toNativeUtf16();
@@ -160,11 +293,20 @@ class EscPosPrinterService {
 
       docId = StartDocPrinter(hPrinter, 1, docInfo.cast());
       if (docId == 0) {
+        final err = GetLastError();
+        _log('StartDocPrinter ÉCHEC pour "$printerName" — code erreur '
+            'Windows: $err (ex: 5=accès refusé, souvent le spouleur est '
+            'bloqué/en pause, ou un job précédent est resté coincé).');
         ClosePrinter(hPrinter);
         return false;
       }
+      _log('StartDocPrinter OK pour "$printerName" (docId=$docId)');
 
-      StartPagePrinter(hPrinter);
+      final pageStarted = StartPagePrinter(hPrinter);
+      if (pageStarted == 0) {
+        _log('StartPagePrinter ÉCHEC pour "$printerName" — code erreur '
+            'Windows: ${GetLastError()}');
+      }
 
       dataPtr = calloc<Uint8>(data.length);
       dataPtr.asTypedList(data.length).setAll(0, data);
@@ -177,12 +319,28 @@ class EscPosPrinterService {
         bytesWritten,
       );
 
+      if (writeOk == 0) {
+        final err = GetLastError();
+        _log('WritePrinter ÉCHEC pour "$printerName" (docId=$docId) — '
+            'code erreur Windows: $err (souvent 995=opération annulée car '
+            'imprimante débranchée/éteinte pendant l\'envoi, ou 6=handle '
+            'invalide).');
+      } else if (bytesWritten.value != data.length) {
+        _log('WritePrinter PARTIEL pour "$printerName" (docId=$docId) — '
+            'envoyés ${bytesWritten.value}/${data.length} octets seulement.');
+      } else {
+        _log('WritePrinter OK pour "$printerName" (docId=$docId) — '
+            '${bytesWritten.value} octets envoyés intégralement.');
+      }
+
       EndPagePrinter(hPrinter);
       EndDocPrinter(hPrinter);
       ClosePrinter(hPrinter);
 
       sentOk = writeOk != 0 && bytesWritten.value == data.length;
-    } catch (_) {
+    } catch (e, st) {
+      _log('EXCEPTION dans _sendRawBytesWindows pour "$printerName": '
+          '$e\n$st');
       return false;
     } finally {
       calloc.free(printerNamePtr);
@@ -194,41 +352,83 @@ class EscPosPrinterService {
       if (bytesWritten != nullptr) calloc.free(bytesWritten);
     }
 
-    if (!sentOk) return false;
+    if (!sentOk) {
+      _log('_sendRawBytesWindows → envoi considéré ÉCHOUÉ pour '
+          '"$printerName" (docId=$docId), confirmation non tentée.');
+      return false;
+    }
 
-    // ⚡ on ne s'arrête plus au retour de WritePrinter : on vérifie le
-    // VRAI statut du job auprès du spouleur Windows avant de considérer
-    // l'impression comme réussie.
-    return await _confirmJobPrinted(printerName, docId);
+    _log('_sendRawBytesWindows → envoi réussi pour "$printerName" '
+        '(docId=$docId), lancement de la confirmation réelle...');
+    return await _confirmJobPrintedWindows(printerName, docId);
+  }
+
+  // -------------------- macOS (CUPS RAW) --------------------
+  static Future<bool> _sendRawBytesMacOS(
+      String printerName, Uint8List data) async {
+    Directory? tempDir;
+    File? tempFile;
+    try {
+      tempDir = await Directory.systemTemp.createTemp('escpos_');
+      tempFile = File('${tempDir.path}/print.raw');
+      await tempFile.writeAsBytes(data, flush: true);
+
+      final result = await Process.run(
+        'lp',
+        [
+          '-d', printerName,
+          '-o', 'raw',
+          tempFile.path,
+        ],
+      );
+
+      if (result.exitCode != 0) {
+        _log('Commande "lp" ÉCHEC pour "$printerName" — exitCode='
+            '${result.exitCode} stderr="${result.stderr}" '
+            'stdout="${result.stdout}"');
+        return false;
+      }
+
+      // Exemple de sortie : "request id is EPSON_TM_T20III-42 (1 file(s))"
+      final output = result.stdout.toString();
+      final match = RegExp(r'request id is .+?-(\d+)').firstMatch(output);
+      final jobId = match != null ? int.tryParse(match.group(1)!) : null;
+
+      if (jobId == null) {
+        _log('"lp" a réussi pour "$printerName" mais aucun jobId extrait '
+            'de la sortie ("$output") → considéré OK par défaut.');
+        return true;
+      }
+
+      _log('"lp" OK pour "$printerName" — jobId=$jobId, lancement de la '
+          'confirmation réelle...');
+      return await _confirmJobPrintedMacOS(printerName, jobId);
+    } catch (e, st) {
+      _log('EXCEPTION dans _sendRawBytesMacOS pour "$printerName": $e\n$st');
+      return false;
+    } finally {
+      try {
+        if (tempFile != null && await tempFile.exists()) {
+          await tempFile.delete();
+        }
+        if (tempDir != null && await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      } catch (e, st) {
+        _log('EXCEPTION lors du nettoyage du fichier temporaire macOS : '
+            '$e\n$st');
+      }
+    }
   }
 
   // ====================================================================
-  // ⚡ CORRIGÉ — CONFIRMATION RÉELLE DU STATUT D'UN JOB D'IMPRESSION
+  // CONFIRMATION RÉELLE DU STATUT D'UN JOB
   // ====================================================================
-  // `jobId` correspond à l'identifiant renvoyé par `StartDocPrinter`, qui
-  // est le même identifiant que celui utilisé par le spouleur Windows en
-  // interne (visible aussi via `Get-PrintJob`/le Gestionnaire
-  // d'impression).
-  //
-  // Avant ce correctif, Dart relançait un NOUVEAU processus PowerShell
-  // toutes les 350ms pour sonder le statut — coûteux (spawn de processus)
-  // et donc lent, ce qui pouvait provoquer un timeout alors que le job
-  // avait déjà quitté la file depuis longtemps.
-  //
-  // Désormais, UN SEUL processus PowerShell est lancé : c'est lui qui
-  // fait toute la boucle de vérification en interne (avec son propre
-  // `Start-Sleep`), et ne renvoie qu'un seul résultat final ("OK",
-  // "ERROR" ou "TIMEOUT") une fois la boucle terminée. C'est beaucoup
-  // plus rapide (le cas normal — job qui disparaît de la file presque
-  // instantanément — est détecté dès la première itération de la boucle
-  // PowerShell, sans latence de spawn de processus Dart répétée) et donc
-  // beaucoup plus fiable.
-  static Future<bool> _confirmJobPrinted(
+  static Future<bool> _confirmJobPrintedWindows(
       String printerName,
       int jobId, {
         Duration timeout = const Duration(seconds: 6),
       }) async {
-    if (!Platform.isWindows) return false;
     try {
       final double timeoutSeconds = timeout.inMilliseconds / 1000.0;
 
@@ -260,12 +460,85 @@ Write-Output \$result
       ).timeout(timeout + const Duration(seconds: 4));
 
       final output = result.stdout.toString().trim().toUpperCase();
-      return output.contains('OK');
-    } catch (_) {
-      // En cas de doute (timeout du côté Dart, erreur d'exécution
-      // PowerShell...), on NE certifie PAS l'impression : mieux vaut
-      // proposer une réimpression en trop de temps en temps que masquer
-      // un vrai échec silencieux.
+      _log('_confirmJobPrintedWindows pour "$printerName" (jobId=$jobId) → '
+          'exitCode=${result.exitCode} stdout="${result.stdout.toString().trim()}" '
+          'stderr="${result.stderr.toString().trim()}"');
+
+      final ok = output.contains('OK');
+      if (!ok) {
+        _log('_confirmJobPrintedWindows → NON confirmé pour "$printerName" '
+            '(jobId=$jobId), résultat="$output". Causes fréquentes : module '
+            'PowerShell "PrintManagement" indisponible sur cette édition de '
+            'Windows/ce compte, job déjà disparu avant la première '
+            'vérification (imprimante thermique très rapide), ou statut '
+            'contenant un mot-clé d\'erreur (papier, hors ligne, bloqué...).');
+      } else {
+        _log('_confirmJobPrintedWindows → CONFIRMÉ pour "$printerName" '
+            '(jobId=$jobId).');
+      }
+      return ok;
+    } catch (e, st) {
+      _log('EXCEPTION/TIMEOUT dans _confirmJobPrintedWindows pour '
+          '"$printerName" (jobId=$jobId) : $e\n$st\n'
+          '→ En cas de doute on ne certifie PAS l\'impression (retour false), '
+          'même si le papier est probablement déjà sorti.');
+      return false;
+    }
+  }
+
+  static Future<bool> _confirmJobPrintedMacOS(
+      String printerName,
+      int jobId, {
+        Duration timeout = const Duration(seconds: 8),
+      }) async {
+    try {
+      final deadline = DateTime.now().add(timeout);
+
+      while (DateTime.now().isBefore(deadline)) {
+        // Jobs encore en file pour cette imprimante
+        final result = await Process.run('lpstat', ['-o', printerName]);
+
+        if (result.exitCode != 0) {
+          _log('_confirmJobPrintedMacOS pour "$printerName" (jobId=$jobId) '
+              '— "lpstat -o" exitCode=${result.exitCode} '
+              'stderr="${result.stderr}" → impossible d\'interroger, '
+              'considéré OK (job probablement déjà parti).');
+          return true;
+        }
+
+        final output = result.stdout.toString();
+        // Format typique : "EPSON_TM_T20III-42 utilisateur 1234 ..."
+        final stillPresent = output.contains('-$jobId ');
+
+        if (!stillPresent) {
+          _log('_confirmJobPrintedMacOS → job $jobId disparu de la file '
+              'pour "$printerName" → CONFIRMÉ imprimé.');
+          return true;
+        }
+
+        // Vérifie s'il y a une erreur visible
+        final errResult = await Process.run(
+            'lpstat', ['-W', 'not-completed', '-o', printerName]);
+        final errOut = errResult.stdout.toString().toLowerCase();
+        if (errOut.contains('error') ||
+            errOut.contains('offline') ||
+            errOut.contains('paper') ||
+            errOut.contains('held') ||
+            errOut.contains('stopped')) {
+          _log('_confirmJobPrintedMacOS → erreur détectée pour '
+              '"$printerName" (jobId=$jobId) : "$errOut"');
+          return false;
+        }
+
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
+
+      _log('_confirmJobPrintedMacOS → TIMEOUT pour "$printerName" '
+          '(jobId=$jobId) après ${timeout.inSeconds}s, non certifié.');
+      return false;
+    } catch (e, st) {
+      _log('EXCEPTION dans _confirmJobPrintedMacOS pour "$printerName" '
+          '(jobId=$jobId) : $e\n$st');
       return false;
     }
   }
@@ -273,26 +546,12 @@ Write-Output \$result
   // ====================================================================
   // ⚡ PRÉPARATION DU LOGO POUR UNE IMPRESSION NETTE
   // ====================================================================
-  // Une imprimante thermique n'a que 2 niveaux (noir/blanc). Envoyer une
-  // image en niveaux de gris ou en couleur oblige le générateur ESC/POS à
-  // faire du tramage (dithering) pour approximer les gris avec des points
-  // noirs/blancs — c'est ce qui rendait le logo flou et grisâtre. On
-  // convertit donc nous-mêmes le logo en noir et blanc NET (avec un
-  // contraste renforcé avant seuillage), pour que chaque pixel envoyé à
-  // l'imprimante soit déjà une décision claire noir/blanc — beaucoup plus
-  // net qu'un tramage automatique, surtout pour un logo simple (texte,
-  // formes, contours).
   static img.Image _prepareLogoForPrint(Uint8List logoBytes, int targetSize) {
     final decoded = img.decodeImage(logoBytes);
     if (decoded == null) {
       throw Exception('Logo illisible');
     }
 
-    // ---- Redimensionnement avec une interpolation de qualité ----
-    // Cubique en agrandissement (image source plus petite que la cible) :
-    // lisse les bords sans les rendre flous.
-    // Moyenne en réduction (image source plus grande que la cible) :
-    // évite le moiré/l'aliasing qui donne un rendu "sale" une fois tramé.
     final bool sourceIsSmaller =
         decoded.width < targetSize && decoded.height < targetSize;
     final img.Interpolation interp =
@@ -310,7 +569,6 @@ Write-Output \$result
           height: targetSize, interpolation: img.Interpolation.average);
     }
 
-    // ---- Conversion en noir/blanc net à fort contraste ----
     final gray = img.grayscale(resized);
     img.adjustColor(gray, contrast: 1.45);
 
@@ -326,44 +584,28 @@ Write-Output \$result
   // ====================================================================
   // ⚡ EN-TÊTE COMPOSITE : LOGO GAUCHE + NOM CENTRÉ + LOGO DROITE
   // ====================================================================
-  // Une imprimante thermique ne peut pas mélanger texte ESC/POS et image
-  // sur la même ligne physique. Pour avoir "logo — nom de l'école — logo"
-  // sur une même ligne comme demandé, on construit donc UNE SEULE image
-  // bitmap (logo dupliqué à gauche et à droite, nom du texte dessiné
-  // dessus, bien centré), qu'on imprime ensuite comme un seul bloc image.
-  //
-  // Le nom de l'école est dessiné en gras simulé (traits épaissis) avec
-  // une police nettement plus grande (arial48) quand il tient sur la
-  // ligne du logo (cas normal) — sans agrandir la hauteur de l'en-tête,
-  // puisque logoBox (60px) est déjà suffisant pour cette police. Si le
-  // nom est trop long pour tenir à cette taille, on repasse
-  // automatiquement à l'ancien comportement (police normale, retour à la
-  // ligne si nécessaire), pour ne jamais perdre une partie du nom.
   static const int _headerWidth = 380;
 
   static img.Image _buildReceiptHeaderImage({
     required String schoolName,
     required Uint8List logoBytes,
   }) {
-    const int margin  = 6;
+    const int margin = 6;
     const int logoBox = 60;
 
-    final int textZoneLeft  = margin + logoBox + margin;
+    final int textZoneLeft = margin + logoBox + margin;
     final int textZoneRight = _headerWidth - margin - logoBox - margin;
     final int textZoneWidth =
     (textZoneRight - textZoneLeft).clamp(40, _headerWidth);
 
-    // ---- Logo : nette, bien contrastée, redimensionnée avec qualité ----
     img.Image? logo;
     try {
       logo = _prepareLogoForPrint(logoBytes, logoBox);
-    } catch (_) {
+    } catch (e, st) {
+      _log('EXCEPTION dans _prepareLogoForPrint (logo ignoré) : $e\n$st');
       logo = null;
     }
 
-    // ---- Choix de la police du nom : grande (48) si elle tient sur une
-    // seule ligne dans la zone entre les deux logos, sinon on repasse à
-    // la police normale (24) avec retour à la ligne comme avant. ----
     final img.BitmapFont bigFont = img.arial48;
     final img.BitmapFont normalFont = img.arial24;
 
@@ -373,14 +615,10 @@ Write-Output \$result
 
     final safeNameBig = _safeText(schoolName.trim(), bigFont);
     if (_textWidth(bigFont, safeNameBig) <= textZoneWidth) {
-      // Le nom entier tient sur la ligne du logo avec la grande police :
-      // c'est le cas idéal (le plus fréquent) — gras + grand, 0 ligne en plus.
       firstLine = safeNameBig;
       extraLines = [];
       usedFont = bigFont;
     } else {
-      // Repli : comportement d'avant, avec la police normale, découpage
-      // du nom en plusieurs lignes si besoin, pour ne rien perdre.
       final words = schoolName.trim().split(RegExp(r'\s+'));
       String line = '';
       int cut = words.length;
@@ -419,28 +657,27 @@ Write-Output \$result
       usedFont = normalFont;
     }
 
-    const int lineHeight   = 24;
-    final int topRowHeight = logo != null ? logoBox : (usedFont == bigFont ? 52 : 32);
-    final int extraHeight  =
+    const int lineHeight = 24;
+    final int topRowHeight =
+    logo != null ? logoBox : (usedFont == bigFont ? 52 : 32);
+    final int extraHeight =
     extraLines.isEmpty ? 0 : (extraLines.length * lineHeight) + 4;
     final int headerHeight = (margin * 2) + topRowHeight + extraHeight;
 
     final canvas = img.Image(width: _headerWidth, height: headerHeight);
     img.fill(canvas, color: img.ColorRgb8(255, 255, 255));
 
-    // Logo gauche + logo droite (même image des deux côtés)
     if (logo != null) {
       final ly = margin + ((topRowHeight - logo.height) ~/ 2);
       img.compositeImage(canvas, logo, dstX: margin, dstY: ly);
       img.compositeImage(
-        canvas, logo,
+        canvas,
+        logo,
         dstX: _headerWidth - margin - logo.width,
         dstY: ly,
       );
     }
 
-    // Première ligne du nom (ou nom entier), centrée entre les deux logos,
-    // dessinée en gras simulé (traits épaissis par superposition légère).
     final int fontVisualHeight = usedFont == bigFont ? 48 : 24;
     final int firstWidth = _textWidth(usedFont, firstLine);
     final int fx = textZoneLeft +
@@ -449,8 +686,6 @@ Write-Output \$result
     _drawBoldString(canvas, firstLine,
         font: usedFont, x: fx, y: fy, color: img.ColorRgb8(0, 0, 0));
 
-    // Lignes suivantes (reste du nom, si repli en police normale),
-    // centrées sur toute la largeur, également en gras simulé.
     int ey = margin + topRowHeight + 4;
     for (final line in extraLines) {
       final w = _textWidth(normalFont, line);
@@ -463,11 +698,6 @@ Write-Output \$result
     return canvas;
   }
 
-  /// Dessine un texte en gras simulé : les polices bitmap intégrées à la
-  /// librairie `image` n'ont pas de variante grasse, donc on superpose le
-  /// même texte à quelques pixels de décalage pour épaissir
-  /// artificiellement chaque trait. Effet visuel proche d'un vrai gras,
-  /// sans changer la hauteur occupée.
   static void _drawBoldString(
       img.Image canvas,
       String text, {
@@ -488,9 +718,6 @@ Write-Output \$result
     }
   }
 
-  /// Largeur en pixels d'un texte pour une police bitmap donnée (même
-  /// logique que celle utilisée en interne par drawString, pour pouvoir
-  /// centrer nous-mêmes le texte avant de l'imprimer sur l'image).
   static int _textWidth(img.BitmapFont font, String text) {
     int width = 0;
     for (final c in text.codeUnits) {
@@ -501,12 +728,6 @@ Write-Output \$result
     return width;
   }
 
-  /// Les polices bitmap intégrées à la librairie `image` ne couvrent pas
-  /// forcément tous les caractères accentués français. On remplace ceux
-  /// qui manqueraient par leur équivalent non accentué, pour ne jamais
-  /// perdre silencieusement une lettre à l'impression (mieux vaut
-  /// "Ecole" que "cole"). Vérifie les glyphes de la police réellement
-  /// utilisée (passée en paramètre), puisqu'on utilise aussi arial48.
   static String _safeText(String text, img.BitmapFont font) {
     const replacements = {
       'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
@@ -530,18 +751,7 @@ Write-Output \$result
 
   // ====================================================================
   // GÉNÉRER ET IMPRIMER UN REÇU COMPLET (paiement mensuel principal)
-  // ⚡ Impression AUTOMATIQUE — appelée juste après l'enregistrement d'un
-  // paiement. Comportement inchangé : ne concerne qu'UN SEUL mois. Le
-  // booléen retourné reflète désormais le statut RÉEL et CONFIRMÉ de
-  // l'impression (voir `_confirmJobPrinted` ci-dessus), et non plus
-  // simplement l'acceptation par le spouleur Windows.
   // ====================================================================
-  // Mise en page compacte pour économiser le papier :
-  //   - "N° Reçu" sur sa propre ligne, "ID Élève" et "Classe" sur la même
-  //     ligne, "Section" et "Date/Heure" sur la même ligne.
-  //   - Suppression des sauts de ligne purement décoratifs entre les blocs.
-  //   - Espace de signature et marge de découpe finale réduits.
-  // Toutes les informations affichées avant sont toujours présentes.
   static Future<bool> printReceipt({
     required String printerName,
     required String schoolName,
@@ -557,17 +767,23 @@ Write-Output \$result
     required double totalDejaPayeAnnee,
     required double totalRequis,
     required List<Map<String, dynamic>> historiqueTransactions,
-    String? receiptNumber, // Numéro de reçu (généré automatiquement si null)
-    Uint8List? logoBytes,  // ⚡ Logo choisi dans les Paramètres (optionnel)
+    String? receiptNumber,
+    Uint8List? logoBytes,
   }) async {
-    if (!Platform.isWindows) return false;
+    _log('printReceipt appelé — imprimante="$printerName" élève='
+        '"$studentName" ($studentId) mois=$moisPaye montant=$montantPaye');
+
+    if (!Platform.isWindows && !Platform.isMacOS) {
+      _log('printReceipt — plateforme non supportée '
+          '(${Platform.operatingSystem})');
+      return false;
+    }
 
     try {
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
 
-      // Table de caractères pour les accents français (é, è, à, ç...)
       generator.setGlobalCodeTable('CP1252');
 
       final now = DateTime.now();
@@ -576,7 +792,6 @@ Write-Output \$result
       final String heure =
           '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-      // Numéro de reçu (auto si non fourni)
       final String numRecu = receiptNumber ??
           'RCP-${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}-${now.hour}${now.minute}${now.second}';
 
@@ -587,17 +802,15 @@ Write-Output \$result
       );
 
       if (logoBytes != null) {
-        // ⚡ Logo gauche + nom centré + logo droite, sur une seule image.
         try {
           final headerImage = _buildReceiptHeaderImage(
             schoolName: schoolName,
             logoBytes: logoBytes,
           );
           bytes += generator.image(headerImage);
-        } catch (_) {
-          // Si la construction de l'image échoue pour une raison
-          // quelconque (logo corrompu, etc.), on retombe sur le texte
-          // simple pour ne jamais bloquer l'impression du reçu.
+        } catch (e, st) {
+          _log('EXCEPTION génération en-tête avec logo (printReceipt), '
+              'repli sur texte simple : $e\n$st');
           bytes += generator.text(
             schoolName.toUpperCase(),
             styles: const PosStyles(
@@ -637,7 +850,7 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== NOM COMPLET ÉLÈVE (TOUT EN HAUT) ====================
+      // ==================== NOM COMPLET ÉLÈVE ====================
       bytes += generator.text(
         'Nom complet :',
         styles: const PosStyles(bold: true),
@@ -655,7 +868,7 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== INFOS ÉLÈVE (compactées 2 par ligne) ====================
+      // ==================== INFOS ÉLÈVE ====================
       bytes += generator.row([
         PosColumn(
           text: 'Reçu : $numRecu',
@@ -773,33 +986,19 @@ Write-Output \$result
       bytes += generator.feed(2);
       bytes += generator.cut();
 
-      return await _sendRawBytes(printerName, Uint8List.fromList(bytes));
-    } catch (_) {
+      final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
+      _log('printReceipt terminé pour "$studentName" ($studentId) — '
+          'résultat=$ok');
+      return ok;
+    } catch (e, st) {
+      _log('EXCEPTION dans printReceipt pour "$studentName" ($studentId) : '
+          '$e\n$st');
       return false;
     }
   }
 
   // ====================================================================
-  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS PAIEMENTS DÉJÀ
-  // ENREGISTRÉS DU FRAIS MENSUEL PRINCIPAL.
-  //
-  // Utilisée pour 3 cas d'usage, tous à partir de l'écran "Paiements des
-  // Élèves" (historique d'un élève) et depuis le Dashboard Admin après
-  // validation d'un lot de paiements :
-  //   1. Réimprimer le reçu d'UN SEUL paiement déjà effectué (reçu perdu
-  //      → liste `transactions` d'un seul élément).
-  //   2. Réimprimer un reçu regroupant PLUSIEURS paiements sélectionnés
-  //      par l'utilisateur dans l'historique.
-  //   3. Réimprimer TOUT l'historique de paiement d'un élève en un seul
-  //      reçu (ex: un élève qui a payé son mois en plusieurs coupures,
-  //      ou après validation groupée de plusieurs mois par l'Admin).
-  //
-  // Chaque entrée de `transactions` doit contenir au minimum 'mois' et
-  // 'amount' (ou 'montant'), et idéalement 'date'. Le reçu reste compact
-  // (même esprit que printReceipt : économie de papier) mais soigné
-  // visuellement (logo + nom de l'école en en-tête, séparateurs nets,
-  // montants alignés à droite). Le booléen retourné reflète lui aussi le
-  // statut RÉEL et CONFIRMÉ de l'impression.
+  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS PAIEMENTS
   // ====================================================================
   static Future<bool> printTransactionsReceipt({
     required String printerName,
@@ -815,8 +1014,19 @@ Write-Output \$result
     String titre = 'REÇU DE PAIEMENT',
     bool duplicata = false,
   }) async {
-    if (!Platform.isWindows) return false;
-    if (transactions.isEmpty) return false;
+    _log('printTransactionsReceipt appelé — imprimante="$printerName" '
+        'élève="$studentName" ($studentId) nbTransactions='
+        '${transactions.length} duplicata=$duplicata');
+
+    if (!Platform.isWindows && !Platform.isMacOS) {
+      _log('printTransactionsReceipt — plateforme non supportée '
+          '(${Platform.operatingSystem})');
+      return false;
+    }
+    if (transactions.isEmpty) {
+      _log('printTransactionsReceipt — aucune transaction fournie, abandon.');
+      return false;
+    }
 
     try {
       final profile = await CapabilityProfile.load();
@@ -847,7 +1057,9 @@ Write-Output \$result
             logoBytes: logoBytes,
           );
           bytes += generator.image(headerImage);
-        } catch (_) {
+        } catch (e, st) {
+          _log('EXCEPTION génération en-tête avec logo '
+              '(printTransactionsReceipt), repli sur texte simple : $e\n$st');
           bytes += generator.text(
             schoolName.toUpperCase(),
             styles: const PosStyles(
@@ -955,7 +1167,6 @@ Write-Output \$result
       );
 
       double total = 0;
-      // Trie chronologiquement (par date) pour une lecture claire.
       final sorted = List<Map<String, dynamic>>.from(transactions)
         ..sort((a, b) {
           final dateA = (a['date'] ?? '').toString();
@@ -1044,25 +1255,19 @@ Write-Output \$result
       bytes += generator.feed(2);
       bytes += generator.cut();
 
-      return await _sendRawBytes(printerName, Uint8List.fromList(bytes));
-    } catch (_) {
+      final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
+      _log('printTransactionsReceipt terminé pour "$studentName" '
+          '($studentId) — résultat=$ok');
+      return ok;
+    } catch (e, st) {
+      _log('EXCEPTION dans printTransactionsReceipt pour "$studentName" '
+          '($studentId) : $e\n$st');
       return false;
     }
   }
 
   // ====================================================================
-  // PETIT REÇU POUR UN "AUTRE FRAIS" (frais éphémère)
-  // ⚡ Impression AUTOMATIQUE — appelée juste après le paiement d'un seul
-  // "autre frais". Comportement inchangé, avec en plus la possibilité
-  // (optionnelle, rétro-compatible) d'afficher le logo de l'école comme
-  // sur le reçu principal, pour rester joli et cohérent visuellement.
-  // Volontairement plus court que le reçu de paiement mensuel : nom de
-  // l'école, titre du frais (ex: "Frais de l'État"), nom de l'élève,
-  // classe, date de paiement, montant, et une ligne signature.
-  // "Classe" et "Section" combinées sur une même ligne, signature réduite,
-  // même principe que printReceipt. Aucune information retirée. Le
-  // booléen retourné reflète désormais le statut RÉEL et CONFIRMÉ de
-  // l'impression.
+  // PETIT REÇU POUR UN "AUTRE FRAIS"
   // ====================================================================
   static Future<bool> printAutreFraisReceipt({
     required String printerName,
@@ -1072,10 +1277,18 @@ Write-Output \$result
     required String classe,
     required String section,
     required double montant,
-    Uint8List? logoBytes, // optionnel, rétro-compatible
+    Uint8List? logoBytes,
     bool duplicata = false,
   }) async {
-    if (!Platform.isWindows) return false;
+    _log('printAutreFraisReceipt appelé — imprimante="$printerName" '
+        'élève="$studentName" frais="$titreFrais" montant=$montant '
+        'duplicata=$duplicata');
+
+    if (!Platform.isWindows && !Platform.isMacOS) {
+      _log('printAutreFraisReceipt — plateforme non supportée '
+          '(${Platform.operatingSystem})');
+      return false;
+    }
 
     try {
       final profile = await CapabilityProfile.load();
@@ -1102,7 +1315,9 @@ Write-Output \$result
             logoBytes: logoBytes,
           );
           bytes += generator.image(headerImage);
-        } catch (_) {
+        } catch (e, st) {
+          _log('EXCEPTION génération en-tête avec logo '
+              '(printAutreFraisReceipt), repli sur texte simple : $e\n$st');
           bytes += generator.text(
             schoolName.toUpperCase(),
             styles: const PosStyles(
@@ -1126,7 +1341,8 @@ Write-Output \$result
       }
 
       bytes += generator.text(
-        duplicata ? '${titreFrais.toUpperCase()} (DUPLICATA)'
+        duplicata
+            ? '${titreFrais.toUpperCase()} (DUPLICATA)'
             : titreFrais.toUpperCase(),
         styles: const PosStyles(
           align: PosAlign.center,
@@ -1219,28 +1435,19 @@ Write-Output \$result
       bytes += generator.feed(2);
       bytes += generator.cut();
 
-      return await _sendRawBytes(printerName, Uint8List.fromList(bytes));
-    } catch (_) {
+      final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
+      _log('printAutreFraisReceipt terminé pour "$studentName" '
+          '("$titreFrais") — résultat=$ok');
+      return ok;
+    } catch (e, st) {
+      _log('EXCEPTION dans printAutreFraisReceipt pour "$studentName" '
+          '("$titreFrais") : $e\n$st');
       return false;
     }
   }
 
   // ====================================================================
-  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS "AUTRES FRAIS" DÉJÀ
-  // PAYÉS PAR UN MÊME ÉLÈVE.
-  //
-  // Même logique que `printTransactionsReceipt`, mais pour la liste des
-  // frais additionnels (nom du frais + montant + date), avec un total en
-  // bas. Utilisée pour :
-  //   1. Réimprimer le reçu d'UN SEUL "autre frais" déjà payé (reçu
-  //      perdu).
-  //   2. Réimprimer un reçu regroupant PLUSIEURS "autres frais" payés par
-  //      le même élève (sélection ou historique complet).
-  //   3. L'impression automatique groupée depuis le Dashboard Admin après
-  //      validation d'un lot de paiements d'"autres frais".
-  // Chaque entrée de `paiements` doit contenir 'nom' (le nom du frais),
-  // 'montant' et idéalement 'date'. Le booléen retourné reflète lui aussi
-  // le statut RÉEL et CONFIRMÉ de l'impression.
+  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS "AUTRES FRAIS"
   // ====================================================================
   static Future<bool> printAutresFraisTransactionsReceipt({
     required String printerName,
@@ -1252,8 +1459,20 @@ Write-Output \$result
     Uint8List? logoBytes,
     bool duplicata = false,
   }) async {
-    if (!Platform.isWindows) return false;
-    if (paiements.isEmpty) return false;
+    _log('printAutresFraisTransactionsReceipt appelé — imprimante='
+        '"$printerName" élève="$studentName" nbPaiements=${paiements.length} '
+        'duplicata=$duplicata');
+
+    if (!Platform.isWindows && !Platform.isMacOS) {
+      _log('printAutresFraisTransactionsReceipt — plateforme non '
+          'supportée (${Platform.operatingSystem})');
+      return false;
+    }
+    if (paiements.isEmpty) {
+      _log('printAutresFraisTransactionsReceipt — aucun paiement fourni, '
+          'abandon.');
+      return false;
+    }
 
     try {
       final profile = await CapabilityProfile.load();
@@ -1280,7 +1499,10 @@ Write-Output \$result
             logoBytes: logoBytes,
           );
           bytes += generator.image(headerImage);
-        } catch (_) {
+        } catch (e, st) {
+          _log('EXCEPTION génération en-tête avec logo '
+              '(printAutresFraisTransactionsReceipt), repli sur texte '
+              'simple : $e\n$st');
           bytes += generator.text(
             schoolName.toUpperCase(),
             styles: const PosStyles(
@@ -1440,8 +1662,13 @@ Write-Output \$result
       bytes += generator.feed(2);
       bytes += generator.cut();
 
-      return await _sendRawBytes(printerName, Uint8List.fromList(bytes));
-    } catch (_) {
+      final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
+      _log('printAutresFraisTransactionsReceipt terminé pour '
+          '"$studentName" — résultat=$ok');
+      return ok;
+    } catch (e, st) {
+      _log('EXCEPTION dans printAutresFraisTransactionsReceipt pour '
+          '"$studentName" : $e\n$st');
       return false;
     }
   }
