@@ -86,6 +86,22 @@ import 'package:flutter/foundation.dart' show debugPrint;
 /// transformer une confirmation impossible en réimpression automatique.
 /// Dans ce cas précis, on considère l'envoi (déjà réussi via
 /// `WritePrinter`) comme abouti.
+///
+/// ⚡ NOUVEAU — MISE EN PAGE PLUS JOLIE (ESTHÉTIQUE UNIQUEMENT)
+/// Ce passage ne change AUCUNE logique d'impression, de confirmation,
+/// de file d'attente ou de sauvegarde : seuls les éléments VISUELS du
+/// reçu ont été retravaillés, à savoir :
+///   - Le logo est nettement plus grand dans l'en-tête (la place vide
+///     à côté du nom de l'école est désormais mieux exploitée).
+///   - Le nom complet de l'élève est maintenant centré et imprimé en
+///     grande taille (hauteur ET largeur doublées) pour bien ressortir.
+///   - Le montant payé (et le total payé, en cas de réimpression
+///     groupée) est désormais mis en valeur sur sa propre ligne,
+///     centré, en grande taille, au lieu d'être une simple ligne parmi
+///     d'autres.
+/// Le reçu reste volontairement compact (aucune ligne inutile
+/// ajoutée), seules quelques lignes existantes ont été réagencées ou
+/// agrandies.
 class EscPosPrinterService {
   // ====================================================================
   // ⚡ NOUVEAU — JOURNALISATION CENTRALISÉE (CONSOLE + FICHIER SUR BUREAU)
@@ -622,6 +638,9 @@ Write-Output \$result
 
   // ====================================================================
   // ⚡ EN-TÊTE COMPOSITE : LOGO GAUCHE + NOM CENTRÉ + LOGO DROITE
+  // ⚡ AMÉLIORATION ESTHÉTIQUE — le logo est désormais nettement plus
+  // grand (96 px au lieu de 60 px) pour mieux exploiter la largeur
+  // disponible du papier, qui restait auparavant vide autour du logo.
   // ====================================================================
   static const int _headerWidth = 380;
 
@@ -629,8 +648,8 @@ Write-Output \$result
     required String schoolName,
     required Uint8List logoBytes,
   }) {
-    const int margin = 6;
-    const int logoBox = 60;
+    const int margin = 5;
+    const int logoBox = 96; // ⚡ agrandi (était 60) — logo plus visible
 
     final int textZoneLeft = margin + logoBox + margin;
     final int textZoneRight = _headerWidth - margin - logoBox - margin;
@@ -790,6 +809,9 @@ Write-Output \$result
 
   // ====================================================================
   // GÉNÉRER ET IMPRIMER UN REÇU COMPLET (paiement mensuel principal)
+  // ⚡ AMÉLIORATION ESTHÉTIQUE — nom de l'élève centré et en grande
+  // taille, montant payé mis en valeur sur sa propre ligne centrée.
+  // Aucune information n'a été retirée, ni aucune logique modifiée.
   // ====================================================================
   static Future<bool> printReceipt({
     required String printerName,
@@ -889,17 +911,18 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== NOM COMPLET ÉLÈVE ====================
+      // ==================== NOM COMPLET ÉLÈVE (en grand, centré) ====
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(bold: true),
+        styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
+          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size1,
+          width: PosTextSize.size2,
         ),
       );
       bytes += generator.text(
@@ -957,18 +980,21 @@ Write-Output \$result
           styles: const PosStyles(bold: true),
         ),
       ]);
-      bytes += generator.row([
-        PosColumn(
-          text: 'Montant payé :',
-          width: 7,
-          styles: const PosStyles(bold: true),
+
+      // ⚡ Montant payé mis en valeur : gros, centré, sur sa propre ligne
+      bytes += generator.text(
+        'MONTANT PAYÉ',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+      bytes += generator.text(
+        '${montantPaye.toStringAsFixed(0)} FC',
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size2,
         ),
-        PosColumn(
-          text: '${montantPaye.toStringAsFixed(0)} FC',
-          width: 5,
-          styles: const PosStyles(bold: true),
-        ),
-      ]);
+      );
 
       if (resteAPayerMois > 0) {
         bytes += generator.row([
@@ -1038,6 +1064,8 @@ Write-Output \$result
 
   // ====================================================================
   // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS PAIEMENTS
+  // ⚡ AMÉLIORATION ESTHÉTIQUE — mêmes retouches que printReceipt : nom
+  // centré et agrandi, total payé mis en valeur sur sa propre ligne.
   // ====================================================================
   static Future<bool> printTransactionsReceipt({
     required String printerName,
@@ -1138,17 +1166,18 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== NOM COMPLET ÉLÈVE ====================
+      // ==================== NOM COMPLET ÉLÈVE (en grand, centré) ====
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(bold: true),
+        styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
+          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size1,
+          width: PosTextSize.size2,
         ),
       );
       bytes += generator.text(
@@ -1245,19 +1274,21 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.row([
-        PosColumn(
-          text: 'TOTAL PAYÉ :',
-          width: 6,
-          styles: const PosStyles(bold: true, height: PosTextSize.size2),
+
+      // ⚡ Total payé mis en valeur : gros, centré, sur sa propre ligne
+      bytes += generator.text(
+        'TOTAL PAYÉ',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+      bytes += generator.text(
+        '${total.toStringAsFixed(0)} FC',
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size2,
         ),
-        PosColumn(
-          text: '${total.toStringAsFixed(0)} FC',
-          width: 6,
-          styles: const PosStyles(
-              bold: true, height: PosTextSize.size2, align: PosAlign.right),
-        ),
-      ]);
+      );
       bytes += generator.text(
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
@@ -1307,6 +1338,8 @@ Write-Output \$result
 
   // ====================================================================
   // PETIT REÇU POUR UN "AUTRE FRAIS"
+  // ⚡ AMÉLIORATION ESTHÉTIQUE — nom centré et agrandi, montant mis en
+  // valeur sur sa propre ligne.
   // ====================================================================
   static Future<bool> printAutreFraisReceipt({
     required String printerName,
@@ -1396,14 +1429,15 @@ Write-Output \$result
 
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(bold: true),
+        styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
+          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size1,
+          width: PosTextSize.size2,
         ),
       );
 
@@ -1432,18 +1466,21 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.row([
-        PosColumn(
-          text: 'Montant payé :',
-          width: 7,
-          styles: const PosStyles(bold: true),
+
+      // ⚡ Montant payé mis en valeur : gros, centré, sur sa propre ligne
+      bytes += generator.text(
+        'MONTANT PAYÉ',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+      bytes += generator.text(
+        '${montant.toStringAsFixed(0)} FC',
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size2,
         ),
-        PosColumn(
-          text: '${montant.toStringAsFixed(0)} FC',
-          width: 5,
-          styles: const PosStyles(bold: true),
-        ),
-      ]);
+      );
       bytes += generator.text(
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
@@ -1487,6 +1524,8 @@ Write-Output \$result
 
   // ====================================================================
   // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS "AUTRES FRAIS"
+  // ⚡ AMÉLIORATION ESTHÉTIQUE — nom centré et agrandi, total payé mis
+  // en valeur sur sa propre ligne.
   // ====================================================================
   static Future<bool> printAutresFraisTransactionsReceipt({
     required String printerName,
@@ -1579,14 +1618,15 @@ Write-Output \$result
 
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(bold: true),
+        styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
+          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size1,
+          width: PosTextSize.size2,
         ),
       );
 
@@ -1658,19 +1698,21 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-      bytes += generator.row([
-        PosColumn(
-          text: 'TOTAL PAYÉ :',
-          width: 6,
-          styles: const PosStyles(bold: true, height: PosTextSize.size2),
+
+      // ⚡ Total payé mis en valeur : gros, centré, sur sa propre ligne
+      bytes += generator.text(
+        'TOTAL PAYÉ',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+      bytes += generator.text(
+        '${total.toStringAsFixed(0)} FC',
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size2,
         ),
-        PosColumn(
-          text: '${total.toStringAsFixed(0)} FC',
-          width: 6,
-          styles: const PosStyles(
-              bold: true, height: PosTextSize.size2, align: PosAlign.right),
-        ),
-      ]);
+      );
       bytes += generator.text(
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
