@@ -67,6 +67,25 @@ import 'package:flutter/foundation.dart' show debugPrint;
 /// est archivé dans "printer_log.ancien.txt" et un nouveau fichier
 /// repart de zéro. Une écriture de log qui échoue (ex: dossier
 /// protégé) n'interrompt jamais l'impression elle-même.
+///
+/// ⚡ CORRIGÉ — FAUX ÉCHEC DE CONFIRMATION SUR CERTAINS PC WINDOWS
+/// PROBLÈME RÉSOLU : sur certains PC (module PowerShell
+/// "PrintManagement" absent, désactivé, ou bloqué par une politique
+/// de sécurité), `_confirmJobPrintedWindows` levait une exception ou
+/// expirait sans jamais avoir pu lire le statut réel du job — alors
+/// que `WritePrinter` avait déjà réussi et que le papier était déjà
+/// physiquement sorti. Le code renvoyait alors `false`, ce qui faisait
+/// croire à `printOrQueuePrincipalReceipt` que le reçu n'avait PAS été
+/// imprimé : il le remettait dans `receiptQueue` au lieu de
+/// `printedReceiptKeys`. Résultat : à la prochaine ouverture de l'écran
+/// des paiements, `flushReceiptQueue()` réimprimait TOUS ces reçus
+/// déjà sortis.
+/// SOLUTION : une confirmation qui échoue à cause d'une exception ou
+/// d'un timeout ne veut PAS dire que l'impression a échoué — cela veut
+/// seulement dire qu'on n'a pas pu la vérifier. On ne doit donc jamais
+/// transformer une confirmation impossible en réimpression automatique.
+/// Dans ce cas précis, on considère l'envoi (déjà réussi via
+/// `WritePrinter`) comme abouti.
 class EscPosPrinterService {
   // ====================================================================
   // ⚡ NOUVEAU — JOURNALISATION CENTRALISÉE (CONSOLE + FICHIER SUR BUREAU)
@@ -464,25 +483,45 @@ Write-Output \$result
           'exitCode=${result.exitCode} stdout="${result.stdout.toString().trim()}" '
           'stderr="${result.stderr.toString().trim()}"');
 
-      final ok = output.contains('OK');
-      if (!ok) {
-        _log('_confirmJobPrintedWindows → NON confirmé pour "$printerName" '
-            '(jobId=$jobId), résultat="$output". Causes fréquentes : module '
-            'PowerShell "PrintManagement" indisponible sur cette édition de '
-            'Windows/ce compte, job déjà disparu avant la première '
-            'vérification (imprimante thermique très rapide), ou statut '
-            'contenant un mot-clé d\'erreur (papier, hors ligne, bloqué...).');
-      } else {
+      // ⚡ CORRIGÉ — si le script n'a pas pu produire "OK" ou "ERROR" de
+      // façon exploitable (ex: cmdlet Get-PrintJob absente/plante
+      // silencieusement sur cette machine, sortie vide ou inattendue),
+      // on ne considère PLUS ça comme un échec d'impression. Le papier
+      // était déjà sorti (WritePrinter a réussi avant cet appel) ; on
+      // ne fait ici QUE distinguer une éventuelle erreur explicite
+      // (bourrage, hors ligne...) d'une confirmation simplement
+      // indisponible.
+      final bool hasExplicitError = output.contains('ERROR');
+      final bool ok = !hasExplicitError;
+
+      if (hasExplicitError) {
+        _log('_confirmJobPrintedWindows → ERREUR EXPLICITE détectée pour '
+            '"$printerName" (jobId=$jobId), résultat="$output" (papier '
+            'coincé, imprimante hors ligne, ou autre statut d\'erreur '
+            'remonté par Get-PrintJob).');
+      } else if (output.contains('OK')) {
         _log('_confirmJobPrintedWindows → CONFIRMÉ pour "$printerName" '
             '(jobId=$jobId).');
+      } else {
+        _log('_confirmJobPrintedWindows → confirmation NON obtenue pour '
+            '"$printerName" (jobId=$jobId), résultat="$output" (souvent : '
+            'module PowerShell "PrintManagement" indisponible sur cette '
+            'édition de Windows/ce compte, ou job déjà disparu avant la '
+            'première vérification). Aucune erreur explicite détectée → '
+            'on NE remet PAS ce reçu en file d\'impression, puisque '
+            'WritePrinter avait déjà réussi.');
       }
       return ok;
     } catch (e, st) {
       _log('EXCEPTION/TIMEOUT dans _confirmJobPrintedWindows pour '
           '"$printerName" (jobId=$jobId) : $e\n$st\n'
-          '→ En cas de doute on ne certifie PAS l\'impression (retour false), '
-          'même si le papier est probablement déjà sorti.');
-      return false;
+          '→ WritePrinter avait déjà réussi ; on ne peut pas vérifier le '
+          'statut réel (module PrintManagement absent/bloqué sur ce PC ?), '
+          'mais on NE DOIT PAS renvoyer false ici, sous peine de '
+          'réimprimer physiquement ce reçu à la prochaine ouverture de '
+          'l\'écran des paiements (flushReceiptQueue). On considère donc '
+          'l\'envoi comme réussi.');
+      return true;
     }
   }
 
