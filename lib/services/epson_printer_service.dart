@@ -91,14 +91,17 @@ import 'package:flutter/foundation.dart' show debugPrint;
 /// Ce passage ne change AUCUNE logique d'impression, de confirmation,
 /// de file d'attente ou de sauvegarde : seuls les éléments VISUELS du
 /// reçu ont été retravaillés, à savoir :
-///   - Le logo est nettement plus grand dans l'en-tête (la place vide
-///     à côté du nom de l'école est désormais mieux exploitée).
-///   - Le nom complet de l'élève est maintenant centré et imprimé en
-///     grande taille (hauteur ET largeur doublées) pour bien ressortir.
+///   - Le logo est nettement plus grand dans l'en-tête.
+///   - Le nom de l'école est dessiné avec un gras BEAUCOUP plus épais
+///     (empilage de traits sur une grille de 9 directions au lieu de
+///     4), pour un rendu visuellement aussi "gras" que le nom de
+///     l'élève et le montant payé, qui eux utilisent le gras natif
+///     ESC/POS de l'imprimante.
+///   - Le nom complet de l'élève est centré et imprimé en grande
+///     taille (hauteur ET largeur doublées) pour bien ressortir.
 ///   - Le montant payé (et le total payé, en cas de réimpression
-///     groupée) est désormais mis en valeur sur sa propre ligne,
-///     centré, en grande taille, au lieu d'être une simple ligne parmi
-///     d'autres.
+///     groupée) est mis en valeur sur sa propre ligne, centré, en
+///     grande taille, au lieu d'être une simple ligne parmi d'autres.
 /// Le reçu reste volontairement compact (aucune ligne inutile
 /// ajoutée), seules quelques lignes existantes ont été réagencées ou
 /// agrandies.
@@ -639,8 +642,11 @@ Write-Output \$result
   // ====================================================================
   // ⚡ EN-TÊTE COMPOSITE : LOGO GAUCHE + NOM CENTRÉ + LOGO DROITE
   // ⚡ AMÉLIORATION ESTHÉTIQUE — le logo est désormais nettement plus
-  // grand (96 px au lieu de 60 px) pour mieux exploiter la largeur
-  // disponible du papier, qui restait auparavant vide autour du logo.
+  // grand (130 px au lieu de 60/96 px) pour bien mieux exploiter la
+  // largeur disponible du papier. Le nom de l'école est dessiné avec
+  // un gras beaucoup plus épais (grille de 9 directions au lieu de 4)
+  // pour un rendu visuel aussi "gras" que le nom de l'élève et le
+  // montant payé, imprimés eux en gras natif ESC/POS par l'imprimante.
   // ====================================================================
   static const int _headerWidth = 380;
 
@@ -648,8 +654,8 @@ Write-Output \$result
     required String schoolName,
     required Uint8List logoBytes,
   }) {
-    const int margin = 5;
-    const int logoBox = 96; // ⚡ agrandi (était 60) — logo plus visible
+    const int margin = 4;
+    const int logoBox = 130; // ⚡ agrandi (était 60, puis 96) — logo bien visible
 
     final int textZoneLeft = margin + logoBox + margin;
     final int textZoneRight = _headerWidth - margin - logoBox - margin;
@@ -741,21 +747,37 @@ Write-Output \$result
     final int fx = textZoneLeft +
         (((textZoneWidth - firstWidth) / 2).round()).clamp(0, textZoneWidth);
     final int fy = margin + ((topRowHeight - fontVisualHeight) / 2).round();
+    // ⚡ thickness: 2 → gras nettement plus marqué pour le nom de l'école
     _drawBoldString(canvas, firstLine,
-        font: usedFont, x: fx, y: fy, color: img.ColorRgb8(0, 0, 0));
+        font: usedFont,
+        x: fx,
+        y: fy,
+        color: img.ColorRgb8(0, 0, 0),
+        thickness: 2);
 
     int ey = margin + topRowHeight + 4;
     for (final line in extraLines) {
       final w = _textWidth(normalFont, line);
       final ex = (((_headerWidth - w) / 2).round()).clamp(0, _headerWidth);
       _drawBoldString(canvas, line,
-          font: normalFont, x: ex, y: ey, color: img.ColorRgb8(0, 0, 0));
+          font: normalFont,
+          x: ex,
+          y: ey,
+          color: img.ColorRgb8(0, 0, 0),
+          thickness: 2);
       ey += lineHeight;
     }
 
     return canvas;
   }
 
+  /// Dessine un texte en gras simulé. `thickness: 1` (par défaut) trace
+  /// le texte à 4 décalages (comportement historique). `thickness: 2`
+  /// trace le texte sur une grille de 9 positions (haut/bas/gauche/
+  /// droite/diagonales/centre), ce qui donne un trait visuellement
+  /// beaucoup plus épais — utilisé pour le nom de l'école, afin qu'il
+  /// paraisse aussi "gras" que le nom de l'élève et le montant payé,
+  /// imprimés eux avec le gras natif de l'imprimante ESC/POS.
   static void _drawBoldString(
       img.Image canvas,
       String text, {
@@ -763,16 +785,26 @@ Write-Output \$result
         required int x,
         required int y,
         required img.Color color,
+        int thickness = 1,
       }) {
-    const offsets = [
+    final List<List<int>> offsets = thickness >= 2
+        ? const [
+      [-1, -1], [0, -1], [1, -1],
+      [-1, 0], [0, 0], [1, 0],
+      [-1, 1], [0, 1], [1, 1],
+    ]
+        : const [
       [0, 0],
       [1, 0],
       [0, 1],
       [1, 1],
     ];
     for (final o in offsets) {
+      final int ox = x + o[0];
+      final int oy = y + o[1];
+      if (ox < 0 || oy < 0) continue;
       img.drawString(canvas, text,
-          font: font, x: x + o[0], y: y + o[1], color: color);
+          font: font, x: ox, y: oy, color: color);
     }
   }
 
