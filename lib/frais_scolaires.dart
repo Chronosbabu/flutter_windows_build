@@ -14,16 +14,12 @@ import 'dart:math';
 
 const String serverUrl = "https://jsinf.onrender.com";
 
-// ============================================================================
-// ⚡ NOUVEAU — Constantes des types de dépenses et des rubriques
-// ============================================================================
 const String kDepenseGlobale = 'globale';
 const String kDepenseIndependante = 'independante';
 const String kDepenseMixte = 'mixte';
 const String kRubriqueAutre = 'Autre';
 const String kRubriqueNonAffectee = 'Non affectée';
 
-/// Formate un montant avec séparateur de milliers : 1234567 -> "1 234 567".
 String formatMontant(double v) {
   final neg = v < -0.5;
   final s = v.abs().round().toString();
@@ -41,18 +37,9 @@ class Depense {
   double montant;
   DateTime date;
   String enregistrePar;
-
-  /// 'globale' (toute l'école), 'independante' (une section) ou
-  /// 'mixte' (deux sections ou plus).
   String portee;
-
-  /// Sections concernées (vide pour une dépense globale).
   List<String> sections;
-
-  /// Classes concernées (vide = toutes les classes des sections choisies).
   List<String> classes;
-
-  /// Rubrique (administration) sur laquelle l'argent est sorti.
   String rubrique;
 
   Depense({
@@ -141,9 +128,6 @@ class Depense {
   }
 }
 
-// ============================================================================
-// ⚡ NOUVEAU — Statistiques des dépenses par période (jour / mois / année)
-// ============================================================================
 class RubriqueStat {
   final String rubrique;
   final double pourcentage;
@@ -184,9 +168,6 @@ class DepensePeriodeStats {
   final double globales;
   final double independantes;
   final double mixtes;
-
-  /// Vrai si un filtre de section est appliqué : dans ce cas les dépenses
-  /// globales apparaissent dans la liste mais ne sont pas déduites.
   final bool globalesExclues;
 
   DepensePeriodeStats({
@@ -212,24 +193,9 @@ class DepensePeriodeStats {
   }
 }
 
-// ============================================================================
-// ⚡ NOUVEAU — OPTIONS (regroupement facultatif de sections)
-// ----------------------------------------------------------------------------
-// Une « option » est simplement un nom (ex: « Technique ») qui regroupe une ou
-// plusieurs sections déjà existantes. C'est 100 % facultatif : si aucune option
-// n'est créée, l'application se comporte exactement comme avant.
-// Dans les rapports, une option devient UNE colonne/ligne regroupant toutes ses
-// sections ; les sections non regroupées restent chacune seule (comme avant).
-// ============================================================================
 class GroupeOption {
-  /// Nom de l'option, ou nom de la section si elle n'est dans aucune option.
   final String nom;
-
-  /// Sections (réellement présentes dans le rapport) de ce groupe.
   final List<String> sections;
-
-  /// Vrai si c'est une vraie option créée par l'utilisateur, faux si c'est
-  /// une section isolée (non regroupée).
   final bool estOption;
 
   GroupeOption({
@@ -487,9 +453,6 @@ class FraisScolaires {
   Map<String, List<String>> localAttendance = {};
   List<Map<String, dynamic>> localCommunicationsLog = [];
 
-  /// ⚡ NOUVEAU — Options (facultatif) : nom de l'option -> sections qu'elle
-  /// regroupe. Vide par défaut : dans ce cas rien ne change dans l'application
-  /// ni dans les rapports.
   Map<String, List<String>> optionsSections = {};
 
   int _localIdCounter = 0;
@@ -653,9 +616,6 @@ class FraisScolaires {
     return 7;
   }
 
-  // ==========================================================================
-  // DEMANDES PROMOTEUR (remplace l'ancien système de code masqué)
-  // ==========================================================================
   Future<Map<String, dynamic>> createPromoterRequest({
     required String type,
     required Eleve eleve,
@@ -772,9 +732,6 @@ class FraisScolaires {
     return ok;
   }
 
-  // ==========================================================================
-  // RÉSUMÉ PROMOTEUR — calculé et poussé au serveur après chaque sauvegarde
-  // ==========================================================================
   Map<String, dynamic> computePromoterSummary() {
     final today = DateTime.now().toString().split(' ')[0];
 
@@ -1013,9 +970,6 @@ class FraisScolaires {
     await saveData();
   }
 
-  // ==========================================================================
-  // SUPPORT POUR L'IMPORTATION D'ÉLÈVES DEPUIS UN FICHIER EXTERNE
-  // ==========================================================================
   String normalizeSectionKey(String raw) => raw.trim().toUpperCase();
 
   String? resolveSectionAlias(String rawSectionCandidate) {
@@ -2034,8 +1988,6 @@ class FraisScolaires {
         targetData.eleves.firstWhere((e) => e.id == eleve.id);
         existing.classe  = newClasse;
         existing.section = eleve.section;
-        // L'exception de paiement personnalisée suit l'élève
-        // d'une année à l'autre (ex: enfant d'enseignant qui monte de classe).
         existing.montantMensuelPersonnalise = eleve.montantMensuelPersonnalise;
       } else {
         targetData.eleves.add(Eleve(
@@ -2104,26 +2056,17 @@ class FraisScolaires {
     return config.feesBySection[section] ?? _montantSecoursSiNonConfigure;
   }
 
-  // ==========================================================================
-  // EXCEPTION DE PAIEMENT PAR ÉLÈVE
-  // ==========================================================================
-  // Point d'entrée UNIQUE utilisé PARTOUT dans l'application pour calculer
-  // le montant requis d'un élève précis pour un mois précis. Si l'élève a
-  // un `montantMensuelPersonnalise` défini, ce montant remplace le calcul
-  // normal par section/classe, pour TOUS les mois. Sinon, comportement
-  // strictement identique à avant (délégué à `getRequiredForMonth`).
   double getRequiredForMonthForEleve(Eleve eleve, String mois) {
+    if (eleve.exceptionsMoisPersonnalisees.containsKey(mois)) {
+      final v = eleve.exceptionsMoisPersonnalisees[mois]!;
+      return v < 0 ? 0 : v;
+    }
     if (eleve.montantMensuelPersonnalise != null) {
       return eleve.montantMensuelPersonnalise!;
     }
     return getRequiredForMonth(mois, eleve.section, eleve.classe);
   }
 
-  /// Fixe (ou retire, si `montant` est `null`) le montant mensuel
-  /// personnalisé d'un élève. Recalcule immédiatement la répartition de
-  /// ses paiements déjà enregistrés selon le nouveau montant, pour que
-  /// tout (paiements, reçus, PDF, liste en ordre) reste cohérent sans
-  /// aucune action supplémentaire.
   Future<void> setMontantMensuelPersonnalise(
       Eleve eleve, double? montant) async {
     eleve.montantMensuelPersonnalise =
@@ -2132,14 +2075,60 @@ class FraisScolaires {
     await saveData();
   }
 
-  /// Liste de tous les élèves ayant actuellement une exception de
-  /// paiement personnalisée, triée par nom (pour l'écran Paramètres).
+  Future<void> setExceptionsMoisPourEleve(
+      Eleve eleve, Map<String, double> exceptionsParMois) async {
+    exceptionsParMois.forEach((mois, montant) {
+      eleve.exceptionsMoisPersonnalisees[mois] = montant < 0 ? 0 : montant;
+    });
+    recalculerRepartitionMoisPourEleve(eleve);
+    await saveData();
+  }
+
+  Future<int> setExceptionsMoisPourPlusieursEleves(
+      List<Map<String, dynamic>> lot) async {
+    int count = 0;
+    for (final entry in lot) {
+      final Eleve eleve = entry['eleve'] as Eleve;
+      final Map<String, double> exceptions =
+      Map<String, double>.from(entry['exceptions'] as Map);
+      exceptions.forEach((mois, montant) {
+        eleve.exceptionsMoisPersonnalisees[mois] = montant < 0 ? 0 : montant;
+      });
+      recalculerRepartitionMoisPourEleve(eleve);
+      count++;
+    }
+    await saveData();
+    return count;
+  }
+
+  Future<void> removeExceptionMoisPourEleve(Eleve eleve, String mois) async {
+    eleve.exceptionsMoisPersonnalisees.remove(mois);
+    recalculerRepartitionMoisPourEleve(eleve);
+    await saveData();
+  }
+
+  Future<void> removeToutesExceptionsMoisPourEleve(Eleve eleve) async {
+    eleve.exceptionsMoisPersonnalisees.clear();
+    recalculerRepartitionMoisPourEleve(eleve);
+    await saveData();
+  }
+
   List<Eleve> getElevesAvecExceptionPersonnalisee() {
     final list = currentData.eleves
-        .where((e) => e.montantMensuelPersonnalise != null)
+        .where((e) =>
+    e.montantMensuelPersonnalise != null ||
+        e.exceptionsMoisPersonnalisees.isNotEmpty)
         .toList();
     list.sort((a, b) => a.nom.toLowerCase().compareTo(b.nom.toLowerCase()));
     return list;
+  }
+
+  bool moisEstDebloquePourEleve(Eleve eleve, String mois) =>
+      eleve.moisDebloque == mois;
+
+  Future<void> setMoisDebloquePourEleve(Eleve eleve, String? mois) async {
+    eleve.moisDebloque = mois;
+    await saveData();
   }
 
   Map<String, double> getTotalBySection() {
@@ -2249,29 +2238,19 @@ class FraisScolaires {
   double getTotalPourcentageAdministrations() =>
       config.administrations.fold(0.0, (sum, a) => sum + a.pourcentage);
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — OPTIONS (regroupement facultatif de sections)
-  // ==========================================================================
-
-  /// Vrai si au moins une option contient au moins une section.
   bool get aDesOptionsActives =>
       optionsSections.values.any((liste) => liste.isNotEmpty);
 
-  /// Noms de toutes les options créées (même vides), dans l'ordre de création.
   List<String> getOptionsNoms() => List<String>.from(optionsSections.keys);
 
-  /// Noms des options qui contiennent au moins une section — ce sont celles
-  /// que l'on peut proposer dans un choix (ex. écran des dépenses).
   List<String> getOptionsUtilisables() => optionsSections.entries
       .where((e) => e.value.isNotEmpty)
       .map((e) => e.key)
       .toList();
 
-  /// Sections regroupées dans une option (liste vide si l'option n'existe pas).
   List<String> getSectionsPourOption(String option) =>
       List<String>.from(optionsSections[option] ?? const <String>[]);
 
-  /// Option qui contient cette section, ou `null` si la section est seule.
   String? getOptionDeSection(String section) {
     for (final e in optionsSections.entries) {
       if (e.value.contains(section)) return e.key;
@@ -2291,8 +2270,6 @@ class FraisScolaires {
     return false;
   }
 
-  /// Crée une option vide. Retourne `null` si tout s'est bien passé, sinon
-  /// un message d'erreur à afficher à l'utilisateur.
   Future<String?> addOption(String nom) async {
     final n = nom.trim();
     if (n.isEmpty) return "Le nom de l'option ne peut pas être vide";
@@ -2304,8 +2281,6 @@ class FraisScolaires {
     return null;
   }
 
-  /// Renomme une option (en conservant ses sections et son ordre).
-  /// Retourne `null` si OK, sinon un message d'erreur.
   Future<String?> renameOption(String ancien, String nouveau) async {
     final n = nouveau.trim();
     if (n.isEmpty) return "Le nom de l'option ne peut pas être vide";
@@ -2323,17 +2298,12 @@ class FraisScolaires {
     return null;
   }
 
-  /// Supprime une option. Ses sections ne sont PAS supprimées : elles
-  /// redeviennent simplement des sections « seules » dans les rapports.
   Future<void> deleteOption(String option) async {
     if (optionsSections.remove(option) != null) {
       await saveData();
     }
   }
 
-  /// Définit la liste exacte des sections d'une option. Une section ne peut
-  /// appartenir qu'à UNE seule option : si elle était dans une autre option,
-  /// elle en est retirée automatiquement.
   Future<void> setSectionsPourOption(
       String option, List<String> sections) async {
     if (!optionsSections.containsKey(option)) return;
@@ -2354,8 +2324,6 @@ class FraisScolaires {
     await saveData();
   }
 
-  /// À appeler quand une section est supprimée : la retire de toutes les
-  /// options (sans sauvegarder — l'appelant sauvegarde déjà ensuite).
   void retirerSectionDesOptions(String section) {
     for (final liste in optionsSections.values) {
       liste.removeWhere((s) => s == section);
@@ -2381,8 +2349,6 @@ class FraisScolaires {
     return result;
   }
 
-  /// Remet les options dans un état propre : noms non vides, une section dans
-  /// une seule option, et plus aucune section qui n'existe plus.
   void _nettoyerOptions() {
     final propres = <String, List<String>>{};
     final dejaAffectees = <String>{};
@@ -2403,10 +2369,6 @@ class FraisScolaires {
     optionsSections = propres;
   }
 
-  /// Construit les « groupes » d'un rapport à partir des sections réellement
-  /// présentes : chaque option (avec ses sections présentes) forme un groupe,
-  /// et chaque section non regroupée forme un groupe à elle seule. Triés selon
-  /// l'ordre des sections de l'école.
   List<GroupeOption> _groupesOptions(Iterable<String> sectionsPresentes) {
     final presentes = <String>{...sectionsPresentes};
     final groupes = <GroupeOption>[];
@@ -2452,8 +2414,6 @@ class FraisScolaires {
     return groupes;
   }
 
-  /// Taux mensuel officiel (tarif de section/classe) d'un groupe d'élèves :
-  /// une seule valeur si tous paient pareil, sinon « min - max ».
   String _tauxMensuelLabel(List<Eleve> eleves) {
     if (eleves.isEmpty) return '-';
     final mois = currentSchoolMonthName ?? months.first;
@@ -2472,9 +2432,6 @@ class FraisScolaires {
   String _pctLabel(double p) =>
       p == p.roundToDouble() ? p.toStringAsFixed(0) : p.toStringAsFixed(1);
 
-  // ==========================================================================
-  // DÉPENSES — accès de base
-  // ==========================================================================
   List<Depense> getDepensesForYear([String? year]) {
     final y = year ?? currentYear;
     final list = List<Depense>.from(depensesByYear[y] ?? []);
@@ -2504,7 +2461,6 @@ class FraisScolaires {
         .fold(0.0, (sum, d) => sum + d.montant);
   }
 
-  /// Total des dépenses d'un type donné (globale / indépendante / mixte).
   double getTotalDepensesParPortee(String portee, [String? year]) {
     final y = year ?? currentYear;
     return (depensesByYear[y] ?? [])
@@ -2541,12 +2497,6 @@ class FraisScolaires {
     }
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — DÉPENSES PAR TYPE / SECTION / RUBRIQUE / PÉRIODE
-  // ==========================================================================
-
-  /// Liste des rubriques proposées lors d'une dépense : administrations
-  /// configurées + « Autre ».
   List<String> getRubriquesDisponibles() {
     final result = <String>[];
     for (final a in config.administrations) {
@@ -2557,10 +2507,6 @@ class FraisScolaires {
     return result;
   }
 
-  /// Répartition d'une dépense par section :
-  /// - globale : aucune (elle concerne toute l'école) ;
-  /// - indépendante : 100 % sur la section choisie ;
-  /// - mixte : parts égales entre les sections choisies.
   Map<String, double> repartitionDepenseParSection(Depense d) {
     if (d.portee == kDepenseGlobale || d.sections.isEmpty) return {};
     final part = d.montant / d.sections.length;
@@ -2581,8 +2527,6 @@ class FraisScolaires {
     return true;
   }
 
-  /// Dépenses d'une période ('today', 'month' ou 'year'), triées de la plus
-  /// ancienne à la plus récente (ordre du journal de caisse).
   List<Depense> getDepensesForPeriod(
       String period, {
         String? year,
@@ -2623,8 +2567,6 @@ class FraisScolaires {
     }
   }
 
-  /// Calcule, pour une période, le tableau par rubrique, le tableau par
-  /// section et le reste après dépenses.
   DepensePeriodeStats computeDepensesStats(
       String period, {
         String? year,
@@ -2648,7 +2590,6 @@ class FraisScolaires {
       classFilter: classFilter,
     );
 
-    // Rubriques : une ligne par administration configurée.
     final Map<String, RubriqueStat> rub = {};
     for (final admin in config.administrations) {
       final nom = admin.nom.trim();
@@ -2660,7 +2601,6 @@ class FraisScolaires {
       );
     }
 
-    // Sections.
     final Map<String, SectionStat> secStats = {};
     final sectionsBase = sectionFilter != null
         ? <String>[sectionFilter]
@@ -2719,9 +2659,6 @@ class FraisScolaires {
     );
   }
 
-  /// Solde encore disponible (année en cours) sur une rubrique, pour le
-  /// périmètre choisi. Sert à avertir avant une sortie d'argent excessive.
-  /// Retourne `null` si le calcul n'a pas de sens (rubrique « Autre »).
   double? getSoldeDisponibleRubrique({
     required String rubrique,
     required String portee,
@@ -2785,11 +2722,6 @@ class FraisScolaires {
     return depense;
   }
 
-  /// ⚡ NOUVEAU — Enregistre une dépense pour une OPTION : toutes les sections
-  /// de l'option sont concernées (dépense « indépendante » si l'option n'a
-  /// qu'une section, « mixte » sinon, avec partage à parts égales).
-  /// À utiliser depuis l'écran des dépenses quand l'utilisateur choisit une
-  /// option au lieu de choisir les sections une par une.
   Future<Depense> addDepenseParOption({
     required String motif,
     required double montant,
@@ -3318,6 +3250,15 @@ class FraisScolaires {
           (transaction['amount'] as num?)?.toDouble() ?? 0.0;
       if (montant <= 0) continue;
 
+      final String? moisFixe = transaction['moisDebloque'] == true
+          ? transaction['mois']?.toString()
+          : null;
+
+      if (moisFixe != null && moisFixe.isNotEmpty) {
+        nouveauPaid[moisFixe] = (nouveauPaid[moisFixe] ?? 0) + montant;
+        continue;
+      }
+
       while (monthIndex < months.length) {
         final mois = months[monthIndex];
         final requis = getRequiredForMonthForEleve(eleve, mois);
@@ -3402,10 +3343,6 @@ class FraisScolaires {
           classeNumeroFromFullClasse(eleve.classe) != classeNumero) {
         continue;
       }
-      // Un élève avec une exception de paiement personnalisée
-      // ne dépend plus du tarif de sa section/classe : on ne le touche
-      // jamais lors d'un recalcul déclenché par un changement de tarif
-      // général.
       if (eleve.montantMensuelPersonnalise != null) continue;
 
       bool modifie = false;
@@ -3545,14 +3482,6 @@ class FraisScolaires {
     ];
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — TABLEAU « RÉPARTITION PAR OPTION » (facultatif)
-  // Présentation inspirée de la fiche papier : une colonne par option (ou par
-  // section non regroupée) + une colonne TOTAL ; lignes : effectif, taux
-  // mensuel, montant collecté, puis la part de chaque administration.
-  // Ne s'affiche QUE si au moins une option contient des sections présentes
-  // dans le rapport. Sinon : liste vide, le rapport reste identique à avant.
-  // ==========================================================================
   List<pw.Widget> _buildRepartitionParOption(
       List<Eleve> students, Map<String, double> totalBySection) {
     if (!aDesOptionsActives) return [];
@@ -3670,9 +3599,6 @@ class FraisScolaires {
     ];
   }
 
-  // ==========================================================================
-  // RÉPARTITION PAR SECTION ET PAR ADMINISTRATION
-  // ==========================================================================
   List<pw.Widget> _buildRepartitionParSectionEtAdministration(
       List<Eleve> students) {
     if (config.administrations.isEmpty || students.isEmpty) return [];
@@ -3773,8 +3699,6 @@ class FraisScolaires {
       ),
       pw.SizedBox(height: 16),
 
-      // ⚡ NOUVEAU — Tableau « Répartition par option » (uniquement si des
-      // options ont été créées ; sinon liste vide = rien ne change).
       ..._buildRepartitionParOption(students, totalBySection),
 
       pw.Container(
@@ -3839,11 +3763,6 @@ class FraisScolaires {
     ];
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — SECTION « DÉPENSES » DES RAPPORTS PDF
-  // Trois blocs (journalier, mensuel, annuel), chacun avec : résumé, tableau
-  // par rubrique, tableau par section, détail des dépenses et reste final.
-  // ==========================================================================
   String _periodeTitrePdf(String period) {
     final now = DateTime.now();
     String two(int n) => n.toString().padLeft(2, '0');
@@ -3904,8 +3823,6 @@ class FraisScolaires {
     color: PdfColors.white,
   );
 
-  /// ⚡ NOUVEAU — Tableau des dépenses regroupées par option (facultatif).
-  /// Ne produit rien si aucune option n'est utilisée dans la période.
   List<pw.Widget> _buildDepensesParOptionTable(DepensePeriodeStats s) {
     if (!aDesOptionsActives) return [];
     final actives = s.sections.where((x) => x.aDeLActivite).toList();
@@ -4009,7 +3926,6 @@ class FraisScolaires {
     final widgets = <pw.Widget>[];
     final String periodeCourte = _periodeCourtePdf(s.period);
 
-    // ---- Bandeau de titre ------------------------------------------------
     widgets.add(
       pw.Container(
         width: double.infinity,
@@ -4031,7 +3947,6 @@ class FraisScolaires {
     );
     widgets.add(pw.SizedBox(height: 8));
 
-    // ---- Résumé ----------------------------------------------------------
     widgets.add(
       pw.Container(
         width: double.infinity,
@@ -4069,7 +3984,6 @@ class FraisScolaires {
     );
     widgets.add(pw.SizedBox(height: 12));
 
-    // ---- Tableau 1 : par rubrique ---------------------------------------
     widgets.add(pw.Text(
       "1. Par rubrique (administration) — ${periodeCourte.toUpperCase()}",
       style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
@@ -4139,7 +4053,6 @@ class FraisScolaires {
     }
     widgets.add(pw.SizedBox(height: 12));
 
-    // ---- Tableau 2 : par section ----------------------------------------
     widgets.add(pw.Text(
       "2. Par section — ${periodeCourte.toUpperCase()}",
       style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
@@ -4198,11 +4111,9 @@ class FraisScolaires {
       ));
     }
 
-    // ⚡ NOUVEAU — Tableau « Par option » (uniquement si des options existent)
     widgets.addAll(_buildDepensesParOptionTable(s));
     widgets.add(pw.SizedBox(height: 12));
 
-    // ---- Tableau 3 : détail des dépenses --------------------------------
     widgets.add(pw.Text(
       "3. Détail des dépenses (journal de caisse) — ${periodeCourte.toUpperCase()}",
       style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
@@ -4443,9 +4354,6 @@ class FraisScolaires {
     ];
   }
 
-  // ==========================================================================
-  // REÇU PDF INDIVIDUEL D'UN ÉLÈVE (HISTORIQUE DE PAIEMENT)
-  // ==========================================================================
   pw.Widget _pdfDetailRow(String label, String value) {
     return pw.Padding(
       padding: const pw.EdgeInsets.symmetric(vertical: 2),
@@ -4958,7 +4866,6 @@ class FraisScolaires {
             ),
           ),
 
-          // ⚡ NOUVEAU — Rapport détaillé des dépenses (jour / mois / année)
           ..._buildDepensesReportSections(
             sectionFilter: sectionFilter,
             classFilter: classFilter,
@@ -5451,7 +5358,6 @@ class FraisScolaires {
               .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
               .toList();
         }
-        // ⚡ NOUVEAU — Options (facultatif) : absent = aucune option.
         if (data['optionsSections'] != null) {
           optionsSections = _parseOptionsSections(data['optionsSections']);
           _nettoyerOptions();
@@ -5750,6 +5656,98 @@ class FraisScolaires {
     return nouvellesTransactions;
   }
 
+  List<Map<String, dynamic>> _distribuerSurMoisSuivants(
+      Eleve eleve, double montant, {String? moisExclu}) {
+    final String today = DateTime.now().toString().split(' ')[0];
+    final List<Map<String, dynamic>> nouvellesTransactions = [];
+
+    String genererId() =>
+        'TX${DateTime.now().microsecondsSinceEpoch}_${nouvellesTransactions.length}_c';
+
+    double remaining = montant;
+    int index = 0;
+    while (remaining > 0 && index < months.length) {
+      final mois = months[index];
+      if (mois == moisExclu) {
+        index++;
+        continue;
+      }
+      final double required = getRequiredForMonthForEleve(eleve, mois);
+      final double dejaPaye = eleve.paid[mois] ?? 0;
+      final double needed = required - dejaPaye;
+      if (needed > 0) {
+        final double toAdd = remaining >= needed ? needed : remaining;
+        eleve.paid[mois] = dejaPaye + toAdd;
+        final transaction = <String, dynamic>{
+          'id': genererId(),
+          'date': today,
+          'mois': mois,
+          'amount': toAdd,
+        };
+        eleve.transactions.add(transaction);
+        nouvellesTransactions.add(transaction);
+        remaining -= toAdd;
+      }
+      index++;
+    }
+
+    if (remaining > 0 && months.isNotEmpty) {
+      final dernierMois = months.last;
+      if (dernierMois != moisExclu) {
+        final double dejaPayeDernierMois = eleve.paid[dernierMois] ?? 0;
+        eleve.paid[dernierMois] = dejaPayeDernierMois + remaining;
+        final transaction = <String, dynamic>{
+          'id': genererId(),
+          'date': today,
+          'mois': dernierMois,
+          'amount': remaining,
+          'excedent': true,
+        };
+        eleve.transactions.add(transaction);
+        nouvellesTransactions.add(transaction);
+      }
+    }
+
+    return nouvellesTransactions;
+  }
+
+  List<Map<String, dynamic>> handlePaymentMoisDebloque(
+      Eleve eleve, String moisDebloque, double montant) {
+    final String today = DateTime.now().toString().split(' ')[0];
+    final List<Map<String, dynamic>> nouvellesTransactions = [];
+
+    String genererId() =>
+        'TX${DateTime.now().microsecondsSinceEpoch}_${nouvellesTransactions.length}_d';
+
+    final double required = getRequiredForMonthForEleve(eleve, moisDebloque);
+    final double dejaPaye = eleve.paid[moisDebloque] ?? 0;
+    final double needed = required - dejaPaye;
+    double remaining = montant;
+
+    if (needed > 0) {
+      final double toAdd = remaining >= needed ? needed : remaining;
+      eleve.paid[moisDebloque] = dejaPaye + toAdd;
+      final transaction = <String, dynamic>{
+        'id': genererId(),
+        'date': today,
+        'mois': moisDebloque,
+        'amount': toAdd,
+        'moisDebloque': true,
+      };
+      eleve.transactions.add(transaction);
+      nouvellesTransactions.add(transaction);
+      remaining -= toAdd;
+    }
+
+    if (remaining > 0) {
+      nouvellesTransactions.addAll(
+        _distribuerSurMoisSuivants(eleve, remaining, moisExclu: moisDebloque),
+      );
+    }
+
+    return nouvellesTransactions;
+  }
+
   double getStudentTotalPaid(Eleve eleve) =>
       eleve.paid.values.fold(0.0, (sum, p) => sum + p);
 
@@ -5945,14 +5943,16 @@ class FraisScolaires {
                   : localEleve.id;
               localEleve.classe   = serverEleve.classe;
               localEleve.section  = serverEleve.section;
-              // Synchronise l'exception de paiement
-              // personnalisée depuis le serveur si elle y est définie ;
-              // sinon on garde la valeur locale actuelle (pour ne jamais
-              // effacer une exception fixée localement par un backup
-              // serveur plus ancien qui ne la connaît pas encore).
               localEleve.montantMensuelPersonnalise =
                   serverEleve.montantMensuelPersonnalise ??
                       localEleve.montantMensuelPersonnalise;
+              if (serverEleve.exceptionsMoisPersonnalisees.isNotEmpty) {
+                serverEleve.exceptionsMoisPersonnalisees.forEach((m, v) {
+                  localEleve.exceptionsMoisPersonnalisees.putIfAbsent(
+                      m, () => v);
+                });
+              }
+              localEleve.moisDebloque ??= serverEleve.moisDebloque;
 
               final Map<String, Map<String, dynamic>> transactionsFusionnees =
               {};
@@ -6109,8 +6109,6 @@ class FraisScolaires {
         }
       }
     }
-    // ⚡ NOUVEAU — Options : on AJOUTE seulement les options du serveur qui
-    // n'existent pas encore en local (on n'écrase jamais celles de l'utilisateur).
     if (serverData['optionsSections'] != null) {
       final serverOptions = _parseOptionsSections(serverData['optionsSections']);
       serverOptions.forEach((nom, secs) {

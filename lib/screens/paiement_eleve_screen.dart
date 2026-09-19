@@ -64,9 +64,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         .addPostFrameCallback((_) => _maybeAutoImportFromDesktop());
   }
 
-  // ==========================================================================
-  // VERROU MANUEL D'IMPRESSION DES REÇUS
-  // ==========================================================================
   Future<void> _loadReceiptsLockState() async {
     final prefs = await SharedPreferences.getInstance();
     final locked = prefs.getBool(_receiptsLockedPrefKey) ?? false;
@@ -151,9 +148,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
   }
 
-  // ==========================================================================
-  // IMPORT AUTOMATIQUE DEPUIS LE BUREAU (MAC/WINDOWS)
-  // ==========================================================================
   Future<void> _maybeAutoImportFromDesktop() async {
     final targetName = _autoImportSchoolName.trim().toUpperCase();
     if (widget.fraisScolaires.config.schoolName.trim().toUpperCase() !=
@@ -211,9 +205,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     await _runStudentImportFlow(content);
   }
 
-  // ==========================================================================
-  // ORCHESTRATEUR PRINCIPAL DE L'IMPORT
-  // ==========================================================================
   Future<void> _runStudentImportFlow(String content) async {
     if (_importing) return;
     setState(() => _importing = true);
@@ -285,9 +276,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
   }
 
-  // ==========================================================================
-  // BOÎTE DE DIALOGUE : RÉSOLUTION DES SECTIONS INCONNUES
-  // ==========================================================================
   Future<bool> _resolveSectionConflicts(List<SectionConflict> conflicts) async {
     final existingSections = _dedupe(widget.fraisScolaires.config.sections);
     final result = await showDialog<bool>(
@@ -410,9 +398,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return result == true;
   }
 
-  // ==========================================================================
-  // BOÎTE DE DIALOGUE : ÉLÈVES DÉJÀ EXISTANTS (DOUBLONS)
-  // ==========================================================================
   Future<bool> _resolveDuplicates(List<DuplicateMatch> matches) async {
     final result = await showDialog<bool>(
       context: context,
@@ -940,10 +925,90 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return null;
   }
 
+  String? _moisDebloqueActif(Eleve eleve) {
+    final m = eleve.moisDebloque;
+    if (m == null || m.isEmpty) return null;
+    if (!widget.fraisScolaires.months.contains(m)) return null;
+    final required = widget.fraisScolaires.getRequiredForMonthForEleve(eleve, m);
+    final paid = eleve.paid[m] ?? 0;
+    if (paid >= required) return null;
+    return m;
+  }
+
   bool _peutPayerCeMois(Eleve eleve, String mois) {
+    final required =
+    widget.fraisScolaires.getRequiredForMonthForEleve(eleve, mois);
+    final paid = eleve.paid[mois] ?? 0;
+    if (paid >= required) return false;
+    if (_moisDebloqueActif(eleve) == mois) return true;
     final premierNonPaye = _premierMoisNonPaye(eleve);
     if (premierNonPaye == null) return false;
     return mois == premierNonPaye;
+  }
+
+  bool _paiementViaDeblocage(Eleve eleve, String mois) {
+    if (_moisDebloqueActif(eleve) != mois) return false;
+    return _premierMoisNonPaye(eleve) != mois;
+  }
+
+  Future<void> _deverrouillerMois(Eleve eleve, String mois) async {
+    final actif = _moisDebloqueActif(eleve);
+    if (actif != null && actif != mois) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              "Un seul mois peut être déverrouillé à la fois : \"$actif\" est "
+                  "déjà déverrouillé. Soldez-le ou re-verrouillez-le d'abord."),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    final premierNonPaye = _premierMoisNonPaye(eleve);
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text("Déverrouiller \"$mois\" ?"),
+        content: Text(
+          "Vous pourrez payer \"$mois\" sans avoir soldé les mois précédents.\n\n"
+              "Si le montant payé dépasse ce qui est dû pour \"$mois\", le "
+              "surplus sera automatiquement réparti sur les mois en priorité"
+              "${premierNonPaye != null ? ", en commençant par \"$premierNonPaye\"" : ""}.",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Déverrouiller"),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await widget.fraisScolaires.setMoisDebloquePourEleve(eleve, mois);
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("🔓 Mois \"$mois\" déverrouillé pour cet élève."),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  Future<void> _reverrouillerMois(Eleve eleve) async {
+    await widget.fraisScolaires.setMoisDebloquePourEleve(eleve, null);
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("🔒 Mois re-verrouillé.")),
+      );
+    }
   }
 
   void _showEditStudentDialog(Eleve eleve) {
@@ -1305,18 +1370,23 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               itemCount: filtered.length,
               itemBuilder: (context, index) {
                 final eleve = filtered[index];
+                final moisDebloqueActif = _moisDebloqueActif(eleve);
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: ListTile(
                     leading: CircleAvatar(
-                      child: Text(eleve.id.isNotEmpty ? eleve.id.substring(0, 2) : "?"),
+                      child: Text(eleve.id.length >= 2
+                          ? eleve.id.substring(0, 2)
+                          : (eleve.id.isNotEmpty ? eleve.id : "?")),
                     ),
                     title: Text('${eleve.nom} ${eleve.postNom} ${eleve.prenom}'),
                     subtitle: Text(
                       'ID: ${eleve.id}\n'
                           'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
                           'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC'
-                          '${eleve.montantMensuelPersonnalise != null ? '\n⭐ Montant personnalisé : ${eleve.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois' : ''}',
+                          '${eleve.montantMensuelPersonnalise != null ? '\n⭐ Montant personnalisé : ${eleve.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois' : ''}'
+                          '${eleve.exceptionsMoisPersonnalisees.isNotEmpty ? '\n⭐ ${eleve.exceptionsMoisPersonnalisees.length} mois en exception' : ''}'
+                          '${moisDebloqueActif != null ? '\n🔓 Mois déverrouillé : $moisDebloqueActif' : ''}',
                     ),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -1357,24 +1427,33 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     .getRequiredForMonthForEleve(eleve, mois);
                 final paid = eleve.paid[mois] ?? 0;
                 final isFullyPaid = paid >= required;
+                final estGratuit = required <= 0;
+                final estDebloque = !isFullyPaid && _moisDebloqueActif(eleve) == mois;
                 final estOuvert = isFullyPaid || _peutPayerCeMois(eleve, mois);
                 final nbPaiements =
                     eleve.transactions.where((t) => t['mois'] == mois).length;
                 return ListTile(
                   title: Text(mois),
                   subtitle: Text(
-                    'Requis: $required FC | Payé: $paid FC'
+                    estGratuit
+                        ? 'Mois gratuit (0 FC)'
+                        : 'Requis: $required FC | Payé: $paid FC'
                         '${nbPaiements > 0 ? ' • $nbPaiements paiement(s)' : ''}'
-                        '${!isFullyPaid && !estOuvert ? '\nSoldez d\'abord les mois précédents' : ''}',
+                        '${estDebloque ? '\n🔓 Déverrouillé' : ''}'
+                        '${!isFullyPaid && !estOuvert ? '\nSoldez d\'abord les mois précédents ou déverrouillez ce mois' : ''}',
                     style: (!isFullyPaid && !estOuvert)
                         ? const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)
                         : null,
                   ),
-                  trailing: isFullyPaid
+                  trailing: estGratuit
+                      ? const Icon(Icons.card_giftcard, color: Colors.green)
+                      : isFullyPaid
                       ? const Icon(Icons.check_circle, color: Colors.green)
+                      : (estDebloque
+                      ? const Icon(Icons.lock_open, color: Colors.indigo)
                       : (estOuvert
                       ? const Icon(Icons.warning, color: Colors.orange)
-                      : const Icon(Icons.lock_outline, color: Colors.grey)),
+                      : const Icon(Icons.lock_outline, color: Colors.grey))),
                   onTap: () async {
                     await _showMonthDetailDialog(context, eleve, mois);
                     setStateDialog(() {});
@@ -1403,6 +1482,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
           final isFullyPaid = paid >= required;
           final peutPayer = !isFullyPaid && _peutPayerCeMois(eleve, mois);
           final premierNonPaye = _premierMoisNonPaye(eleve);
+          final estDebloque = !isFullyPaid && _moisDebloqueActif(eleve) == mois;
+          final viaDeblocage = estDebloque && premierNonPaye != mois;
           final historique = eleve.transactions.where((t) => t['mois'] == mois).toList()
             ..sort((a, b) =>
                 (a['date'] ?? '').toString().compareTo((b['date'] ?? '').toString()));
@@ -1416,7 +1497,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    "Requis : ${required.toStringAsFixed(0)} FC\n"
+                    required <= 0
+                        ? "Ce mois est gratuit pour cet élève (0 FC)."
+                        : "Requis : ${required.toStringAsFixed(0)} FC\n"
                         "Déjà payé : ${paid.toStringAsFixed(0)} FC",
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
@@ -1439,9 +1522,39 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                             Expanded(
                               child: Text(
                                 "Ce mois ne peut pas encore être payé. "
-                                    "Vous devez d'abord solder entièrement \"$premierNonPaye\".",
+                                    "Vous devez d'abord solder entièrement \"$premierNonPaye\", "
+                                    "ou déverrouiller ce mois avec le bouton ci-dessous.",
                                 style: const TextStyle(
                                     color: Colors.deepOrange, fontSize: 12.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (viaDeblocage)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.indigo.withAlpha(25),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.indigo),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.lock_open,
+                                color: Colors.indigo, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                "Ce mois est déverrouillé. Un paiement complétera "
+                                    "d'abord \"$mois\", puis le surplus ira sur "
+                                    "\"${premierNonPaye ?? ''}\" et les mois suivants.",
+                                style: const TextStyle(
+                                    color: Colors.indigo, fontSize: 12.5),
                               ),
                             ),
                           ],
@@ -1548,6 +1661,25 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Fermer")),
+              if (!isFullyPaid && !peutPayer)
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.lock_open),
+                  label: const Text("Déverrouiller ce mois"),
+                  onPressed: () async {
+                    await _deverrouillerMois(eleve, mois);
+                    setStateDialog(() {});
+                  },
+                ),
+              if (viaDeblocage)
+                TextButton.icon(
+                  icon: const Icon(Icons.lock_outline, color: Colors.red),
+                  label: const Text("Re-verrouiller",
+                      style: TextStyle(color: Colors.red)),
+                  onPressed: () async {
+                    await _reverrouillerMois(eleve);
+                    setStateDialog(() {});
+                  },
+                ),
               if (peutPayer)
                 ElevatedButton.icon(
                   icon: const Icon(Icons.add),
@@ -1579,6 +1711,18 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return total;
   }
 
+  double _soldeTotalRestantAnnee(Eleve eleve) {
+    double total = 0;
+    for (final m in widget.fraisScolaires.months) {
+      final requis =
+      widget.fraisScolaires.getRequiredForMonthForEleve(eleve, m);
+      final dejaPaye = eleve.paid[m] ?? 0;
+      final restant = requis - dejaPaye;
+      if (restant > 0) total += restant;
+    }
+    return total;
+  }
+
   void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
     if (!_peutPayerCeMois(eleve, mois)) {
       final premierNonPaye = _premierMoisNonPaye(eleve);
@@ -1586,7 +1730,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         SnackBar(
           content: Text(
             premierNonPaye != null
-                ? "Veuillez d'abord solder entièrement \"$premierNonPaye\" avant de payer \"$mois\"."
+                ? "Veuillez d'abord solder entièrement \"$premierNonPaye\" avant de payer \"$mois\", ou déverrouillez ce mois."
                 : "Tous les mois sont déjà soldés pour cet élève.",
           ),
           backgroundColor: Colors.orange,
@@ -1596,14 +1740,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
 
     final controller = TextEditingController();
+    bool isSubmitting = false;
+    final bool viaDeblocageAffichage = _paiementViaDeblocage(eleve, mois);
+    final String? premierPrioritaire = _premierMoisNonPaye(eleve);
 
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setStateDialog) {
-          bool isSubmitting = false;
-
           Future<void> onConfirmPressed() async {
             if (isSubmitting) return;
             setStateDialog(() => isSubmitting = true);
@@ -1630,40 +1775,72 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               return;
             }
 
-            final double soldeMax = _soldeMaxRestantAPartirDe(eleve, mois);
-            if (soldeMax > 0 && amount > soldeMax) {
-              final bool? continuer = await showDialog<bool>(
-                context: context,
-                builder: (ctx2) => AlertDialog(
-                  title: const Text("Montant supérieur au solde dû"),
-                  content: Text(
-                    "Le montant saisi (${amount.toStringAsFixed(0)} FC) "
-                        "dépasse le solde total restant à payer par cet élève "
-                        "sur toute l'année scolaire (${soldeMax.toStringAsFixed(0)} FC).\n\n"
-                        "L'excédent éventuel sera tout de même conservé et "
-                        "ajouté au dernier mois de l'année.",
-                  ),
-                  actions: [
-                    TextButton(
-                        onPressed: () => Navigator.pop(ctx2, false),
-                        child: const Text("Corriger le montant")),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.orange, foregroundColor: Colors.white),
-                      onPressed: () => Navigator.pop(ctx2, true),
-                      child: const Text("Confirmer quand même"),
+            final bool viaDeblocage = _paiementViaDeblocage(eleve, mois);
+
+            if (viaDeblocage) {
+              final double soldeTotal = _soldeTotalRestantAnnee(eleve);
+              if (amount > soldeTotal) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      "Le montant saisi (${amount.toStringAsFixed(0)} FC) dépasse "
+                          "le solde total restant de l'année "
+                          "(${soldeTotal.toStringAsFixed(0)} FC). "
+                          "Veuillez corriger le montant.",
                     ),
-                  ],
-                ),
-              );
-              if (continuer != true) {
+                    backgroundColor: Colors.red,
+                  ),
+                );
                 setStateDialog(() => isSubmitting = false);
                 return;
               }
+            } else {
+              final double soldeMax = _soldeMaxRestantAPartirDe(eleve, mois);
+              if (soldeMax > 0 && amount > soldeMax) {
+                final bool? continuer = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx2) => AlertDialog(
+                    title: const Text("Montant supérieur au solde dû"),
+                    content: Text(
+                      "Le montant saisi (${amount.toStringAsFixed(0)} FC) "
+                          "dépasse le solde total restant à payer par cet élève "
+                          "sur toute l'année scolaire (${soldeMax.toStringAsFixed(0)} FC).\n\n"
+                          "L'excédent éventuel sera tout de même conservé et "
+                          "ajouté au dernier mois de l'année.",
+                    ),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(ctx2, false),
+                          child: const Text("Corriger le montant")),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange, foregroundColor: Colors.white),
+                        onPressed: () => Navigator.pop(ctx2, true),
+                        child: const Text("Confirmer quand même"),
+                      ),
+                    ],
+                  ),
+                );
+                if (continuer != true) {
+                  setStateDialog(() => isSubmitting = false);
+                  return;
+                }
+              }
             }
 
-            final List<Map<String, dynamic>> nouvellesTransactions =
-            widget.fraisScolaires.handlePayment(eleve, mois, amount);
+            final List<Map<String, dynamic>> nouvellesTransactions = viaDeblocage
+                ? widget.fraisScolaires.handlePaymentMoisDebloque(eleve, mois, amount)
+                : widget.fraisScolaires.handlePayment(eleve, mois, amount);
+
+            if (eleve.moisDebloque != null) {
+              final moisDeb = eleve.moisDebloque!;
+              final requisDeb = widget.fraisScolaires
+                  .getRequiredForMonthForEleve(eleve, moisDeb);
+              if ((eleve.paid[moisDeb] ?? 0) >= requisDeb) {
+                eleve.moisDebloque = null;
+              }
+            }
+
             await widget.fraisScolaires.saveData();
             if (ctx.mounted) Navigator.pop(ctx);
 
@@ -1734,6 +1911,24 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (viaDeblocageAffichage)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(20),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.indigo),
+                      ),
+                      child: Text(
+                        "🔓 Mois déverrouillé : le montant complétera d'abord "
+                            "\"$mois\", puis le surplus sera réparti sur "
+                            "\"${premierPrioritaire ?? ''}\" et les mois suivants.",
+                        style: const TextStyle(color: Colors.indigo, fontSize: 11.5),
+                      ),
+                    ),
+                  ),
                 if (eleve.montantMensuelPersonnalise != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 10),

@@ -45,8 +45,10 @@ import 'package:flutter/foundation.dart' show debugPrint;
 ///
 /// ⚡ NOUVEAU — LISIBILITÉ DU LOGO ET DU NOM DE L'ÉCOLE
 /// Logo redimensionné avec interpolation de qualité + conversion N&B
-/// net à fort contraste. Nom de l'école en police plus grande (arial48)
-/// + gras simulé quand il tient sur la ligne.
+/// net à fort contraste. Nom de l'école dessiné en gras simulé (traits
+/// épaissis) avec une police plus grande quand il tient sur la ligne du
+/// logo, sinon repli automatique sur une police normale avec retour à la
+/// ligne si nécessaire — pour ne jamais rien couper.
 ///
 /// ⚡ RÉIMPRESSION MANUELLE
 /// `printTransactionsReceipt` et `printAutresFraisTransactionsReceipt`
@@ -87,69 +89,17 @@ import 'package:flutter/foundation.dart' show debugPrint;
 /// Dans ce cas précis, on considère l'envoi (déjà réussi via
 /// `WritePrinter`) comme abouti.
 ///
-/// ⚡ NOUVEAU — MISE EN PAGE PLUS JOLIE (ESTHÉTIQUE UNIQUEMENT)
-/// Ce passage ne change AUCUNE logique d'impression, de confirmation,
-/// de file d'attente ou de sauvegarde : seuls les éléments VISUELS du
-/// reçu ont été retravaillés, à savoir :
-///   - Le logo est nettement plus grand dans l'en-tête.
-///   - Le nom de l'école est dessiné avec un gras BEAUCOUP plus épais
-///     (empilage de traits sur une grille de 9 directions au lieu de
-///     4), pour un rendu visuellement aussi "gras" que le nom de
-///     l'élève et le montant payé, qui eux utilisent le gras natif
-///     ESC/POS de l'imprimante.
-///   - Le nom complet de l'élève est centré et imprimé en grande
-///     taille (hauteur ET largeur doublées) pour bien ressortir.
-///   - Le montant payé (et le total payé, en cas de réimpression
-///     groupée) est mis en valeur sur sa propre ligne, centré, en
-///     grande taille, au lieu d'être une simple ligne parmi d'autres.
-/// Le reçu reste volontairement compact (aucune ligne inutile
-/// ajoutée), seules quelques lignes existantes ont été réagencées ou
-/// agrandies.
-///
-/// ⚡ NOUVEAU — CORRECTIONS DE MISE EN PAGE (2026-09-17)
-/// Toujours AUCUN changement de la logique d'impression/communication
-/// avec l'imprimante (WritePrinter, confirmation de job, spouleur,
-/// etc.) : uniquement le CONTENU et la PRÉSENTATION du reçu.
-///   - L'en-tête n'affiche plus QU'UN SEUL logo (auparavant dupliqué à
-///     gauche ET à droite du nom de l'école). Ce logo unique est
-///     maintenant centré horizontalement au-dessus du nom de l'école,
-///     lui-même centré en dessous, pour un rendu propre et équilibré.
-///   - Le montant REQUIS pour le mois (le montant que l'élève doit
-///     normalement payer) est désormais affiché sur le reçu. Ce
-///     paramètre existait déjà dans `printReceipt` mais n'était
-///     jusqu'ici jamais imprimé, ce qui expliquait qu'il manque
-///     parfois sur le reçu physique.
-///   - Le mois payé est maintenant affiché sur sa propre ligne,
-///     centrée et en gras, plutôt que dans une simple colonne.
-///   - Un nouveau paramètre optionnel `noteExplicative` a été ajouté à
-///     `printReceipt` (par défaut `null`, donc AUCUN impact sur les
-///     appels existants). S'il est fourni par le code appelant, il est
-///     affiché juste sous le titre "REÇU DE PAIEMENT", en gras et en
-///     majuscules — utile par exemple pour préciser sur un reçu qu'il
-///     s'agit du "SOLDE DU MOIS PRÉCÉDENT" et sur un autre qu'il
-///     s'agit d'un "NOUVEAU MOIS", lorsque le code appelant décide de
-///     scinder un paiement en plusieurs reçus.
-///
-/// ⚡ NOUVEAU — NOM DE L'ÉCOLE EN GRAS NATIF + LOGO AGRANDI (2026-09-17,
-/// suite)
-/// Toujours AUCUN changement de la logique d'impression/communication
-/// avec l'imprimante : uniquement l'esthétique du reçu.
-///   - Le nom de l'école n'est PLUS dessiné "à la main" (police bitmap
-///     + gras simulé) à l'intérieur de l'image d'en-tête. Il est
-///     désormais imprimé exactement comme le nom de l'élève : en gras
-///     natif ESC/POS, en grande taille (hauteur ET largeur doublées),
-///     et centré via l'alignement natif du générateur — ce qui garantit
-///     un centrage fiable quel que soit le nombre de caractères. Si le
-///     nom est trop long pour tenir sur une seule ligne à cette taille,
-///     il est automatiquement réparti sur plusieurs lignes (coupure
-///     entre les mots, jamais au milieu d'un mot), chaque ligne restant
-///     en gras, grande taille, et centrée.
-///   - Le logo est désormais nettement plus grand (l'image d'en-tête
-///     utilise maintenant toute la largeur imprimable du papier 80 mm,
-///     et le logo lui-même occupe une zone beaucoup plus large qu'avant)
-///     et reste parfaitement centré horizontalement.
-///   - L'image d'en-tête ne contient donc plus QUE le logo ; le nom de
-///     l'école est imprimé juste après, séparément, en texte natif.
+/// ⚡ MISE EN PAGE DU REÇU
+/// Cette section ne touche AUCUNE logique d'impression, de
+/// communication avec l'imprimante (WritePrinter, spouleur, lp/CUPS),
+/// de confirmation de job, de file d'attente, de sauvegarde ou de
+/// journalisation : seule la PRÉSENTATION VISUELLE du reçu est
+/// concernée, et elle est volontairement identique à celle utilisée
+/// partout ailleurs dans l'application (même en-tête logo + nom
+/// d'école combinés dans une seule image, mêmes lignes compactes à 2
+/// colonnes, même longueur de ticket), afin que tous les reçus émis
+/// par l'application (Windows et macOS) aient rigoureusement le même
+/// visuel.
 class EscPosPrinterService {
   // ====================================================================
   // ⚡ NOUVEAU — JOURNALISATION CENTRALISÉE (CONSOLE + FICHIER SUR BUREAU)
@@ -649,12 +599,26 @@ Write-Output \$result
   // ====================================================================
   // ⚡ PRÉPARATION DU LOGO POUR UNE IMPRESSION NETTE
   // ====================================================================
+  // Une imprimante thermique n'a que 2 niveaux (noir/blanc). Envoyer une
+  // image en niveaux de gris ou en couleur oblige le générateur ESC/POS à
+  // faire du tramage (dithering) pour approximer les gris avec des points
+  // noirs/blancs — c'est ce qui rendait le logo flou et grisâtre. On
+  // convertit donc nous-mêmes le logo en noir et blanc NET (avec un
+  // contraste renforcé avant seuillage), pour que chaque pixel envoyé à
+  // l'imprimante soit déjà une décision claire noir/blanc — beaucoup plus
+  // net qu'un tramage automatique, surtout pour un logo simple (texte,
+  // formes, contours).
   static img.Image _prepareLogoForPrint(Uint8List logoBytes, int targetSize) {
     final decoded = img.decodeImage(logoBytes);
     if (decoded == null) {
       throw Exception('Logo illisible');
     }
 
+    // ---- Redimensionnement avec une interpolation de qualité ----
+    // Cubique en agrandissement (image source plus petite que la cible) :
+    // lisse les bords sans les rendre flous.
+    // Moyenne en réduction (image source plus grande que la cible) :
+    // évite le moiré/l'aliasing qui donne un rendu "sale" une fois tramé.
     final bool sourceIsSmaller =
         decoded.width < targetSize && decoded.height < targetSize;
     final img.Interpolation interp =
@@ -672,6 +636,7 @@ Write-Output \$result
           height: targetSize, interpolation: img.Interpolation.average);
     }
 
+    // ---- Conversion en noir/blanc net à fort contraste ----
     final gray = img.grayscale(resized);
     img.adjustColor(gray, contrast: 1.45);
 
@@ -685,126 +650,230 @@ Write-Output \$result
   }
 
   // ====================================================================
-  // ⚡ EN-TÊTE : UNIQUEMENT LE LOGO, AGRANDI ET CENTRÉ
-  // ⚡ MISE À JOUR (2026-09-17) — Cette image ne contient PLUS le nom de
-  // l'école (qui était auparavant dessiné "à la main" avec une police
-  // bitmap et un gras simulé, ce qui donnait un rendu fin et parfois mal
-  // centré selon la longueur du nom). Elle ne contient maintenant QUE le
-  // logo, agrandi et utilisant toute la largeur imprimable du papier
-  // 80 mm pour un rendu nettement plus grand qu'avant. Le nom de l'école
-  // est désormais imprimé séparément, juste après, en texte natif
-  // ESC/POS (voir `_schoolNameReceiptBytes`), exactement comme le nom de
-  // l'élève : gras natif, grande taille, et centré automatiquement par
-  // le générateur — donc toujours bien centré, quelle que soit sa
-  // longueur.
-  // Ce changement ne touche QUE la génération de l'image d'en-tête
-  // (aucune conséquence sur l'envoi ou la confirmation d'impression).
+  // ⚡ EN-TÊTE COMPOSITE : LOGO GAUCHE + NOM CENTRÉ + LOGO DROITE
   // ====================================================================
-
-  /// Largeur (en points/dots) de l'image d'en-tête : correspond à la
-  /// largeur imprimable standard d'un papier thermique 80 mm, pour que
-  /// le logo puisse occuper tout l'espace disponible.
-  static const int _headerWidth = 576;
+  // Une imprimante thermique ne peut pas mélanger texte ESC/POS et image
+  // sur la même ligne physique. Pour avoir "logo — nom de l'école — logo"
+  // sur une même ligne, on construit donc UNE SEULE image bitmap (logo
+  // dupliqué à gauche et à droite, nom du texte dessiné dessus, bien
+  // centré), qu'on imprime ensuite comme un seul bloc image. C'est
+  // exactement la même mise en page que les autres reçus de
+  // l'application, pour garder un visuel identique partout.
+  //
+  // Le nom de l'école est dessiné en gras simulé (traits épaissis) avec
+  // une police nettement plus grande (arial48) quand il tient sur la
+  // ligne du logo (cas normal) — sans agrandir la hauteur de l'en-tête.
+  // Si le nom est trop long pour tenir à cette taille, on repasse
+  // automatiquement à l'ancien comportement (police normale, retour à la
+  // ligne si nécessaire), pour ne jamais perdre une partie du nom.
+  static const int _headerWidth = 380;
 
   static img.Image _buildReceiptHeaderImage({
+    required String schoolName,
     required Uint8List logoBytes,
   }) {
-    const int margin = 12;
-    const int logoBox = 300; // ⚡ logo nettement plus grand qu'avant (170)
+    const int margin  = 6;
+    const int logoBox = 60;
 
-    final logo = _prepareLogoForPrint(logoBytes, logoBox);
+    final int textZoneLeft  = margin + logoBox + margin;
+    final int textZoneRight = _headerWidth - margin - logoBox - margin;
+    final int textZoneWidth =
+    (textZoneRight - textZoneLeft).clamp(40, _headerWidth);
 
-    final canvas =
-    img.Image(width: _headerWidth, height: logo.height + margin * 2);
+    // ---- Logo : nette, bien contrastée, redimensionnée avec qualité ----
+    img.Image? logo;
+    try {
+      logo = _prepareLogoForPrint(logoBytes, logoBox);
+    } catch (_) {
+      logo = null;
+    }
+
+    // ---- Choix de la police du nom : grande (48) si elle tient sur une
+    // seule ligne dans la zone entre les deux logos, sinon on repasse à
+    // la police normale (24) avec retour à la ligne comme avant. ----
+    final img.BitmapFont bigFont = img.arial48;
+    final img.BitmapFont normalFont = img.arial24;
+
+    String firstLine;
+    List<String> extraLines;
+    img.BitmapFont usedFont;
+
+    final safeNameBig = _safeText(schoolName.trim(), bigFont);
+    if (_textWidth(bigFont, safeNameBig) <= textZoneWidth) {
+      // Le nom entier tient sur la ligne du logo avec la grande police :
+      // c'est le cas idéal (le plus fréquent) — gras + grand, 0 ligne en plus.
+      firstLine = safeNameBig;
+      extraLines = [];
+      usedFont = bigFont;
+    } else {
+      // Repli : comportement d'avant, avec la police normale, découpage
+      // du nom en plusieurs lignes si besoin, pour ne rien perdre.
+      final words = schoolName.trim().split(RegExp(r'\s+'));
+      String line = '';
+      int cut = words.length;
+      for (int i = 0; i < words.length; i++) {
+        final candidate = line.isEmpty ? words[i] : '$line ${words[i]}';
+        if (_textWidth(normalFont, candidate) <= textZoneWidth ||
+            line.isEmpty) {
+          line = candidate;
+          cut = i + 1;
+        } else {
+          cut = i;
+          break;
+        }
+      }
+      final remainingWords = words.sublist(cut.clamp(0, words.length));
+
+      final List<String> wrapped = [];
+      if (remainingWords.isNotEmpty) {
+        final fullWidth = _headerWidth - 2 * margin;
+        String wline = '';
+        for (final w in remainingWords) {
+          final candidate = wline.isEmpty ? w : '$wline $w';
+          if (_textWidth(normalFont, candidate) <= fullWidth ||
+              wline.isEmpty) {
+            wline = candidate;
+          } else {
+            wrapped.add(wline);
+            wline = w;
+          }
+        }
+        if (wline.isNotEmpty) wrapped.add(wline);
+      }
+
+      firstLine = _safeText(line, normalFont);
+      extraLines = wrapped.map((l) => _safeText(l, normalFont)).toList();
+      usedFont = normalFont;
+    }
+
+    const int lineHeight   = 24;
+    final int topRowHeight = logo != null ? logoBox : (usedFont == bigFont ? 52 : 32);
+    final int extraHeight  =
+    extraLines.isEmpty ? 0 : (extraLines.length * lineHeight) + 4;
+    final int headerHeight = (margin * 2) + topRowHeight + extraHeight;
+
+    final canvas = img.Image(width: _headerWidth, height: headerHeight);
     img.fill(canvas, color: img.ColorRgb8(255, 255, 255));
 
-    // Logo centré horizontalement sur toute la largeur du papier.
-    final int lx = (((_headerWidth - logo.width) / 2).round())
-        .clamp(0, (_headerWidth - logo.width).clamp(0, _headerWidth));
-    img.compositeImage(canvas, logo, dstX: lx, dstY: margin);
+    // Logo gauche + logo droite (même image des deux côtés)
+    if (logo != null) {
+      final ly = margin + ((topRowHeight - logo.height) ~/ 2);
+      img.compositeImage(canvas, logo, dstX: margin, dstY: ly);
+      img.compositeImage(
+        canvas, logo,
+        dstX: _headerWidth - margin - logo.width,
+        dstY: ly,
+      );
+    }
+
+    // Première ligne du nom (ou nom entier), centrée entre les deux logos,
+    // dessinée en gras simulé (traits épaissis par superposition légère).
+    final int fontVisualHeight = usedFont == bigFont ? 48 : 24;
+    final int firstWidth = _textWidth(usedFont, firstLine);
+    final int fx = textZoneLeft +
+        (((textZoneWidth - firstWidth) / 2).round()).clamp(0, textZoneWidth);
+    final int fy = margin + ((topRowHeight - fontVisualHeight) / 2).round();
+    _drawBoldString(canvas, firstLine,
+        font: usedFont, x: fx, y: fy, color: img.ColorRgb8(0, 0, 0));
+
+    // Lignes suivantes (reste du nom, si repli en police normale),
+    // centrées sur toute la largeur, également en gras simulé.
+    int ey = margin + topRowHeight + 4;
+    for (final line in extraLines) {
+      final w = _textWidth(normalFont, line);
+      final ex = (((_headerWidth - w) / 2).round()).clamp(0, _headerWidth);
+      _drawBoldString(canvas, line,
+          font: normalFont, x: ex, y: ey, color: img.ColorRgb8(0, 0, 0));
+      ey += lineHeight;
+    }
 
     return canvas;
   }
 
-  // ====================================================================
-  // ⚡ NOM DE L'ÉCOLE : GRAS NATIF ESC/POS, GRAND, TOUJOURS BIEN CENTRÉ
-  // ⚡ NOUVEAU (2026-09-17) — Imprimé exactement comme le nom de l'élève
-  // (gras natif de l'imprimante + hauteur/largeur doublées), et centré
-  // via l'alignement natif du générateur (fiable quel que soit le
-  // nombre de caractères). Si le nom ne tient pas sur une seule ligne à
-  // cette taille, il est réparti automatiquement sur plusieurs lignes en
-  // coupant entre les mots (jamais au milieu d'un mot) ; chaque ligne
-  // reste en gras, grande taille, et centrée.
-  // ====================================================================
-
-  /// Nombre maximum de caractères par ligne pour un texte en gras à
-  /// taille double (hauteur ET largeur x2). Basé sur la largeur de
-  /// colonne déjà utilisée pour les séparateurs du reçu (32 caractères
-  /// en largeur normale), donc 16 caractères une fois la largeur
-  /// doublée.
-  static const int _schoolNameMaxCharsAtDoubleWidth = 16;
-
-  /// Découpe un texte en lignes d'au plus [maxChars] caractères, en ne
-  /// coupant qu'entre les mots (jamais au milieu d'un mot, même si un
-  /// mot isolé dépasse [maxChars]).
-  static List<String> _wrapWordsToWidth(String text, int maxChars) {
-    final words =
-    text.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
-    if (words.isEmpty) return [];
-
-    final List<String> lines = [];
-    String current = '';
-    for (final word in words) {
-      final candidate = current.isEmpty ? word : '$current $word';
-      if (candidate.length <= maxChars || current.isEmpty) {
-        current = candidate;
-      } else {
-        lines.add(current);
-        current = word;
-      }
+  /// Dessine un texte en gras simulé : les polices bitmap intégrées à la
+  /// librairie `image` n'ont pas de variante grasse, donc on superpose le
+  /// même texte à quelques pixels de décalage pour épaissir
+  /// artificiellement chaque trait. Effet visuel proche d'un vrai gras,
+  /// sans changer la hauteur occupée.
+  static void _drawBoldString(
+      img.Image canvas,
+      String text, {
+        required img.BitmapFont font,
+        required int x,
+        required int y,
+        required img.Color color,
+      }) {
+    const offsets = [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ];
+    for (final o in offsets) {
+      img.drawString(canvas, text,
+          font: font, x: x + o[0], y: y + o[1], color: color);
     }
-    if (current.isNotEmpty) lines.add(current);
-    return lines;
   }
 
-  /// Construit les octets ESC/POS du nom de l'école, en gras natif et
-  /// grande taille (comme le nom de l'élève), sur une ou plusieurs
-  /// lignes centrées selon sa longueur.
-  static List<int> _schoolNameReceiptBytes(
-      Generator generator, String schoolName) {
-    List<int> bytes = [];
-    final String name = schoolName.trim().toUpperCase();
-    if (name.isEmpty) return bytes;
-
-    final List<String> lines =
-    name.length <= _schoolNameMaxCharsAtDoubleWidth
-        ? [name]
-        : _wrapWordsToWidth(name, _schoolNameMaxCharsAtDoubleWidth);
-
-    for (final line in lines) {
-      bytes += generator.text(
-        line,
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size2,
-        ),
-      );
+  /// Largeur en pixels d'un texte pour une police bitmap donnée (même
+  /// logique que celle utilisée en interne par drawString, pour pouvoir
+  /// centrer nous-mêmes le texte avant de l'imprimer sur l'image).
+  static int _textWidth(img.BitmapFont font, String text) {
+    int width = 0;
+    for (final c in text.codeUnits) {
+      final ch = font.characters[c];
+      if (ch == null) continue;
+      width += ch.xAdvance;
     }
-    return bytes;
+    return width;
+  }
+
+  /// Les polices bitmap intégrées à la librairie `image` ne couvrent pas
+  /// forcément tous les caractères accentués français. On remplace ceux
+  /// qui manqueraient par leur équivalent non accentué, pour ne jamais
+  /// perdre silencieusement une lettre à l'impression (mieux vaut
+  /// "Ecole" que "cole"). Vérifie les glyphes de la police réellement
+  /// utilisée (passée en paramètre), puisqu'on utilise aussi arial48.
+  static String _safeText(String text, img.BitmapFont font) {
+    const replacements = {
+      'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+      'É': 'E', 'È': 'E', 'Ê': 'E', 'Ë': 'E',
+      'à': 'a', 'â': 'a', 'ä': 'a',
+      'À': 'A', 'Â': 'A', 'Ä': 'A',
+      'î': 'i', 'ï': 'i', 'Î': 'I', 'Ï': 'I',
+      'ô': 'o', 'ö': 'o', 'Ô': 'O', 'Ö': 'O',
+      'ù': 'u', 'û': 'u', 'ü': 'u', 'Ù': 'U', 'Û': 'U', 'Ü': 'U',
+      'ç': 'c', 'Ç': 'C',
+      'œ': 'oe', 'Œ': 'OE',
+      'ñ': 'n', 'Ñ': 'N',
+    };
+    final buffer = StringBuffer();
+    for (final char in text.split('')) {
+      final hasGlyph = font.characters.containsKey(char.codeUnitAt(0));
+      buffer.write(hasGlyph ? char : (replacements[char] ?? char));
+    }
+    return buffer.toString();
   }
 
   // ====================================================================
   // GÉNÉRER ET IMPRIMER UN REÇU COMPLET (paiement mensuel principal)
-  // ⚡ MISE À JOUR (2026-09-17) — Le mois payé est maintenant sur sa
-  // propre ligne centrée et en gras ; le montant REQUIS pour le mois
-  // est désormais affiché (il existait déjà en paramètre mais n'était
-  // jamais imprimé) ; un paramètre optionnel `noteExplicative` permet
-  // au code appelant de préciser le contexte du reçu (ex: "SOLDE DU
-  // MOIS PRÉCÉDENT") lorsqu'un paiement est scindé en plusieurs reçus.
-  // Aucun changement de logique d'impression/communication.
+  // ⚡ Impression AUTOMATIQUE — appelée juste après l'enregistrement d'un
+  // paiement. Ne concerne qu'UN SEUL mois. Le booléen retourné reflète
+  // le statut RÉEL et CONFIRMÉ de l'impression (voir
+  // `_confirmJobPrintedWindows` / `_confirmJobPrintedMacOS` ci-dessus).
   // ====================================================================
+  // Mise en page compacte pour économiser le papier :
+  //   - "N° Reçu" sur sa propre ligne, "ID Élève" et "Classe" sur la même
+  //     ligne, "Section" et "Date/Heure" sur la même ligne.
+  //   - Suppression des sauts de ligne purement décoratifs entre les blocs.
+  //   - Espace de signature et marge de découpe finale réduits.
+  // Toutes les informations affichées avant sont toujours présentes.
+  //
+  // Le paramètre optionnel `noteExplicative` (par défaut `null`, donc
+  // sans impact sur les appels existants) permet au code appelant
+  // d'afficher une mention supplémentaire juste sous le titre, par
+  // exemple "SOLDE DU MOIS PRÉCÉDENT" lorsqu'un paiement est scindé en
+  // plusieurs reçus.
   static Future<bool> printReceipt({
     required String printerName,
     required String schoolName,
@@ -820,8 +889,8 @@ Write-Output \$result
     required double totalDejaPayeAnnee,
     required double totalRequis,
     required List<Map<String, dynamic>> historiqueTransactions,
-    String? receiptNumber,
-    Uint8List? logoBytes,
+    String? receiptNumber, // Numéro de reçu (généré automatiquement si null)
+    Uint8List? logoBytes,  // ⚡ Logo choisi dans les Paramètres (optionnel)
     String? noteExplicative,
   }) async {
     _log('printReceipt appelé — imprimante="$printerName" élève='
@@ -838,6 +907,7 @@ Write-Output \$result
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
 
+      // Table de caractères pour les accents français (é, è, à, ç...)
       generator.setGlobalCodeTable('CP1252');
 
       final now = DateTime.now();
@@ -846,6 +916,7 @@ Write-Output \$result
       final String heure =
           '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
+      // Numéro de reçu (auto si non fourni)
       final String numRecu = receiptNumber ??
           'RCP-${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}-${now.hour}${now.minute}${now.second}';
 
@@ -856,15 +927,40 @@ Write-Output \$result
       );
 
       if (logoBytes != null) {
+        // ⚡ Logo gauche + nom centré + logo droite, sur une seule image.
         try {
-          final headerImage = _buildReceiptHeaderImage(logoBytes: logoBytes);
+          final headerImage = _buildReceiptHeaderImage(
+            schoolName: schoolName,
+            logoBytes: logoBytes,
+          );
           bytes += generator.image(headerImage);
         } catch (e, st) {
+          // Si la construction de l'image échoue pour une raison
+          // quelconque (logo corrompu, etc.), on retombe sur le texte
+          // simple pour ne jamais bloquer l'impression du reçu.
           _log('EXCEPTION génération du logo (printReceipt), logo ignoré : '
               '$e\n$st');
+          bytes += generator.text(
+            schoolName.toUpperCase(),
+            styles: const PosStyles(
+              align: PosAlign.center,
+              bold: true,
+              height: PosTextSize.size2,
+              width: PosTextSize.size2,
+            ),
+          );
         }
+      } else {
+        bytes += generator.text(
+          schoolName.toUpperCase(),
+          styles: const PosStyles(
+            align: PosAlign.center,
+            bold: true,
+            height: PosTextSize.size2,
+            width: PosTextSize.size2,
+          ),
+        );
       }
-      bytes += _schoolNameReceiptBytes(generator, schoolName);
 
       bytes += generator.text(
         'REÇU DE PAIEMENT',
@@ -875,7 +971,7 @@ Write-Output \$result
         ),
       );
 
-      // ⚡ NOUVEAU — mention explicative optionnelle (ex: "SOLDE DU MOIS
+      // ⚡ Mention explicative optionnelle (ex: "SOLDE DU MOIS
       // PRÉCÉDENT" / "NOUVEAU MOIS"), utile quand un même paiement donne
       // lieu à plusieurs reçus distincts. N'affiche rien si non fourni.
       if (noteExplicative != null && noteExplicative.trim().isNotEmpty) {
@@ -894,18 +990,17 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== NOM COMPLET ÉLÈVE (en grand, centré) ====
+      // ==================== NOM COMPLET ÉLÈVE (TOUT EN HAUT) ====================
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: const PosStyles(bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
-          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size2,
+          width: PosTextSize.size1,
         ),
       );
       bytes += generator.text(
@@ -913,7 +1008,7 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== INFOS ÉLÈVE ====================
+      // ==================== INFOS ÉLÈVE (compactées 2 par ligne) ====================
       bytes += generator.row([
         PosColumn(
           text: 'Reçu : $numRecu',
@@ -951,45 +1046,30 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-
-      // ⚡ Mois payé : sur sa propre ligne, centrée, en gras.
-      bytes += generator.text(
-        'Mois payé : ${moisPaye.toUpperCase()}',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-
-      // ⚡ NOUVEAU — Montant requis pour ce mois, désormais affiché.
       bytes += generator.row([
         PosColumn(
-          text: 'Montant requis :',
+          text: 'Mois payé :',
+          width: 6,
+          styles: const PosStyles(bold: true),
+        ),
+        PosColumn(
+          text: moisPaye,
+          width: 6,
+          styles: const PosStyles(bold: true),
+        ),
+      ]);
+      bytes += generator.row([
+        PosColumn(
+          text: 'Montant payé :',
           width: 7,
           styles: const PosStyles(bold: true),
         ),
         PosColumn(
-          text: '${montantRequis.toStringAsFixed(0)} FC',
+          text: '${montantPaye.toStringAsFixed(0)} FC',
           width: 5,
-          styles: const PosStyles(bold: true, align: PosAlign.right),
+          styles: const PosStyles(bold: true),
         ),
       ]);
-
-      // Montant payé mis en valeur : gros, centré, sur sa propre ligne
-      bytes += generator.text(
-        'MONTANT PAYÉ',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '${montantPaye.toStringAsFixed(0)} FC',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size2,
-        ),
-      );
 
       if (resteAPayerMois > 0) {
         bytes += generator.row([
@@ -1058,9 +1138,26 @@ Write-Output \$result
   }
 
   // ====================================================================
-  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS PAIEMENTS
-  // ⚡ AMÉLIORATION ESTHÉTIQUE — mêmes retouches que printReceipt : nom
-  // centré et agrandi, total payé mis en valeur sur sa propre ligne.
+  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS PAIEMENTS DÉJÀ
+  // ENREGISTRÉS DU FRAIS MENSUEL PRINCIPAL.
+  //
+  // Utilisée pour 3 cas d'usage, tous à partir de l'écran "Paiements des
+  // Élèves" (historique d'un élève) et depuis le Dashboard Admin après
+  // validation d'un lot de paiements :
+  //   1. Réimprimer le reçu d'UN SEUL paiement déjà effectué (reçu perdu
+  //      → liste `transactions` d'un seul élément).
+  //   2. Réimprimer un reçu regroupant PLUSIEURS paiements sélectionnés
+  //      par l'utilisateur dans l'historique.
+  //   3. Réimprimer TOUT l'historique de paiement d'un élève en un seul
+  //      reçu (ex: un élève qui a payé son mois en plusieurs coupures,
+  //      ou après validation groupée de plusieurs mois par l'Admin).
+  //
+  // Chaque entrée de `transactions` doit contenir au minimum 'mois' et
+  // 'amount' (ou 'montant'), et idéalement 'date'. Le reçu reste compact
+  // (même esprit que printReceipt : économie de papier) mais soigné
+  // visuellement (logo + nom de l'école en en-tête, séparateurs nets,
+  // montants alignés à droite). Le booléen retourné reflète lui aussi le
+  // statut RÉEL et CONFIRMÉ de l'impression.
   // ====================================================================
   static Future<bool> printTransactionsReceipt({
     required String printerName,
@@ -1114,14 +1211,35 @@ Write-Output \$result
 
       if (logoBytes != null) {
         try {
-          final headerImage = _buildReceiptHeaderImage(logoBytes: logoBytes);
+          final headerImage = _buildReceiptHeaderImage(
+            schoolName: schoolName,
+            logoBytes: logoBytes,
+          );
           bytes += generator.image(headerImage);
         } catch (e, st) {
           _log('EXCEPTION génération du logo '
               '(printTransactionsReceipt), logo ignoré : $e\n$st');
+          bytes += generator.text(
+            schoolName.toUpperCase(),
+            styles: const PosStyles(
+              align: PosAlign.center,
+              bold: true,
+              height: PosTextSize.size2,
+              width: PosTextSize.size2,
+            ),
+          );
         }
+      } else {
+        bytes += generator.text(
+          schoolName.toUpperCase(),
+          styles: const PosStyles(
+            align: PosAlign.center,
+            bold: true,
+            height: PosTextSize.size2,
+            width: PosTextSize.size2,
+          ),
+        );
       }
-      bytes += _schoolNameReceiptBytes(generator, schoolName);
 
       bytes += generator.text(
         duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : titre,
@@ -1140,18 +1258,17 @@ Write-Output \$result
         styles: const PosStyles(align: PosAlign.center),
       );
 
-      // ==================== NOM COMPLET ÉLÈVE (en grand, centré) ====
+      // ==================== NOM COMPLET ÉLÈVE ====================
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: const PosStyles(bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
-          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size2,
+          width: PosTextSize.size1,
         ),
       );
       bytes += generator.text(
@@ -1209,6 +1326,7 @@ Write-Output \$result
       );
 
       double total = 0;
+      // Trie chronologiquement (par date) pour une lecture claire.
       final sorted = List<Map<String, dynamic>>.from(transactions)
         ..sort((a, b) {
           final dateA = (a['date'] ?? '').toString();
@@ -1248,21 +1366,19 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-
-      // ⚡ Total payé mis en valeur : gros, centré, sur sa propre ligne
-      bytes += generator.text(
-        'TOTAL PAYÉ',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '${total.toStringAsFixed(0)} FC',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size2,
+      bytes += generator.row([
+        PosColumn(
+          text: 'TOTAL PAYÉ :',
+          width: 6,
+          styles: const PosStyles(bold: true, height: PosTextSize.size2),
         ),
-      );
+        PosColumn(
+          text: '${total.toStringAsFixed(0)} FC',
+          width: 6,
+          styles: const PosStyles(
+              bold: true, height: PosTextSize.size2, align: PosAlign.right),
+        ),
+      ]);
       bytes += generator.text(
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
@@ -1311,9 +1427,15 @@ Write-Output \$result
   }
 
   // ====================================================================
-  // PETIT REÇU POUR UN "AUTRE FRAIS"
-  // ⚡ AMÉLIORATION ESTHÉTIQUE — nom centré et agrandi, montant mis en
-  // valeur sur sa propre ligne.
+  // PETIT REÇU POUR UN "AUTRE FRAIS" (frais éphémère)
+  // ⚡ Impression AUTOMATIQUE — appelée juste après le paiement d'un seul
+  // "autre frais". Volontairement plus court que le reçu de paiement
+  // mensuel : nom de l'école, titre du frais (ex: "Frais de l'État"),
+  // nom de l'élève, classe, date de paiement, montant, et une ligne
+  // signature. "Classe" et "Section" combinées sur une même ligne,
+  // signature réduite, même principe que printReceipt. Aucune
+  // information retirée. Le booléen retourné reflète le statut RÉEL et
+  // CONFIRMÉ de l'impression.
   // ====================================================================
   static Future<bool> printAutreFraisReceipt({
     required String printerName,
@@ -1323,7 +1445,7 @@ Write-Output \$result
     required String classe,
     required String section,
     required double montant,
-    Uint8List? logoBytes,
+    Uint8List? logoBytes, // optionnel, rétro-compatible
     bool duplicata = false,
   }) async {
     _log('printAutreFraisReceipt appelé — imprimante="$printerName" '
@@ -1356,18 +1478,38 @@ Write-Output \$result
 
       if (logoBytes != null) {
         try {
-          final headerImage = _buildReceiptHeaderImage(logoBytes: logoBytes);
+          final headerImage = _buildReceiptHeaderImage(
+            schoolName: schoolName,
+            logoBytes: logoBytes,
+          );
           bytes += generator.image(headerImage);
         } catch (e, st) {
           _log('EXCEPTION génération du logo '
               '(printAutreFraisReceipt), logo ignoré : $e\n$st');
+          bytes += generator.text(
+            schoolName.toUpperCase(),
+            styles: const PosStyles(
+              align: PosAlign.center,
+              bold: true,
+              height: PosTextSize.size2,
+              width: PosTextSize.size2,
+            ),
+          );
         }
+      } else {
+        bytes += generator.text(
+          schoolName.toUpperCase(),
+          styles: const PosStyles(
+            align: PosAlign.center,
+            bold: true,
+            height: PosTextSize.size2,
+            width: PosTextSize.size2,
+          ),
+        );
       }
-      bytes += _schoolNameReceiptBytes(generator, schoolName);
 
       bytes += generator.text(
-        duplicata
-            ? '${titreFrais.toUpperCase()} (DUPLICATA)'
+        duplicata ? '${titreFrais.toUpperCase()} (DUPLICATA)'
             : titreFrais.toUpperCase(),
         styles: const PosStyles(
           align: PosAlign.center,
@@ -1382,15 +1524,14 @@ Write-Output \$result
 
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: const PosStyles(bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
-          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size2,
+          width: PosTextSize.size1,
         ),
       );
 
@@ -1419,21 +1560,18 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-
-      // ⚡ Montant payé mis en valeur : gros, centré, sur sa propre ligne
-      bytes += generator.text(
-        'MONTANT PAYÉ',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '${montant.toStringAsFixed(0)} FC',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size2,
+      bytes += generator.row([
+        PosColumn(
+          text: 'Montant payé :',
+          width: 7,
+          styles: const PosStyles(bold: true),
         ),
-      );
+        PosColumn(
+          text: '${montant.toStringAsFixed(0)} FC',
+          width: 5,
+          styles: const PosStyles(bold: true),
+        ),
+      ]);
       bytes += generator.text(
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
@@ -1476,9 +1614,21 @@ Write-Output \$result
   }
 
   // ====================================================================
-  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS "AUTRES FRAIS"
-  // ⚡ AMÉLIORATION ESTHÉTIQUE — nom centré et agrandi, total payé mis
-  // en valeur sur sa propre ligne.
+  // RÉIMPRESSION MANUELLE : REÇU REGROUPANT PLUSIEURS "AUTRES FRAIS" DÉJÀ
+  // PAYÉS PAR UN MÊME ÉLÈVE.
+  //
+  // Même logique que `printTransactionsReceipt`, mais pour la liste des
+  // frais additionnels (nom du frais + montant + date), avec un total en
+  // bas. Utilisée pour :
+  //   1. Réimprimer le reçu d'UN SEUL "autre frais" déjà payé (reçu
+  //      perdu).
+  //   2. Réimprimer un reçu regroupant PLUSIEURS "autres frais" payés par
+  //      le même élève (sélection ou historique complet).
+  //   3. L'impression automatique groupée depuis le Dashboard Admin après
+  //      validation d'un lot de paiements d'"autres frais".
+  // Chaque entrée de `paiements` doit contenir 'nom' (le nom du frais),
+  // 'montant' et idéalement 'date'. Le booléen retourné reflète lui aussi
+  // le statut RÉEL et CONFIRMÉ de l'impression.
   // ====================================================================
   static Future<bool> printAutresFraisTransactionsReceipt({
     required String printerName,
@@ -1525,15 +1675,36 @@ Write-Output \$result
 
       if (logoBytes != null) {
         try {
-          final headerImage = _buildReceiptHeaderImage(logoBytes: logoBytes);
+          final headerImage = _buildReceiptHeaderImage(
+            schoolName: schoolName,
+            logoBytes: logoBytes,
+          );
           bytes += generator.image(headerImage);
         } catch (e, st) {
           _log('EXCEPTION génération du logo '
               '(printAutresFraisTransactionsReceipt), logo ignoré : '
               '$e\n$st');
+          bytes += generator.text(
+            schoolName.toUpperCase(),
+            styles: const PosStyles(
+              align: PosAlign.center,
+              bold: true,
+              height: PosTextSize.size2,
+              width: PosTextSize.size2,
+            ),
+          );
         }
+      } else {
+        bytes += generator.text(
+          schoolName.toUpperCase(),
+          styles: const PosStyles(
+            align: PosAlign.center,
+            bold: true,
+            height: PosTextSize.size2,
+            width: PosTextSize.size2,
+          ),
+        );
       }
-      bytes += _schoolNameReceiptBytes(generator, schoolName);
 
       bytes += generator.text(
         duplicata ? 'AUTRES FRAIS (DUPLICATA)' : 'REÇU — AUTRES FRAIS',
@@ -1550,15 +1721,14 @@ Write-Output \$result
 
       bytes += generator.text(
         'Nom complet :',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: const PosStyles(bold: true),
       );
       bytes += generator.text(
         studentName.toUpperCase(),
         styles: const PosStyles(
-          align: PosAlign.center,
           bold: true,
           height: PosTextSize.size2,
-          width: PosTextSize.size2,
+          width: PosTextSize.size1,
         ),
       );
 
@@ -1630,21 +1800,19 @@ Write-Output \$result
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),
       );
-
-      // ⚡ Total payé mis en valeur : gros, centré, sur sa propre ligne
-      bytes += generator.text(
-        'TOTAL PAYÉ',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '${total.toStringAsFixed(0)} FC',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size2,
+      bytes += generator.row([
+        PosColumn(
+          text: 'TOTAL PAYÉ :',
+          width: 6,
+          styles: const PosStyles(bold: true, height: PosTextSize.size2),
         ),
-      );
+        PosColumn(
+          text: '${total.toStringAsFixed(0)} FC',
+          width: 6,
+          styles: const PosStyles(
+              bold: true, height: PosTextSize.size2, align: PosAlign.right),
+        ),
+      ]);
       bytes += generator.text(
         '--------------------------------',
         styles: const PosStyles(align: PosAlign.center),

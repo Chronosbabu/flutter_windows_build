@@ -1,5 +1,5 @@
 class Eleve {
-  String id;                    // Nouvel ID unique
+  String id;
   String nom;
   String postNom;
   String prenom;
@@ -8,34 +8,18 @@ class Eleve {
   Map<String, double> paid = {};
   List<Map<String, dynamic>> transactions = [];
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — INFORMATIONS ADDITIONNELLES SUR L'IDENTITÉ DE L'ÉLÈVE
-  // ==========================================================================
   String pereNom;
   String mereNom;
   String adresse;
-  String dateNaissance; // format "JJ/MM/AAAA", chaîne vide si non renseignée
-  String? photoBase64;  // photo encodée en base64, ou null si aucune photo
-  Map<String, String> customFields = {}; // question personnalisée -> réponse
+  String dateNaissance;
+  String? photoBase64;
+  Map<String, String> customFields = {};
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — EXCEPTION DE PAIEMENT PAR ÉLÈVE (MONTANT MENSUEL FIXE)
-  // ==========================================================================
-  // Certaines écoles font payer un montant différent à certains élèves
-  // précis (ex: enfant d'un enseignant), indépendamment du frais normal de
-  // leur section/classe. Quand ce champ est renseigné (non-null), il
-  // REMPLACE, pour CHAQUE mois de l'année, le montant requis normalement
-  // calculé via la section/classe de l'élève. Si ce champ est `null`
-  // (valeur par défaut), rien ne change : l'élève continue de payer le
-  // montant normal de sa section/classe, exactement comme avant.
-  //
-  // Ce champ est lu UNIQUEMENT via `FraisScolaires.getRequiredForMonthForEleve`
-  // (voir frais_scolaires.dart), qui est la seule méthode utilisée partout
-  // dans l'application pour calculer le montant requis d'un élève précis
-  // (paiement, reçus, PDF, "Liste en ordre"...). Cela garantit qu'une
-  // exception par élève est toujours prise en compte de façon identique,
-  // partout, sans aucune logique dupliquée.
   double? montantMensuelPersonnalise;
+
+  Map<String, double> exceptionsMoisPersonnalisees = {};
+
+  String? moisDebloque;
 
   Eleve({
     required this.id,
@@ -51,7 +35,10 @@ class Eleve {
     this.photoBase64,
     Map<String, String>? customFields,
     this.montantMensuelPersonnalise,
-  }) : customFields = customFields ?? {};
+    Map<String, double>? exceptionsMoisPersonnalisees,
+    this.moisDebloque,
+  })  : customFields = customFields ?? {},
+        exceptionsMoisPersonnalisees = exceptionsMoisPersonnalisees ?? {};
 
   bool get hasCarteInfo =>
       pereNom.trim().isNotEmpty ||
@@ -76,8 +63,9 @@ class Eleve {
     'dateNaissance': dateNaissance,
     'photoBase64': photoBase64,
     'customFields': customFields,
-    // ⚡ NOUVEAU — exception de paiement par élève
     'montantMensuelPersonnalise': montantMensuelPersonnalise,
+    'exceptionsMoisPersonnalisees': exceptionsMoisPersonnalisees,
+    'moisDebloque': moisDebloque,
   };
 
   factory Eleve.fromJson(Map<String, dynamic> json) {
@@ -98,6 +86,12 @@ class Eleve {
           : {},
       montantMensuelPersonnalise:
       (json['montantMensuelPersonnalise'] as num?)?.toDouble(),
+      exceptionsMoisPersonnalisees:
+      (json['exceptionsMoisPersonnalisees'] as Map? ?? {}).map(
+            (key, value) =>
+            MapEntry(key.toString(), (value as num).toDouble()),
+      ),
+      moisDebloque: json['moisDebloque'] as String?,
     )
       ..paid = Map<String, double>.from(json['paid'] ?? {})
       ..transactions = (json['transactions'] as List? ?? [])

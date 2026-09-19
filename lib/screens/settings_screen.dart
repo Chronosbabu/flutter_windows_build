@@ -14,6 +14,21 @@ import 'recovery_screen.dart';
 import 'aide.dart';
 import 'grille_frais_screen.dart';
 
+class _ExceptionDraft {
+  final Eleve eleve;
+  bool tousLesMois;
+  final Set<String> mois;
+  final TextEditingController montantController;
+
+  _ExceptionDraft({
+    required this.eleve,
+    required this.tousLesMois,
+    Set<String>? mois,
+    String montant = '',
+  })  : mois = mois ?? <String>{},
+        montantController = TextEditingController(text: montant);
+}
+
 class SettingsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const SettingsScreen({super.key, required this.fraisScolaires});
@@ -34,15 +49,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? selectedClasseScopeForException;
   final TextEditingController newClasseController = TextEditingController();
 
-  // ==========================================================================
-  // ⚡ EXCEPTION DE PAIEMENT PAR ÉLÈVE
-  // ==========================================================================
   final TextEditingController eleveExceptionSearchController =
   TextEditingController();
-  final TextEditingController montantPersonnaliseController =
-  TextEditingController();
-  Eleve? _eleveSelectionnePourException;
   List<Eleve> _resultatsRechercheEleveException = [];
+  final List<_ExceptionDraft> _brouillonsException = [];
 
   List<String> _availablePrinters = [];
   String? _selectedPrinterName;
@@ -69,7 +79,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     eleveExceptionSearchController.dispose();
-    montantPersonnaliseController.dispose();
+    for (final d in _brouillonsException) {
+      d.montantController.dispose();
+    }
     super.dispose();
   }
 
@@ -1292,70 +1304,146 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // ==========================================================================
-  // ⚡ EXCEPTION DE PAIEMENT PAR ÉLÈVE
-  // ==========================================================================
   void _rechercherElevesPourException(String query) {
     final q = query.trim().toLowerCase();
     setState(() {
       if (q.isEmpty) {
         _resultatsRechercheEleveException = [];
       } else {
+        final dejaChoisis = _brouillonsException.map((d) => d.eleve.id).toSet();
         _resultatsRechercheEleveException = widget
             .fraisScolaires.currentData.eleves
             .where((e) =>
-        '${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase().contains(q) ||
-            e.id.toLowerCase().contains(q))
+        !dejaChoisis.contains(e.id) &&
+            ('${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase().contains(q) ||
+                e.id.toLowerCase().contains(q)))
             .take(15)
             .toList();
       }
     });
   }
 
-  void _selectionnerEleveException(Eleve eleve) {
+  void _ajouterBrouillonException(Eleve eleve) {
+    if (_brouillonsException.any((d) => d.eleve.id == eleve.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Cet élève est déjà dans la liste en cours de modification")),
+      );
+      return;
+    }
+    bool tousLesMois = true;
+    Set<String> mois = <String>{};
+    String montant = '';
+    if (eleve.exceptionsMoisPersonnalisees.isNotEmpty) {
+      tousLesMois = false;
+      mois = eleve.exceptionsMoisPersonnalisees.keys.toSet();
+      final valeurs = eleve.exceptionsMoisPersonnalisees.values.toSet();
+      if (valeurs.length == 1) {
+        montant = valeurs.first.toStringAsFixed(0);
+      }
+    } else if (eleve.montantMensuelPersonnalise != null) {
+      montant = eleve.montantMensuelPersonnalise!.toStringAsFixed(0);
+    }
     setState(() {
-      _eleveSelectionnePourException = eleve;
-      eleveExceptionSearchController.text =
-      '${eleve.nom} ${eleve.postNom} ${eleve.prenom}';
+      _brouillonsException.add(_ExceptionDraft(
+        eleve: eleve,
+        tousLesMois: tousLesMois,
+        mois: mois,
+        montant: montant,
+      ));
+      eleveExceptionSearchController.clear();
       _resultatsRechercheEleveException = [];
-      montantPersonnaliseController.text =
-      eleve.montantMensuelPersonnalise != null
-          ? eleve.montantMensuelPersonnalise!.toStringAsFixed(0)
-          : '';
     });
   }
 
-  Future<void> _enregistrerMontantPersonnalise() async {
-    final eleve = _eleveSelectionnePourException;
-    if (eleve == null) {
+  void _retirerBrouillonException(_ExceptionDraft draft) {
+    setState(() {
+      _brouillonsException.remove(draft);
+    });
+    draft.montantController.dispose();
+  }
+
+  Future<void> _enregistrerBrouillonsException() async {
+    if (_brouillonsException.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content:
-            Text("Veuillez d'abord rechercher et sélectionner un élève")),
+            content: Text("Veuillez d'abord rechercher et ajouter au moins un élève")),
       );
       return;
     }
+
+    final List<Map<String, dynamic>> lot = [];
+    final List<MapEntry<Eleve, double>> montantsGlobaux = [];
+
+    for (final d in _brouillonsException) {
+      final nomComplet = '${d.eleve.nom} ${d.eleve.postNom} ${d.eleve.prenom}';
+      final montant = double.tryParse(d.montantController.text.trim());
+      if (montant == null || montant < 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                "Montant invalide pour $nomComplet (entrez 0 pour un mois gratuit)"),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+      if (d.tousLesMois) {
+        if (montant > 0) {
+          montantsGlobaux.add(MapEntry(d.eleve, montant));
+        } else {
+          lot.add({
+            'eleve': d.eleve,
+            'exceptions': <String, double>{
+              for (final m in widget.fraisScolaires.months) m: 0.0,
+            },
+          });
+        }
+      } else {
+        if (d.mois.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("Choisissez au moins un mois pour $nomComplet"),
+              backgroundColor: Colors.red,
+            ),
+          );
+          return;
+        }
+        lot.add({
+          'eleve': d.eleve,
+          'exceptions': <String, double>{
+            for (final m in d.mois) m: montant,
+          },
+        });
+      }
+    }
+
     if (!await _verifyBackupPassword()) return;
 
-    final montant = double.tryParse(montantPersonnaliseController.text.trim());
-    if (montant == null || montant <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Veuillez entrer un montant valide")),
-      );
-      return;
+    for (final entree in montantsGlobaux) {
+      await widget.fraisScolaires
+          .setMontantMensuelPersonnalise(entree.key, entree.value);
+    }
+    if (lot.isNotEmpty) {
+      await widget.fraisScolaires.setExceptionsMoisPourPlusieursEleves(lot);
     }
 
-    await widget.fraisScolaires.setMontantMensuelPersonnalise(eleve, montant);
+    final int total = _brouillonsException.length;
+    for (final d in _brouillonsException) {
+      d.montantController.dispose();
+    }
 
     if (mounted) {
-      setState(() {});
+      setState(() {
+        _brouillonsException.clear();
+        eleveExceptionSearchController.clear();
+        _resultatsRechercheEleveException = [];
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            "✅ Montant personnalisé de ${montant.toStringAsFixed(0)} FC/mois "
-                "fixé pour ${eleve.nom} ${eleve.postNom} ${eleve.prenom}. "
-                "Ses paiements déjà enregistrés ont été recalculés "
-                "automatiquement pour rester cohérents.",
+            "✅ Exceptions enregistrées pour $total élève(s). Leurs paiements "
+                "déjà enregistrés ont été recalculés automatiquement pour "
+                "rester cohérents.",
           ),
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 5),
@@ -1364,15 +1452,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _retirerMontantPersonnalise(Eleve eleve) async {
+  Future<void> _retirerToutesExceptionsEleve(Eleve eleve) async {
     if (!await _verifyBackupPassword()) return;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Retirer l'exception ?"),
+        title: const Text("Retirer les exceptions ?"),
         content: Text(
-          "Voulez-vous vraiment retirer le montant personnalisé de "
-              "${eleve.nom} ${eleve.postNom} ${eleve.prenom} ?\n\n"
+          "Voulez-vous vraiment retirer toutes les exceptions de paiement de "
+              "${eleve.nom} ${eleve.postNom} ${eleve.prenom} (montant "
+              "personnalisé et exceptions par mois) ?\n\n"
               "Il repaiera ensuite le montant normal de sa section/classe, "
               "et ses paiements déjà enregistrés seront recalculés "
               "automatiquement selon ce montant normal.",
@@ -1392,26 +1481,196 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (confirm == true) {
       await widget.fraisScolaires.setMontantMensuelPersonnalise(eleve, null);
+      await widget.fraisScolaires.removeToutesExceptionsMoisPourEleve(eleve);
       if (mounted) {
+        final brouillons =
+        _brouillonsException.where((d) => d.eleve.id == eleve.id).toList();
         setState(() {
-          if (_eleveSelectionnePourException?.id == eleve.id) {
-            _eleveSelectionnePourException = null;
-            eleveExceptionSearchController.clear();
-            montantPersonnaliseController.clear();
+          for (final d in brouillons) {
+            _brouillonsException.remove(d);
           }
         });
+        for (final d in brouillons) {
+          d.montantController.dispose();
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
               content: Text(
-                  "Exception retirée — l'élève repaie le montant normal de sa section/classe")),
+                  "Exceptions retirées — l'élève repaie le montant normal de sa section/classe")),
         );
       }
     }
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — OPTIONS (regroupement facultatif de sections)
-  // ==========================================================================
+  Future<void> _retirerExceptionMois(Eleve eleve, String mois) async {
+    if (!await _verifyBackupPassword()) return;
+    await widget.fraisScolaires.removeExceptionMoisPourEleve(eleve, mois);
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Exception de $mois retirée pour ${eleve.nom} ${eleve.prenom}")),
+      );
+    }
+  }
+
+  Widget _buildBrouillonException(_ExceptionDraft d) {
+    final nomComplet = '${d.eleve.nom} ${d.eleve.postNom} ${d.eleve.prenom}';
+    return Card(
+      key: ValueKey('draft_${d.eleve.id}'),
+      margin: const EdgeInsets.only(top: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.person, color: Colors.indigo, size: 18),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '$nomComplet (${d.eleve.classe} - ${d.eleve.section})',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, color: Colors.indigo),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  tooltip: "Retirer de la liste",
+                  onPressed: () => _retirerBrouillonException(d),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              children: [
+                ChoiceChip(
+                  label: const Text("Tous les mois"),
+                  selected: d.tousLesMois,
+                  onSelected: (_) => setState(() => d.tousLesMois = true),
+                ),
+                ChoiceChip(
+                  label: const Text("Certains mois"),
+                  selected: !d.tousLesMois,
+                  onSelected: (_) => setState(() => d.tousLesMois = false),
+                ),
+              ],
+            ),
+            if (!d.tousLesMois) ...[
+              const SizedBox(height: 8),
+              const Text(
+                "Cochez le ou les mois concernés (les autres mois restent au "
+                    "montant normal de la section/classe) :",
+                style: TextStyle(fontSize: 11.5, color: Colors.grey),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: widget.fraisScolaires.months
+                    .map((m) => FilterChip(
+                  label: Text(m),
+                  selected: d.mois.contains(m),
+                  onSelected: (sel) => setState(() {
+                    if (sel) {
+                      d.mois.add(m);
+                    } else {
+                      d.mois.remove(m);
+                    }
+                  }),
+                ))
+                    .toList(),
+              ),
+            ],
+            const SizedBox(height: 10),
+            TextField(
+              controller: d.montantController,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: d.tousLesMois
+                    ? "Montant mensuel fixe pour tous les mois (FC)"
+                    : "Montant pour les mois cochés (FC)",
+                helperText: "Entrez 0 pour rendre le mois gratuit (rien à payer)",
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCarteEleveException(Eleve e) {
+    final moisConcernes = widget.fraisScolaires.months
+        .where((m) => e.exceptionsMoisPersonnalisees.containsKey(m))
+        .toList();
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.star, color: Colors.indigo),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('${e.nom} ${e.postNom} ${e.prenom}',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text('${e.classe} - ${e.section}',
+                          style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
+                  tooltip: "Modifier",
+                  onPressed: () => _ajouterBrouillonException(e),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+                  tooltip: "Retirer toutes les exceptions",
+                  onPressed: () => _retirerToutesExceptionsEleve(e),
+                ),
+              ],
+            ),
+            if (e.montantMensuelPersonnalise != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  "Tous les mois : ${e.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois"
+                      "${moisConcernes.isNotEmpty ? ' (sauf les mois précisés ci-dessous)' : ''}",
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, color: Colors.indigo, fontSize: 12.5),
+                ),
+              ),
+            if (moisConcernes.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: moisConcernes.map((m) {
+                    final v = e.exceptionsMoisPersonnalisees[m] ?? 0;
+                    return InputChip(
+                      label: Text(v <= 0
+                          ? "$m : Gratuit"
+                          : "$m : ${v.toStringAsFixed(0)} FC"),
+                      onDeleted: () => _retirerExceptionMois(e, m),
+                    );
+                  }).toList(),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _addOptionDialog() async {
     if (!await _verifyBackupPassword()) return;
     final controller = TextEditingController();
@@ -1858,7 +2117,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   .toList(),
             ),
 
-            // ⚡ NOUVEAU — Gestion des Options (regroupement facultatif de sections)
             ..._buildOptionsSection(),
 
             const Divider(),
@@ -2208,21 +2466,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: const Text("Ajouter / Modifier Exception"),
             ),
 
-            // ==========================================================
-            // ⚡ EXCEPTION DE PAIEMENT PAR ÉLÈVE
-            // ==========================================================
             const Divider(),
             const Text("Exception de Paiement par Élève",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
             const Text(
-              "Pour un élève précis qui doit payer un montant différent de "
-                  "celui de sa section/classe (ex: enfant d'un enseignant). "
-                  "Une fois fixé, ce montant remplace, pour TOUS les mois de "
-                  "l'année, celui de sa section/classe — partout dans "
-                  "l'application (paiement, reçus, PDF, liste en ordre) — "
-                  "sans que cela touche les autres élèves ni le "
-                  "fonctionnement normal du système.",
+              "Pour un ou plusieurs élèves précis qui doivent payer un montant "
+                  "différent de celui de leur section/classe (ex: enfant d'un "
+                  "enseignant). Recherchez les élèves un par un : chacun est "
+                  "ajouté à la liste ci-dessous, et vous choisissez pour lui "
+                  "soit \"Tous les mois\", soit un ou plusieurs mois précis "
+                  "(les autres mois restent au montant normal). Entrez 0 pour "
+                  "qu'un mois soit gratuit. Vous enregistrez ensuite tout "
+                  "d'un seul coup.",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
@@ -2233,17 +2489,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 prefixIcon: Icon(Icons.search),
                 hintText: "Ex: BARAKA ou BB26B10",
               ),
-              onChanged: (value) {
-                if (_eleveSelectionnePourException != null &&
-                    value !=
-                        '${_eleveSelectionnePourException!.nom} '
-                            '${_eleveSelectionnePourException!.postNom} '
-                            '${_eleveSelectionnePourException!.prenom}') {
-                  _eleveSelectionnePourException = null;
-                  montantPersonnaliseController.clear();
-                }
-                _rechercherElevesPourException(value);
-              },
+              onChanged: _rechercherElevesPourException,
             ),
             if (_resultatsRechercheEleveException.isNotEmpty)
               Container(
@@ -2258,145 +2504,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   itemCount: _resultatsRechercheEleveException.length,
                   itemBuilder: (context, i) {
                     final e = _resultatsRechercheEleveException[i];
+                    final aException = e.montantMensuelPersonnalise != null ||
+                        e.exceptionsMoisPersonnalisees.isNotEmpty;
                     return ListTile(
                       dense: true,
-                      leading: e.montantMensuelPersonnalise != null
+                      leading: aException
                           ? const Icon(Icons.star, color: Colors.indigo, size: 18)
-                          : const Icon(Icons.person_outline, size: 18),
+                          : const Icon(Icons.person_add_alt, size: 18),
                       title: Text('${e.nom} ${e.postNom} ${e.prenom}'),
                       subtitle: Text('ID: ${e.id} — ${e.classe} (${e.section})'),
-                      onTap: () => _selectionnerEleveException(e),
+                      onTap: () => _ajouterBrouillonException(e),
                     );
                   },
                 ),
               ),
-            if (_eleveSelectionnePourException != null)
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.indigo.withAlpha(15),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.indigo.shade100),
+            ..._brouillonsException.map(_buildBrouillonException),
+            if (_brouillonsException.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.check),
+                label: Text(
+                    "Enregistrer les exceptions (${_brouillonsException.length} élève(s))"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.indigo,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(double.infinity, 46),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.person, color: Colors.indigo, size: 18),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            '${_eleveSelectionnePourException!.nom} '
-                                '${_eleveSelectionnePourException!.postNom} '
-                                '${_eleveSelectionnePourException!.prenom} '
-                                '(${_eleveSelectionnePourException!.classe} - '
-                                '${_eleveSelectionnePourException!.section})',
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, color: Colors.indigo),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close, size: 18),
-                          tooltip: "Annuler la sélection",
-                          onPressed: () {
-                            setState(() {
-                              _eleveSelectionnePourException = null;
-                              eleveExceptionSearchController.clear();
-                              montantPersonnaliseController.clear();
-                              _resultatsRechercheEleveException = [];
-                            });
-                          },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: montantPersonnaliseController,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: "Montant mensuel fixe pour cet élève (FC)",
-                        helperText:
-                        "Ce montant remplacera celui de sa section/classe, pour tous les mois",
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            icon: const Icon(Icons.check),
-                            label: const Text("Fixer le montant"),
-                            style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.indigo,
-                                foregroundColor: Colors.white),
-                            onPressed: _enregistrerMontantPersonnalise,
-                          ),
-                        ),
-                        if (_eleveSelectionnePourException!
-                            .montantMensuelPersonnalise !=
-                            null) ...[
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              icon: const Icon(Icons.delete_outline, color: Colors.red),
-                              label: const Text("Retirer",
-                                  style: TextStyle(color: Colors.red)),
-                              onPressed: () => _retirerMontantPersonnalise(
-                                  _eleveSelectionnePourException!),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ],
-                ),
+                onPressed: _enregistrerBrouillonsException,
               ),
+            ],
             const SizedBox(height: 16),
             if (elevesAvecExceptionPersonnalisee.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 8),
                 child: Text(
-                  "Aucun élève n'a actuellement de montant personnalisé.",
+                  "Aucun élève n'a actuellement d'exception de paiement.",
                   style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
                 ),
               )
             else ...[
               Text(
-                "Élèves avec un montant personnalisé (${elevesAvecExceptionPersonnalisee.length}) :",
+                "Élèves avec une exception de paiement (${elevesAvecExceptionPersonnalisee.length}) :",
                 style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
               ),
               const SizedBox(height: 6),
-              ...elevesAvecExceptionPersonnalisee.map((e) => Card(
-                margin: const EdgeInsets.symmetric(vertical: 3),
-                child: ListTile(
-                  dense: true,
-                  leading: const Icon(Icons.star, color: Colors.indigo),
-                  title: Text('${e.nom} ${e.postNom} ${e.prenom}'),
-                  subtitle: Text('${e.classe} - ${e.section}'),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "${e.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois",
-                        style: const TextStyle(
-                            fontWeight: FontWeight.bold, color: Colors.indigo),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
-                        tooltip: "Modifier",
-                        onPressed: () => _selectionnerEleveException(e),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
-                        tooltip: "Retirer",
-                        onPressed: () => _retirerMontantPersonnalise(e),
-                      ),
-                    ],
-                  ),
-                ),
-              )),
+              ...elevesAvecExceptionPersonnalisee.map(_buildCarteEleveException),
             ],
 
             const Divider(),
@@ -3001,7 +3153,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       widget.fraisScolaires.config.monthlyExceptionsByClasse
           .removeWhere((key, _) => key.startsWith("$section|"));
       widget.fraisScolaires.config.classesBySection.remove(section);
-      // ⚡ NOUVEAU — retire aussi la section de toute option qui la contenait.
       widget.fraisScolaires.retirerSectionDesOptions(section);
     });
     await widget.fraisScolaires.saveData();
