@@ -9,6 +9,12 @@ import '../models.dart';
 ///   - Sa promotion (classe + section)
 ///   - Le détail mois par mois (montant payé / requis / reste)
 ///   - L'historique de chaque transaction avec la date
+///
+/// ⚡ Le montant "requis" par mois utilise désormais
+/// `getRequiredForMonthForEleve`, qui prend en compte automatiquement
+/// une éventuelle exception de paiement personnalisée pour cet élève
+/// (montant mensuel fixe défini dans Paramètres). Si l'élève n'a aucune
+/// exception, le comportement reste strictement identique à avant.
 class RecusScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const RecusScreen({super.key, required this.fraisScolaires});
@@ -22,6 +28,8 @@ class _RecusScreenState extends State<RecusScreen> {
   String? selectedSectionFilter;
   String? selectedClassFilter;
   List<Eleve> filtered = [];
+
+  bool _generatingPdf = false;
 
   @override
   void initState() {
@@ -39,7 +47,6 @@ class _RecusScreenState extends State<RecusScreen> {
   void _filterEleves() {
     final query = searchController.text.toLowerCase().trim();
     setState(() {
-      // On n'affiche que les élèves qui ont au moins une transaction
       filtered = widget.fraisScolaires.currentData.eleves.where((e) {
         final hasTransactions = e.transactions.isNotEmpty;
         final nameMatch =
@@ -52,9 +59,32 @@ class _RecusScreenState extends State<RecusScreen> {
         return hasTransactions && nameMatch && sectionMatch && classMatch;
       }).toList();
 
-      // Tri par nom
       filtered.sort((a, b) => a.nom.compareTo(b.nom));
     });
+  }
+
+  Future<void> _genererPdfPourEleve(Eleve eleve) async {
+    if (_generatingPdf) return;
+    setState(() => _generatingPdf = true);
+    try {
+      final result = await widget.fraisScolaires
+          .generateStudentPaymentHistoryPdf(eleve: eleve);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result['success'] == true
+                  ? "📄 PDF de l'historique généré avec succès"
+                  : "❌ Échec : ${result['error'] ?? 'erreur inconnue'}",
+            ),
+            backgroundColor:
+            result['success'] == true ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _generatingPdf = false);
+    }
   }
 
   @override
@@ -256,12 +286,39 @@ class _RecusScreenState extends State<RecusScreen> {
               const Divider(height: 10),
 
               // Nom de l'élève
-              Text(
-                "${eleve.nom} ${eleve.postNom} ${eleve.prenom}",
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      "${eleve.nom} ${eleve.postNom} ${eleve.prenom}",
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+                  ),
+                  // ⚡ NOUVEAU — badge visuel si l'élève a une exception
+                  // de paiement personnalisée, pour que ce soit visible
+                  // dès la liste des reçus sans avoir à ouvrir le détail.
+                  if (eleve.montantMensuelPersonnalise != null)
+                    Container(
+                      margin: const EdgeInsets.only(left: 6),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(25),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text(
+                        "⭐ Montant perso.",
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.indigo,
+                        ),
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(height: 4),
 
@@ -387,71 +444,127 @@ class _RecusScreenState extends State<RecusScreen> {
   void _showReceiptDetail(Eleve eleve) {
     showDialog(
       context: context,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // ---- Titre : nom de l'école ----
-              Center(
-                child: Text(
-                  widget.fraisScolaires.config.schoolName.toUpperCase(),
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                    color: Colors.indigo,
-                    letterSpacing: 1.2,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => Dialog(
+          shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // ---- Titre : nom de l'école ----
+                Center(
+                  child: Text(
+                    widget.fraisScolaires.config.schoolName.toUpperCase(),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                      color: Colors.indigo,
+                      letterSpacing: 1.2,
+                    ),
                   ),
                 ),
-              ),
-              const Center(
-                child: Text(
-                  "REÇU DE PAIEMENT",
+                const Center(
+                  child: Text(
+                    "REÇU DE PAIEMENT",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Center(
+                  child: Text(
+                    "Année scolaire : ${widget.fraisScolaires.currentYear}",
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ),
+                const Divider(height: 20),
+
+                // ---- Infos élève ----
+                _detailRow("Nom complet",
+                    "${eleve.nom} ${eleve.postNom} ${eleve.prenom}"),
+                _detailRow("ID", eleve.id),
+                _detailRow("Promotion", eleve.classe),
+                _detailRow("Section", eleve.section),
+                // ⚡ NOUVEAU — affiche clairement le montant personnalisé
+                // s'il existe, directement dans le détail du reçu.
+                if (eleve.montantMensuelPersonnalise != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(20),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.indigo.shade100),
+                      ),
+                      child: Text(
+                        "⭐ Cet élève a un montant mensuel personnalisé : "
+                            "${eleve.montantMensuelPersonnalise!.toStringAsFixed(0)} "
+                            "FC/mois (exception de paiement).",
+                        style: const TextStyle(
+                            color: Colors.indigo, fontSize: 11.5),
+                      ),
+                    ),
+                  ),
+                const Divider(height: 20),
+
+                // ---- Bilan financier ----
+                const Text(
+                  "BILAN FINANCIER",
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                    decoration: TextDecoration.underline,
+                    fontSize: 13,
+                    color: Colors.indigo,
                   ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Center(
-                child: Text(
-                  "Année scolaire : ${widget.fraisScolaires.currentYear}",
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                ),
-              ),
-              const Divider(height: 20),
-
-              // ---- Infos élève ----
-              _detailRow("Nom complet",
-                  "${eleve.nom} ${eleve.postNom} ${eleve.prenom}"),
-              _detailRow("ID", eleve.id),
-              _detailRow("Promotion", eleve.classe),
-              _detailRow("Section", eleve.section),
-              const Divider(height: 20),
-
-              // ---- Bilan financier ----
-              const Text(
-                "BILAN FINANCIER",
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 13,
-                  color: Colors.indigo,
-                ),
-              ),
-              const SizedBox(height: 8),
-              ...widget.fraisScolaires.months.map((mois) {
-                final requis = widget.fraisScolaires
-                    .getRequiredForMonth(mois, eleve.section, eleve.classe);
-                final paye = (eleve.paid[mois] ?? 0).toDouble();
-                final reste = requis - paye;
-                if (paye == 0 && reste == requis) {
-                  // Mois non commencé → on l'affiche quand même en gris
+                const SizedBox(height: 8),
+                ...widget.fraisScolaires.months.map((mois) {
+                  // ⚡ CORRIGÉ — utilise désormais getRequiredForMonthForEleve
+                  // pour que le montant requis tienne compte de l'exception
+                  // de paiement personnalisée de cet élève, si elle existe.
+                  final requis = widget.fraisScolaires
+                      .getRequiredForMonthForEleve(eleve, mois);
+                  final paye = (eleve.paid[mois] ?? 0).toDouble();
+                  final reste = requis - paye;
+                  if (paye == 0 && reste == requis) {
+                    // Mois non commencé → on l'affiche quand même en gris
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              mois,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Text(
+                              "0 FC / ${requis.toStringAsFixed(0)} FC",
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ),
+                          const Icon(Icons.remove,
+                              size: 14, color: Colors.grey),
+                        ],
+                      ),
+                    );
+                  }
                   return Padding(
                     padding: const EdgeInsets.symmetric(vertical: 2),
                     child: Row(
@@ -462,151 +575,150 @@ class _RecusScreenState extends State<RecusScreen> {
                             mois,
                             style: const TextStyle(
                               fontSize: 12,
-                              color: Colors.grey,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
                         ),
                         Expanded(
                           flex: 2,
                           child: Text(
-                            "0 FC / ${requis.toStringAsFixed(0)} FC",
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey,
-                            ),
+                            "${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)} FC",
+                            style: const TextStyle(fontSize: 12),
                           ),
                         ),
-                        const Icon(Icons.remove, size: 14, color: Colors.grey),
+                        reste <= 0
+                            ? const Icon(Icons.check_circle,
+                            size: 16, color: Colors.green)
+                            : Text(
+                          "-${reste.toStringAsFixed(0)} FC",
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.orange,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ],
                     ),
                   );
-                }
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
+                }),
+                const Divider(height: 20),
+
+                // ---- Totaux ----
+                Builder(builder: (context) {
+                  final totalPaye =
+                  widget.fraisScolaires.getStudentTotalPaid(eleve);
+                  final totalRequis =
+                      widget.fraisScolaires.getStudentPending(eleve) +
+                          totalPaye;
+                  final resteTotal = totalRequis - totalPaye;
+                  return Column(
                     children: [
-                      Expanded(
-                        flex: 3,
-                        child: Text(
-                          mois,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 2,
-                        child: Text(
-                          "${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)} FC",
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                      reste <= 0
-                          ? const Icon(Icons.check_circle,
-                          size: 16, color: Colors.green)
-                          : Text(
-                        "-${reste.toStringAsFixed(0)} FC",
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Colors.orange,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+                      _totalRow(
+                          "Total payé", totalPaye, Colors.green),
+                      _totalRow("Total requis (annuel)", totalRequis,
+                          Colors.indigo),
+                      _totalRow(
+                          "Reste à payer",
+                          resteTotal > 0 ? resteTotal : 0,
+                          resteTotal > 0 ? Colors.red : Colors.green),
                     ],
-                  ),
-                );
-              }),
-              const Divider(height: 20),
+                  );
+                }),
+                const Divider(height: 20),
 
-              // ---- Totaux ----
-              Builder(builder: (context) {
-                final totalPaye =
-                widget.fraisScolaires.getStudentTotalPaid(eleve);
-                final totalRequis =
-                    widget.fraisScolaires.getStudentPending(eleve) + totalPaye;
-                final resteTotal = totalRequis - totalPaye;
-                return Column(
-                  children: [
-                    _totalRow(
-                        "Total payé", totalPaye, Colors.green),
-                    _totalRow(
-                        "Total requis (annuel)", totalRequis, Colors.indigo),
-                    _totalRow(
-                        "Reste à payer",
-                        resteTotal > 0 ? resteTotal : 0,
-                        resteTotal > 0 ? Colors.red : Colors.green),
-                  ],
-                );
-              }),
-              const Divider(height: 20),
-
-              // ---- Historique des transactions ----
-              const Text(
-                "HISTORIQUE DES PAIEMENTS",
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 13,
-                  color: Colors.indigo,
-                ),
-              ),
-              const SizedBox(height: 8),
-              if (eleve.transactions.isEmpty)
+                // ---- Historique des transactions ----
                 const Text(
-                  "Aucune transaction enregistrée.",
-                  style: TextStyle(color: Colors.grey, fontSize: 12),
-                )
-              else
-                ...(() {
-                  final sorted =
-                  List<Map<String, dynamic>>.from(eleve.transactions)
-                    ..sort(
-                          (a, b) => (a['date'] ?? '')
-                          .toString()
-                          .compareTo((b['date'] ?? '').toString()),
-                    );
-                  return sorted.map((t) {
-                    final date = t['date']?.toString() ?? "—";
-                    final mois = t['mois']?.toString() ?? "—";
-                    final amount = (t['amount'] as num?)?.toDouble() ?? 0;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 3),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.receipt_long,
-                              size: 14, color: Colors.indigo),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              "$date  —  $mois",
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                          Text(
-                            "${amount.toStringAsFixed(0)} FC",
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }).toList();
-                })(),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.indigo,
-                    foregroundColor: Colors.white,
+                  "HISTORIQUE DES PAIEMENTS",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                    color: Colors.indigo,
                   ),
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text("Fermer"),
                 ),
-              ),
-            ],
+                const SizedBox(height: 8),
+                if (eleve.transactions.isEmpty)
+                  const Text(
+                    "Aucune transaction enregistrée.",
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  )
+                else
+                  ...(() {
+                    final sorted =
+                    List<Map<String, dynamic>>.from(eleve.transactions)
+                      ..sort(
+                            (a, b) => (a['date'] ?? '')
+                            .toString()
+                            .compareTo((b['date'] ?? '').toString()),
+                      );
+                    return sorted.map((t) {
+                      final date = t['date']?.toString() ?? "—";
+                      final mois = t['mois']?.toString() ?? "—";
+                      final amount = (t['amount'] as num?)?.toDouble() ?? 0;
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.receipt_long,
+                                size: 14, color: Colors.indigo),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                "$date  —  $mois",
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ),
+                            Text(
+                              "${amount.toStringAsFixed(0)} FC",
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList();
+                  })(),
+                const SizedBox(height: 16),
+
+                // Boutons "Fermer" et "PDF" côte à côte.
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => Navigator.pop(ctx),
+                        icon: const Icon(Icons.close),
+                        label: const Text("Fermer"),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.indigo,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: _generatingPdf
+                            ? null
+                            : () async {
+                          setStateDialog(() {});
+                          await _genererPdfPourEleve(eleve);
+                        },
+                        icon: _generatingPdf
+                            ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                            : const Icon(Icons.picture_as_pdf),
+                        label: const Text("PDF"),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),

@@ -11,30 +11,31 @@ class Eleve {
   // ==========================================================================
   // ⚡ NOUVEAU — INFORMATIONS ADDITIONNELLES SUR L'IDENTITÉ DE L'ÉLÈVE
   // ==========================================================================
-  // Toutes ces informations sont 100% FACULTATIVES : chaque école décide si
-  // elle les remplit ou non. Elles sont saisies pour la première fois dans
-  // EnregistrerEleveScreen (bouton "Autres Informations" en bas du
-  // formulaire) et peuvent être modifiées plus tard depuis la fiche/carte
-  // d'élève dans StudentListScreen (clic sur un élève dans le registre).
-  //
-  // - pereNom / mereNom / adresse / dateNaissance : champs fixes par défaut,
-  //   toujours proposés à l'école mais jamais obligatoires.
-  // - photoBase64 : la photo de l'élève, choisie depuis le PC de
-  //   l'utilisateur, encodée en base64 pour rester dans le même fichier JSON
-  //   local que le reste des données (comme tout le reste de l'application).
-  // - customFields : questions personnalisées ajoutées librement par
-  //   l'utilisateur (ex: "Numéro de téléphone du parent", "Groupe sanguin"),
-  //   sous forme clé (la question) -> valeur (la réponse pour cet élève).
-  //
-  // Toutes les méthodes existantes de l'application (paiements, PDF,
-  // passation, sauvegarde/restauration serveur...) continuent de fonctionner
-  // exactement comme avant, que ces champs soient remplis ou non.
   String pereNom;
   String mereNom;
   String adresse;
   String dateNaissance; // format "JJ/MM/AAAA", chaîne vide si non renseignée
   String? photoBase64;  // photo encodée en base64, ou null si aucune photo
   Map<String, String> customFields = {}; // question personnalisée -> réponse
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — EXCEPTION DE PAIEMENT PAR ÉLÈVE (MONTANT MENSUEL FIXE)
+  // ==========================================================================
+  // Certaines écoles font payer un montant différent à certains élèves
+  // précis (ex: enfant d'un enseignant), indépendamment du frais normal de
+  // leur section/classe. Quand ce champ est renseigné (non-null), il
+  // REMPLACE, pour CHAQUE mois de l'année, le montant requis normalement
+  // calculé via la section/classe de l'élève. Si ce champ est `null`
+  // (valeur par défaut), rien ne change : l'élève continue de payer le
+  // montant normal de sa section/classe, exactement comme avant.
+  //
+  // Ce champ est lu UNIQUEMENT via `FraisScolaires.getRequiredForMonthForEleve`
+  // (voir frais_scolaires.dart), qui est la seule méthode utilisée partout
+  // dans l'application pour calculer le montant requis d'un élève précis
+  // (paiement, reçus, PDF, "Liste en ordre"...). Cela garantit qu'une
+  // exception par élève est toujours prise en compte de façon identique,
+  // partout, sans aucune logique dupliquée.
+  double? montantMensuelPersonnalise;
 
   Eleve({
     required this.id,
@@ -49,11 +50,9 @@ class Eleve {
     this.dateNaissance = '',
     this.photoBase64,
     Map<String, String>? customFields,
+    this.montantMensuelPersonnalise,
   }) : customFields = customFields ?? {};
 
-  // ⚡ NOUVEAU — Vrai si au moins une information additionnelle a été
-  // renseignée pour cet élève (utile pour savoir si la carte d'élève a
-  // quelque chose à montrer au-delà des données de base).
   bool get hasCarteInfo =>
       pereNom.trim().isNotEmpty ||
           mereNom.trim().isNotEmpty ||
@@ -71,13 +70,14 @@ class Eleve {
     'section': section,
     'paid': paid,
     'transactions': transactions,
-    // ⚡ NOUVEAU
     'pereNom': pereNom,
     'mereNom': mereNom,
     'adresse': adresse,
     'dateNaissance': dateNaissance,
     'photoBase64': photoBase64,
     'customFields': customFields,
+    // ⚡ NOUVEAU — exception de paiement par élève
+    'montantMensuelPersonnalise': montantMensuelPersonnalise,
   };
 
   factory Eleve.fromJson(Map<String, dynamic> json) {
@@ -88,9 +88,6 @@ class Eleve {
       prenom: json['prenom'] ?? '',
       classe: json['classe'] ?? '',
       section: json['section'] ?? 'Primaire',
-      // ⚡ NOUVEAU — valeurs par défaut vides si absentes du JSON, pour
-      // rester 100% compatible avec les données déjà existantes des écoles
-      // qui utilisent déjà l'application (aucune migration nécessaire).
       pereNom: json['pereNom'] ?? '',
       mereNom: json['mereNom'] ?? '',
       adresse: json['adresse'] ?? '',
@@ -99,6 +96,8 @@ class Eleve {
       customFields: json['customFields'] != null
           ? Map<String, String>.from(json['customFields'] as Map)
           : {},
+      montantMensuelPersonnalise:
+      (json['montantMensuelPersonnalise'] as num?)?.toDouble(),
     )
       ..paid = Map<String, double>.from(json['paid'] ?? {})
       ..transactions = (json['transactions'] as List? ?? [])
@@ -134,30 +133,14 @@ class SchoolConfig {
   Map<String, Map<String, double>> monthlyExceptionsBySection = {};
   List<Administration> administrations = [];
 
-  // ==================== CLASSES & SOUS-CLASSES ====================
-  //
-  // Numéros de classe par section (ex: "Primaire" -> ['1ère', ..., '6ème']).
-  // Générés automatiquement la première fois via defaultClassesForSectionName,
-  // mais stockés ici pour rester stables et pouvoir être complétés manuellement
-  // par l'utilisateur (ex: pour une section personnalisée).
   Map<String, List<String>> classesBySection = {};
-
-  // Sous-classes par "section|numéroDeClasse" (ex: "Primaire|7ème" -> ['A','B']).
-  // Toujours ajoutées manuellement par l'utilisateur.
   Map<String, List<String>> subClassesByClasse = {};
 
-  // ==================== NOUVEAU : FRAIS & EXCEPTIONS PAR CLASSE ====================
-  //
-  // Certaines écoles font payer des montants différents selon le numéro de
-  // classe (ex: 1ère primaire ne paie pas le même montant que 6ème primaire),
-  // même au sein d'une même section. Ces deux champs permettent de définir
-  // un frais (ou une exception mensuelle) propre à un numéro de classe précis.
-  //
-  // Clé utilisée : "section|numéroDeClasse" (ex: "Primaire|6ème").
-  // Si aucune entrée n'existe pour une classe précise, on retombe sur le
-  // frais/l'exception de la SECTION entière (comportement actuel, inchangé).
   Map<String, double> feesByClasse = {};
   Map<String, Map<String, double>> monthlyExceptionsByClasse = {};
+
+  List<String> customFieldQuestions = [];
+  Map<String, String> sectionAliases = {};
 
   SchoolConfig({
     required this.schoolName,
@@ -170,10 +153,9 @@ class SchoolConfig {
     Map<String, List<String>>? subClassesByClasse,
     Map<String, double>? feesByClasse,
     Map<String, Map<String, double>>? monthlyExceptionsByClasse,
+    List<String>? customFieldQuestions,
+    Map<String, String>? sectionAliases,
   }) {
-    // ⚡ CORRIGÉ — dédoublonnage même quand la liste de sections est fournie
-    // explicitement au constructeur (et pas seulement dans fromJson), pour
-    // fermer TOUTE porte d'entrée possible à un doublon dans cette liste.
     this.sections =
         _dedupeSections(sections ?? ['Primaire', 'Secondaire']);
     this.feesBySection = feesBySection ?? {};
@@ -183,35 +165,10 @@ class SchoolConfig {
     this.subClassesByClasse = subClassesByClasse ?? {};
     this.feesByClasse = feesByClasse ?? {};
     this.monthlyExceptionsByClasse = monthlyExceptionsByClasse ?? {};
+    this.customFieldQuestions = customFieldQuestions ?? [];
+    this.sectionAliases = sectionAliases ?? {};
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — DÉDOUBLONNAGE DÉFINITIF DE LA LISTE DES SECTIONS
-  // ==========================================================================
-  // Cause racine du crash "There should be exactly one item with
-  // [DropdownButton]'s value: ..." rencontré dans les écrans Paiement et
-  // Paramètres : `sections` était rechargée TELLE QUELLE depuis le JSON
-  // sauvegardé (`List<String>.from(json['sections'] ?? [...])`), sans
-  // aucune vérification. Si un doublon s'était un jour glissé dans ce
-  // tableau — par exemple lors d'une restauration serveur qui a réintroduit
-  // une section déjà présente localement, ou lors d'un ancien enregistrement
-  // avant que le contrôle actuel de `_addNewSection` (contains()) existe —
-  // ce doublon était relu et réutilisé indéfiniment à CHAQUE démarrage de
-  // l'application, sans que rien ne le nettoie jamais. Une suppression
-  // depuis Paramètres ne retire qu'UNE SEULE occurrence (`.remove()`),
-  // laissant l'autre invisible dans l'interface (le `Chip` affiché est
-  // identique visuellement) mais bien présente dans les données.
-  //
-  // Cette fonction retire les doublons EXACTS, en conservant l'ordre
-  // d'apparition (LinkedHashSet), et est appliquée à la fois :
-  //   1. Dans le constructeur ci-dessus (couvre toute création manuelle).
-  //   2. Dans `fromJson` ci-dessous (couvre le chargement local ET la
-  //      restauration serveur, qui passe elle aussi par `fromJson`).
-  // Comme `saveData()` est appelé très fréquemment dans l'application, dès
-  // le premier enregistrement suivant le chargement, la version nettoyée
-  // remplace définitivement l'ancienne sur le disque — le doublon ne peut
-  // plus jamais réapparaître après ce nettoyage.
-  // ==========================================================================
   static List<String> _dedupeSections(Iterable<String> sections) {
     final seen = <String>{};
     final result = <String>[];
@@ -221,14 +178,6 @@ class SchoolConfig {
     return result;
   }
 
-  // Numéros de classe générés AUTOMATIQUEMENT selon le nom de la section.
-  // Basé sur le système scolaire de la RDC :
-  //   - Maternelle  : 1ère à 3ème
-  //   - Primaire    : 1ère à 6ème
-  //   - Secondaire  : 7ème, 8ème, puis 1ère à 4ème
-  // Si la section ne correspond à aucun de ces noms (section personnalisée),
-  // on retourne une liste vide : l'utilisateur devra ajouter les numéros de
-  // classe lui-même.
   static List<String> defaultClassesForSectionName(String section) {
     final normalized = section.trim().toLowerCase();
     if (normalized.contains('maternelle')) {
@@ -252,15 +201,13 @@ class SchoolConfig {
     'subClassesByClasse': subClassesByClasse,
     'feesByClasse': feesByClasse,
     'monthlyExceptionsByClasse': monthlyExceptionsByClasse,
+    'customFieldQuestions': customFieldQuestions,
+    'sectionAliases': sectionAliases,
   };
 
   factory SchoolConfig.fromJson(Map<String, dynamic> json) {
     return SchoolConfig(
       schoolName: json['schoolName'] ?? "MAPENDO TCC",
-      // ⚡ CORRIGÉ — dédoublonnage à la lecture du JSON (voir
-      // `_dedupeSections` ci-dessus pour l'explication complète). C'est ICI
-      // que le doublon persistant était relu à chaque démarrage ; il est
-      // désormais nettoyé avant même d'être stocké en mémoire.
       sections: _dedupeSections(
         List<String>.from(json['sections'] ?? ['Primaire', 'Secondaire']),
       ),
@@ -287,6 +234,10 @@ class SchoolConfig {
       monthlyExceptionsByClasse: (json['monthlyExceptionsByClasse'] as Map? ?? {}).map(
             (key, value) => MapEntry(key as String, Map<String, double>.from(value)),
       ),
+      customFieldQuestions:
+      List<String>.from(json['customFieldQuestions'] ?? []),
+      sectionAliases:
+      Map<String, String>.from(json['sectionAliases'] ?? {}),
     );
   }
 }

@@ -8,10 +8,12 @@ import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:file_selector/file_selector.dart';
 import '../app_state.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 import '../services/epson_printer_service.dart';
+import '../services/student_import_service.dart';
 
 class PaiementEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -31,8 +33,15 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   List<Map<String, dynamic>> _mobilePendingPayments = [];
   bool _loadingMobile = false;
   bool _reprinting = false;
+  bool _importing = false;
 
   Timer? _pendingRequestsPoller;
+
+  static const String _receiptsLockedPrefKey = 'receipts_locked';
+  bool _receiptsLocked = false;
+
+  static const String _autoImportSchoolName = 'COMPLEXE SCOLAIRE CHRIST SAUVEUR';
+  static const String _autoImportFileName = 'liste.txt';
 
   List<String> _dedupe(Iterable<String> items) =>
       LinkedHashSet<String>.from(items).toList();
@@ -46,13 +55,90 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     selectedClassFilter = widget.fraisScolaires.lastSelectedClassFilter;
     _filterEleves();
     searchController.addListener(_filterEleves);
+    _loadReceiptsLockState();
     _fetchMobilePendingPayments();
     _flushPendingReceipts();
     _pendingRequestsPoller =
         Timer.periodic(const Duration(seconds: 5), (_) => _pollPendingRequests());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _maybeAutoImportFromDesktop());
+  }
+
+  // ==========================================================================
+  // VERROU MANUEL D'IMPRESSION DES REÇUS
+  // ==========================================================================
+  Future<void> _loadReceiptsLockState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final locked = prefs.getBool(_receiptsLockedPrefKey) ?? false;
+    if (mounted) {
+      setState(() => _receiptsLocked = locked);
+    }
+  }
+
+  Future<void> _setReceiptsLocked(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_receiptsLockedPrefKey, value);
+    if (mounted) {
+      setState(() => _receiptsLocked = value);
+    }
+  }
+
+  Future<void> _toggleReceiptsLock() async {
+    final bool nouveauEtat = !_receiptsLocked;
+    final String titre = nouveauEtat
+        ? "Bloquer l'impression des reçus ?"
+        : "Débloquer l'impression des reçus ?";
+    final String message = nouveauEtat
+        ? "Tant que c'est bloqué, les nouveaux paiements seront enregistrés "
+        "normalement, mais AUCUN reçu ne sera imprimé ni mis en attente "
+        "d'impression pour ces paiements.\n\n"
+        "Voulez-vous vraiment bloquer l'impression maintenant ?"
+        : "Les nouveaux paiements seront à nouveau imprimés (ou mis en "
+        "attente si aucune imprimante n'est disponible), comme "
+        "d'habitude.\n\n"
+        "Voulez-vous vraiment débloquer l'impression maintenant ?";
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(titre),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: nouveauEtat ? Colors.red : Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(nouveauEtat ? "Bloquer" : "Débloquer"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await _setReceiptsLocked(nouveauEtat);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              nouveauEtat
+                  ? "🔒 Impression des reçus bloquée."
+                  : "🔓 Impression des reçus débloquée.",
+            ),
+            backgroundColor: nouveauEtat ? Colors.red : Colors.green,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _flushPendingReceipts() async {
+    if (_receiptsLocked) return;
     final count = await widget.fraisScolaires.flushReceiptQueue();
     if (mounted && count > 0) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -63,6 +149,322 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         ),
       );
     }
+  }
+
+  // ==========================================================================
+  // IMPORT AUTOMATIQUE DEPUIS LE BUREAU (MAC/WINDOWS)
+  // ==========================================================================
+  Future<void> _maybeAutoImportFromDesktop() async {
+    final targetName = _autoImportSchoolName.trim().toUpperCase();
+    if (widget.fraisScolaires.config.schoolName.trim().toUpperCase() !=
+        targetName) {
+      return;
+    }
+
+    final path =
+    await StudentImportService.findDesktopFile(_autoImportFileName);
+    if (path == null) return;
+
+    String content;
+    try {
+      content = await File(path).readAsString();
+    } catch (_) {
+      return;
+    }
+    if (content.trim().isEmpty) return;
+
+    if (await AutoImportGuard.alreadyHandled(content)) return;
+    if (!mounted) return;
+
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Fichier d'élèves détecté"),
+        content: const Text(
+          "Un fichier \"liste.txt\" a été trouvé sur le Bureau. "
+              "Voulez-vous importer ces élèves maintenant ?",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Plus tard")),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Importer")),
+        ],
+      ),
+    );
+
+    if (proceed == true) {
+      await _runStudentImportFlow(content);
+    }
+    await AutoImportGuard.markHandled(content);
+  }
+
+  Future<void> _pickAndImportFile() async {
+    if (_importing) return;
+    const typeGroup =
+    XTypeGroup(label: 'Liste d\'élèves', extensions: ['json', 'txt']);
+    final file = await openFile(acceptedTypeGroups: [typeGroup]);
+    if (file == null) return;
+    final content = await file.readAsString();
+    await _runStudentImportFlow(content);
+  }
+
+  // ==========================================================================
+  // ORCHESTRATEUR PRINCIPAL DE L'IMPORT
+  // ==========================================================================
+  Future<void> _runStudentImportFlow(String content) async {
+    if (_importing) return;
+    setState(() => _importing = true);
+    try {
+      final parseResult = StudentImportParser.parse(content);
+      if (parseResult.errors.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text(parseResult.errors.first),
+                backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
+      if (parseResult.records.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Aucun élève trouvé dans ce fichier.")),
+          );
+        }
+        return;
+      }
+
+      final analysis =
+      StudentImportService.analyze(widget.fraisScolaires, parseResult.records);
+
+      if (analysis.sectionConflicts.isNotEmpty) {
+        final proceed = await _resolveSectionConflicts(analysis.sectionConflicts);
+        if (!proceed) return;
+        await StudentImportService.applySectionResolutions(
+            widget.fraisScolaires, analysis.sectionConflicts);
+      }
+
+      final duplicates =
+      StudentImportService.findDuplicates(widget.fraisScolaires, parseResult.records);
+      final duplicateIncoming = duplicates.map((d) => d.incoming).toSet();
+      final newRecords = parseResult.records
+          .where((r) => !duplicateIncoming.contains(r))
+          .toList();
+
+      if (duplicates.isNotEmpty) {
+        final proceed = await _resolveDuplicates(duplicates);
+        if (!proceed) return;
+      }
+
+      final addedCount =
+      await StudentImportService.importNewRecords(widget.fraisScolaires, newRecords);
+      final completedCount =
+      await StudentImportService.completeDuplicates(widget.fraisScolaires, duplicates);
+      final ignoredCount = duplicates.length - completedCount;
+
+      if (mounted) {
+        _filterEleves();
+        setState(() {});
+        final parts = <String>["$addedCount élève(s) ajouté(s)"];
+        if (completedCount > 0) parts.add("$completedCount fiche(s) complétée(s)");
+        if (ignoredCount > 0) parts.add("$ignoredCount doublon(s) ignoré(s)");
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("✅ Import terminé : ${parts.join(', ')}."),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _importing = false);
+    }
+  }
+
+  // ==========================================================================
+  // BOÎTE DE DIALOGUE : RÉSOLUTION DES SECTIONS INCONNUES
+  // ==========================================================================
+  Future<bool> _resolveSectionConflicts(List<SectionConflict> conflicts) async {
+    final existingSections = _dedupe(widget.fraisScolaires.config.sections);
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => AlertDialog(
+          title: const Text("Sections inconnues détectées"),
+          content: SizedBox(
+            width: 480,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Ces valeurs du fichier importé ne correspondent à aucune "
+                        "section déjà connue. Pour chacune, choisissez une "
+                        "section existante à fusionner, ou créez-la telle "
+                        "quelle. La valeur d'origine reste toujours visible "
+                        "sur la fiche des élèves concernés.",
+                    style: TextStyle(fontSize: 12.5, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 14),
+                  ...conflicts.map((c) {
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 14),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('"${c.rawCandidate}"',
+                              style:
+                              const TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 8),
+                          RadioListTile<bool>(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text("Créer comme nouvelle section",
+                                style: TextStyle(fontSize: 13)),
+                            value: true,
+                            groupValue: c.createNew,
+                            onChanged: (v) =>
+                                setStateDialog(() => c.createNew = true),
+                          ),
+                          if (c.createNew)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 32, bottom: 6),
+                              child: TextFormField(
+                                initialValue: c.newSectionName,
+                                decoration: const InputDecoration(
+                                    labelText: "Nom de la nouvelle section"),
+                                onChanged: (v) => c.newSectionName = v,
+                              ),
+                            ),
+                          RadioListTile<bool>(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text(
+                                "Fusionner vers une section existante",
+                                style: TextStyle(fontSize: 13)),
+                            value: false,
+                            groupValue: c.createNew,
+                            onChanged: (v) =>
+                                setStateDialog(() => c.createNew = false),
+                          ),
+                          if (!c.createNew)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 32),
+                              child: DropdownButtonFormField<String>(
+                                value: existingSections.contains(c.mergeTarget)
+                                    ? c.mergeTarget
+                                    : null,
+                                hint: const Text("Choisir une section"),
+                                items: existingSections
+                                    .map((s) =>
+                                    DropdownMenuItem(value: s, child: Text(s)))
+                                    .toList(),
+                                onChanged: (v) =>
+                                    setStateDialog(() => c.mergeTarget = v),
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text("Annuler l'import")),
+            ElevatedButton(
+              onPressed: () {
+                for (final c in conflicts) {
+                  if (!c.createNew &&
+                      (c.mergeTarget == null || c.mergeTarget!.isEmpty)) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              "Veuillez choisir une section pour chaque élément.")),
+                    );
+                    return;
+                  }
+                }
+                Navigator.pop(ctx, true);
+              },
+              child: const Text("Continuer"),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result == true;
+  }
+
+  // ==========================================================================
+  // BOÎTE DE DIALOGUE : ÉLÈVES DÉJÀ EXISTANTS (DOUBLONS)
+  // ==========================================================================
+  Future<bool> _resolveDuplicates(List<DuplicateMatch> matches) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => AlertDialog(
+          title: Text("Élèves déjà existants (${matches.length})"),
+          content: SizedBox(
+            width: 480,
+            height: 420,
+            child: ListView.builder(
+              itemCount: matches.length,
+              itemBuilder: (context, i) {
+                final m = matches[i];
+                return CheckboxListTile(
+                  value: m.completeMissingInfo,
+                  onChanged: (v) =>
+                      setStateDialog(() => m.completeMissingInfo = v ?? false),
+                  title: Text(
+                      "${m.existing.nom} ${m.existing.postNom} ${m.existing.prenom}"),
+                  subtitle: Text(
+                    "Déjà dans ${m.existing.classe} (ID: ${m.existing.id}).\n"
+                        "Le fichier apporte peut-être des informations que "
+                        "la fiche actuelle n'a pas (téléphone, tuteur, lieu "
+                        "de naissance...). Compléter automatiquement la "
+                        "fiche existante avec ce qui manque ?",
+                    style: const TextStyle(fontSize: 11.5),
+                  ),
+                  isThreeLine: true,
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                for (final m in matches) {
+                  m.completeMissingInfo = false;
+                }
+                Navigator.pop(ctx, true);
+              },
+              child: const Text("Ignorer tous les doublons"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Continuer"),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result == true;
   }
 
   Future<void> _fetchMobilePendingPayments() async {
@@ -423,17 +825,20 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   bool _isReceiptConfirmed(Map<String, dynamic> t) => t['receiptConfirmed'] == true;
 
-  // ⚡ CORRIGÉ — délègue désormais entièrement à
-  // widget.fraisScolaires.retryPrintPrincipalReceipt(), qui utilise le
-  // MÊME registre de déduplication (`printedReceiptKeys`/`receiptQueue`)
-  // que l'impression automatique et que la file d'attente. Avant ce
-  // correctif, un clic sur cette icône n'était PAS enregistré dans ce
-  // registre, ce qui pouvait provoquer une réimpression automatique en
-  // double lors du prochain vidage de la file (ex: après reconnexion de
-  // l'imprimante ou réouverture de l'écran).
   Future<void> _retryPrintUnconfirmed(
       Eleve eleve, Map<String, dynamic> transaction) async {
     if (_reprinting) return;
+    if (_receiptsLocked) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              "🔒 L'impression des reçus est actuellement bloquée. "
+                  "Débloquez-la depuis le bouton en haut de l'écran pour imprimer."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
     setState(() => _reprinting = true);
     try {
       final printerName = await _currentPrinterName();
@@ -528,7 +933,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   String? _premierMoisNonPaye(Eleve eleve) {
     for (final m in widget.fraisScolaires.months) {
       final required =
-      widget.fraisScolaires.getRequiredForMonth(m, eleve.section, eleve.classe);
+      widget.fraisScolaires.getRequiredForMonthForEleve(eleve, m);
       final paid = eleve.paid[m] ?? 0;
       if (paid < required) return m;
     }
@@ -730,6 +1135,26 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       appBar: AppBar(
         title: const Text("Paiements des Élèves"),
         actions: [
+          IconButton(
+            icon: Icon(
+              _receiptsLocked ? Icons.lock : Icons.lock_open,
+              color: _receiptsLocked ? Colors.red : Colors.white,
+            ),
+            tooltip: _receiptsLocked
+                ? "Impression des reçus bloquée — appuyer pour débloquer"
+                : "Impression des reçus active — appuyer pour bloquer",
+            onPressed: _toggleReceiptsLock,
+          ),
+          IconButton(
+            icon: _importing
+                ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.upload_file),
+            tooltip: "Importer une liste d'élèves (JSON/TXT)",
+            onPressed: _importing ? null : _pickAndImportFile,
+          ),
           GestureDetector(
             onTap: _showMobilePaymentsDialog,
             child: Padding(
@@ -778,6 +1203,26 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       ),
       body: Column(
         children: [
+          if (_receiptsLocked)
+            Container(
+              width: double.infinity,
+              color: Colors.red.shade50,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: const [
+                  Icon(Icons.lock, color: Colors.red, size: 18),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      "Impression des reçus bloquée : les paiements sont "
+                          "enregistrés, mais aucun reçu n'est imprimé ni "
+                          "mis en attente.",
+                      style: TextStyle(color: Colors.red, fontSize: 12.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -870,7 +1315,8 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                     subtitle: Text(
                       'ID: ${eleve.id}\n'
                           'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
-                          'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC',
+                          'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC'
+                          '${eleve.montantMensuelPersonnalise != null ? '\n⭐ Montant personnalisé : ${eleve.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois' : ''}',
                     ),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -908,7 +1354,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               itemBuilder: (context, i) {
                 final mois = widget.fraisScolaires.months[i];
                 final required = widget.fraisScolaires
-                    .getRequiredForMonth(mois, eleve.section, eleve.classe);
+                    .getRequiredForMonthForEleve(eleve, mois);
                 final paid = eleve.paid[mois] ?? 0;
                 final isFullyPaid = paid >= required;
                 final estOuvert = isFullyPaid || _peutPayerCeMois(eleve, mois);
@@ -952,7 +1398,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setStateDialog) {
           final required = widget.fraisScolaires
-              .getRequiredForMonth(mois, eleve.section, eleve.classe);
+              .getRequiredForMonthForEleve(eleve, mois);
           final paid = eleve.paid[mois] ?? 0;
           final isFullyPaid = paid >= required;
           final peutPayer = !isFullyPaid && _peutPayerCeMois(eleve, mois);
@@ -1125,7 +1571,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     for (var i = idx; i < widget.fraisScolaires.months.length; i++) {
       final m = widget.fraisScolaires.months[i];
       final requis =
-      widget.fraisScolaires.getRequiredForMonth(m, eleve.section, eleve.classe);
+      widget.fraisScolaires.getRequiredForMonthForEleve(eleve, m);
       final dejaPaye = eleve.paid[m] ?? 0;
       final restant = requis - dejaPaye;
       if (restant > 0) total += restant;
@@ -1133,16 +1579,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return total;
   }
 
-  // ⚡ CORRIGÉ — Le bouton "Confirmer" utilise désormais un flag
-  // `isSubmitting` local au dialogue (via StatefulBuilder) qui :
-  //   1) se met à `true` de manière SYNCHRONE au tout début du clic
-  //      (avant tout `await`), ce qui empêche toute exécution concurrente
-  //      même en cas de double-clic très rapide ;
-  //   2) désactive et grise le bouton "Confirmer" + le champ de saisie
-  //      pendant tout le traitement (enregistrement + impression), avec
-  //      un indicateur de chargement visuel pour rassurer l'utilisateur
-  //      et lui éviter de re-cliquer par impatience.
-  // C'est ce correctif qui garantit qu'UN clic = UN paiement = UN reçu.
   void _showPaymentDialog(BuildContext context, Eleve eleve, String mois) {
     if (!_peutPayerCeMois(eleve, mois)) {
       final premierNonPaye = _premierMoisNonPaye(eleve);
@@ -1169,9 +1605,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
           bool isSubmitting = false;
 
           Future<void> onConfirmPressed() async {
-            // ⚡ Verrou synchrone : rien d'autre ne s'exécute avant cette
-            // ligne, donc un deuxième clic pendant que isSubmitting est
-            // déjà vrai est immédiatement ignoré.
             if (isSubmitting) return;
             setStateDialog(() => isSubmitting = true);
 
@@ -1229,10 +1662,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               }
             }
 
-            // ⚡ handlePayment() est synchrone : à ce stade, la transaction
-            // (ou les transactions, si le paiement est réparti sur
-            // plusieurs mois) est créée en une seule fois, de façon
-            // atomique, avant tout autre await.
             final List<Map<String, dynamic>> nouvellesTransactions =
             widget.fraisScolaires.handlePayment(eleve, mois, amount);
             await widget.fraisScolaires.saveData();
@@ -1244,54 +1673,109 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 const SnackBar(content: Text("✅ Paiement enregistré avec succès")),
               );
 
-              int nbRecusImprimes = 0;
-              for (final transaction in nouvellesTransactions) {
-                final printed = await widget.fraisScolaires
-                    .printOrQueuePrincipalReceipt(
-                    eleve: eleve, transaction: transaction);
-                transaction['receiptConfirmed'] = printed;
-                if (printed) nbRecusImprimes++;
-              }
-              if (nouvellesTransactions.isNotEmpty) {
-                await widget.fraisScolaires.saveData();
-              }
-
-              if (mounted) {
-                final int totalRecus = nouvellesTransactions.length;
-                String message;
-                Color color;
-                if (totalRecus == 0) {
-                  message = "Aucune transaction créée.";
-                  color = Colors.orange;
-                } else if (nbRecusImprimes == totalRecus) {
-                  message = totalRecus == 1
-                      ? "🖨️ Reçu imprimé avec succès"
-                      : "🖨️ $nbRecusImprimes reçu(s) imprimé(s) avec succès "
-                      "(paiement réparti sur $totalRecus mois)";
-                  color = Colors.green;
-                } else if (nbRecusImprimes == 0) {
-                  message = totalRecus == 1
-                      ? "📥 Aucune imprimante disponible — le reçu sortira "
-                      "automatiquement dès qu'une imprimante sera prête."
-                      : "📥 $totalRecus reçu(s) en attente d'impression.";
-                  color = Colors.orange;
-                } else {
-                  message = "🖨️ $nbRecusImprimes/$totalRecus reçu(s) imprimé(s).";
-                  color = Colors.orange;
+              if (_receiptsLocked) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                          "🔒 Impression bloquée : ce paiement a été "
+                              "enregistré, mais aucun reçu n'a été imprimé "
+                              "ni mis en attente."),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
                 }
-                ScaffoldMessenger.of(context)
-                    .showSnackBar(SnackBar(content: Text(message), backgroundColor: color));
+              } else {
+                int nbRecusImprimes = 0;
+                for (final transaction in nouvellesTransactions) {
+                  final printed = await widget.fraisScolaires
+                      .printOrQueuePrincipalReceipt(
+                      eleve: eleve, transaction: transaction);
+                  transaction['receiptConfirmed'] = printed;
+                  if (printed) nbRecusImprimes++;
+                }
+                if (nouvellesTransactions.isNotEmpty) {
+                  await widget.fraisScolaires.saveData();
+                }
+
+                if (mounted) {
+                  final int totalRecus = nouvellesTransactions.length;
+                  String message;
+                  Color color;
+                  if (totalRecus == 0) {
+                    message = "Aucune transaction créée.";
+                    color = Colors.orange;
+                  } else if (nbRecusImprimes == totalRecus) {
+                    message = totalRecus == 1
+                        ? "🖨️ Reçu imprimé avec succès"
+                        : "🖨️ $nbRecusImprimes reçu(s) imprimé(s) avec succès "
+                        "(paiement réparti sur $totalRecus mois)";
+                    color = Colors.green;
+                  } else if (nbRecusImprimes == 0) {
+                    message = totalRecus == 1
+                        ? "📥 Aucune imprimante disponible — le reçu sortira "
+                        "automatiquement dès qu'une imprimante sera prête."
+                        : "📥 $totalRecus reçu(s) en attente d'impression.";
+                    color = Colors.orange;
+                  } else {
+                    message = "🖨️ $nbRecusImprimes/$totalRecus reçu(s) imprimé(s).";
+                    color = Colors.orange;
+                  }
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(SnackBar(content: Text(message), backgroundColor: color));
+                }
               }
             }
           }
 
           return AlertDialog(
             title: Text("Paiement - $mois (${eleve.section})"),
-            content: TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              enabled: !isSubmitting,
-              decoration: const InputDecoration(labelText: "Montant (FC)"),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (eleve.montantMensuelPersonnalise != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(20),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.indigo),
+                      ),
+                      child: Text(
+                        "⭐ Cet élève a un montant mensuel personnalisé : "
+                            "${eleve.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois "
+                            "(exception de paiement).",
+                        style: const TextStyle(color: Colors.indigo, fontSize: 11.5),
+                      ),
+                    ),
+                  ),
+                if (_receiptsLocked)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withAlpha(25),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.red),
+                      ),
+                      child: const Text(
+                        "🔒 Impression bloquée : ce paiement sera enregistré, "
+                            "mais aucun reçu ne sera imprimé ni mis en attente.",
+                        style: TextStyle(color: Colors.red, fontSize: 11.5),
+                      ),
+                    ),
+                  ),
+                TextField(
+                  controller: controller,
+                  keyboardType: TextInputType.number,
+                  enabled: !isSubmitting,
+                  decoration: const InputDecoration(labelText: "Montant (FC)"),
+                ),
+              ],
             ),
             actions: [
               TextButton(

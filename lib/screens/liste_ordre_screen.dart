@@ -39,6 +39,11 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
   void _genererListe() {
     if (selectedMois.isEmpty) return;
     setState(() {
+      // ⚡ getStudentsByOrderStatus utilise déjà en interne
+      // isStudentEnOrdrePourMois -> getRequiredForMonthForEleve, donc un
+      // élève avec une exception de paiement personnalisée est
+      // automatiquement classé "en ordre" / "pas en ordre" en fonction de
+      // SON propre montant requis, et non celui de sa section/classe.
       resultats = widget.fraisScolaires.getStudentsByOrderStatus(
         mois: selectedMois,
         enOrdre: enOrdre,
@@ -83,6 +88,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
 
     if (filename == null || filename.isEmpty) return;
 
+    // ⚡ generateOrderStatusPdf utilise déjà en interne
+    // getRequiredForMonthForEleve pour la colonne "Payé / Requis", donc
+    // le PDF reflète lui aussi correctement les montants personnalisés.
     await widget.fraisScolaires.generateOrderStatusPdf(
       filename: filename,
       mois: selectedMois,
@@ -303,9 +311,13 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                 itemBuilder: (context, index) {
                   final e = resultats[index];
                   final paye = e.paid[selectedMois] ?? 0;
+                  // ⚡ CORRIGÉ — utilise désormais
+                  // getRequiredForMonthForEleve pour que le montant
+                  // affiché soit bien celui de CET élève (montant
+                  // personnalisé si exception, sinon montant normal
+                  // de sa section/classe).
                   final requis = widget.fraisScolaires
-                      .getRequiredForMonth(
-                      selectedMois, e.section, e.classe);
+                      .getRequiredForMonthForEleve(e, selectedMois);
 
                   return Card(
                     margin: const EdgeInsets.symmetric(vertical: 6),
@@ -321,10 +333,25 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                           ),
                         ),
                       ),
-                      title: Text(
-                        "${e.nom} ${e.postNom} ${e.prenom}",
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w600),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              "${e.nom} ${e.postNom} ${e.prenom}",
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                          // ⚡ NOUVEAU — petit badge si l'élève a une
+                          // exception de paiement personnalisée, pour
+                          // que ce soit visible directement dans la liste.
+                          if (e.montantMensuelPersonnalise != null)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(Icons.star,
+                                  size: 16, color: Colors.indigo),
+                            ),
+                        ],
                       ),
                       subtitle: Text("${e.section} - ${e.classe}"),
                       trailing: Text(

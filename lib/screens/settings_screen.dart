@@ -34,6 +34,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? selectedClasseScopeForException;
   final TextEditingController newClasseController = TextEditingController();
 
+  // ==========================================================================
+  // ⚡ EXCEPTION DE PAIEMENT PAR ÉLÈVE
+  // ==========================================================================
+  final TextEditingController eleveExceptionSearchController =
+  TextEditingController();
+  final TextEditingController montantPersonnaliseController =
+  TextEditingController();
+  Eleve? _eleveSelectionnePourException;
+  List<Eleve> _resultatsRechercheEleveException = [];
+
   List<String> _availablePrinters = [];
   String? _selectedPrinterName;
   bool _loadingPrinters = false;
@@ -54,6 +64,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         : null;
     _loadPrinterConfig();
     _loadSavedLogo();
+  }
+
+  @override
+  void dispose() {
+    eleveExceptionSearchController.dispose();
+    montantPersonnaliseController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadPrinterConfig() async {
@@ -1275,6 +1292,425 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  // ==========================================================================
+  // ⚡ EXCEPTION DE PAIEMENT PAR ÉLÈVE
+  // ==========================================================================
+  void _rechercherElevesPourException(String query) {
+    final q = query.trim().toLowerCase();
+    setState(() {
+      if (q.isEmpty) {
+        _resultatsRechercheEleveException = [];
+      } else {
+        _resultatsRechercheEleveException = widget
+            .fraisScolaires.currentData.eleves
+            .where((e) =>
+        '${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase().contains(q) ||
+            e.id.toLowerCase().contains(q))
+            .take(15)
+            .toList();
+      }
+    });
+  }
+
+  void _selectionnerEleveException(Eleve eleve) {
+    setState(() {
+      _eleveSelectionnePourException = eleve;
+      eleveExceptionSearchController.text =
+      '${eleve.nom} ${eleve.postNom} ${eleve.prenom}';
+      _resultatsRechercheEleveException = [];
+      montantPersonnaliseController.text =
+      eleve.montantMensuelPersonnalise != null
+          ? eleve.montantMensuelPersonnalise!.toStringAsFixed(0)
+          : '';
+    });
+  }
+
+  Future<void> _enregistrerMontantPersonnalise() async {
+    final eleve = _eleveSelectionnePourException;
+    if (eleve == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content:
+            Text("Veuillez d'abord rechercher et sélectionner un élève")),
+      );
+      return;
+    }
+    if (!await _verifyBackupPassword()) return;
+
+    final montant = double.tryParse(montantPersonnaliseController.text.trim());
+    if (montant == null || montant <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Veuillez entrer un montant valide")),
+      );
+      return;
+    }
+
+    await widget.fraisScolaires.setMontantMensuelPersonnalise(eleve, montant);
+
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "✅ Montant personnalisé de ${montant.toStringAsFixed(0)} FC/mois "
+                "fixé pour ${eleve.nom} ${eleve.postNom} ${eleve.prenom}. "
+                "Ses paiements déjà enregistrés ont été recalculés "
+                "automatiquement pour rester cohérents.",
+          ),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _retirerMontantPersonnalise(Eleve eleve) async {
+    if (!await _verifyBackupPassword()) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Retirer l'exception ?"),
+        content: Text(
+          "Voulez-vous vraiment retirer le montant personnalisé de "
+              "${eleve.nom} ${eleve.postNom} ${eleve.prenom} ?\n\n"
+              "Il repaiera ensuite le montant normal de sa section/classe, "
+              "et ses paiements déjà enregistrés seront recalculés "
+              "automatiquement selon ce montant normal.",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Retirer"),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await widget.fraisScolaires.setMontantMensuelPersonnalise(eleve, null);
+      if (mounted) {
+        setState(() {
+          if (_eleveSelectionnePourException?.id == eleve.id) {
+            _eleveSelectionnePourException = null;
+            eleveExceptionSearchController.clear();
+            montantPersonnaliseController.clear();
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  "Exception retirée — l'élève repaie le montant normal de sa section/classe")),
+        );
+      }
+    }
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — OPTIONS (regroupement facultatif de sections)
+  // ==========================================================================
+  void _addOptionDialog() async {
+    if (!await _verifyBackupPassword()) return;
+    final controller = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Nouvelle Option"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: "Nom de l'option",
+                hintText: "Ex : Technique",
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                "Vous pourrez ensuite y imbriquer les sections que vous "
+                    "voulez regrouper (icône ⚙ \"Gérer les sections\" une "
+                    "fois l'option créée).",
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () async {
+              final nom = controller.text.trim();
+              final erreur = await widget.fraisScolaires.addOption(nom);
+              if (erreur != null) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(erreur)),
+                );
+                return;
+              }
+              if (mounted) {
+                Navigator.pop(ctx);
+                setState(() {});
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text("✅ Option \"$nom\" créée")),
+                );
+              }
+            },
+            child: const Text("Créer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _renameOptionDialog(String option) async {
+    if (!await _verifyBackupPassword()) return;
+    final controller = TextEditingController(text: option);
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text("Renommer \"$option\""),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: "Nouveau nom de l'option"),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () async {
+              final nouveau = controller.text.trim();
+              final erreur =
+              await widget.fraisScolaires.renameOption(option, nouveau);
+              if (erreur != null) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(erreur)),
+                );
+                return;
+              }
+              if (mounted) {
+                Navigator.pop(ctx);
+                setState(() {});
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("✅ Option renommée")),
+                );
+              }
+            },
+            child: const Text("Renommer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteOptionDialog(String option) async {
+    if (!await _verifyBackupPassword()) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Supprimer cette option ?"),
+        content: Text(
+          "Voulez-vous vraiment supprimer l'option \"$option\" ?\n\n"
+              "Les sections qu'elle contenait ne sont PAS supprimées : "
+              "elles redeviennent simplement des sections \"seules\" dans "
+              "les rapports (comme si aucune option n'existait pour elles).",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Supprimer"),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await widget.fraisScolaires.deleteOption(option);
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Option supprimée")),
+        );
+      }
+    }
+  }
+
+  void _manageOptionSectionsDialog(String option) async {
+    if (!await _verifyBackupPassword()) return;
+
+    final Set<String> selection =
+    widget.fraisScolaires.getSectionsPourOption(option).toSet();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: Text("Sections de l'option \"$option\""),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Cochez toutes les sections que vous voulez imbriquer "
+                          "dans cette option. Une section ne peut appartenir "
+                          "qu'à une seule option à la fois : si elle est "
+                          "déjà dans une autre option, la cocher ici l'en "
+                          "retirera automatiquement.",
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 10),
+                    if (widget.fraisScolaires.config.sections.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          "Aucune section n'existe encore dans l'école.",
+                          style: TextStyle(
+                              color: Colors.grey, fontStyle: FontStyle.italic),
+                        ),
+                      )
+                    else
+                      ...widget.fraisScolaires.config.sections.map((s) {
+                        final autreOption =
+                        widget.fraisScolaires.getOptionDeSection(s);
+                        final estDansAutreOption =
+                            autreOption != null && autreOption != option;
+                        return CheckboxListTile(
+                          dense: true,
+                          value: selection.contains(s),
+                          title: Text(s),
+                          subtitle: estDansAutreOption
+                              ? Text(
+                            "Actuellement dans l'option \"$autreOption\"",
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.orange),
+                          )
+                              : null,
+                          onChanged: (checked) {
+                            setDialogState(() {
+                              if (checked == true) {
+                                selection.add(s);
+                              } else {
+                                selection.remove(s);
+                              }
+                            });
+                          },
+                        );
+                      }),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+              ElevatedButton(
+                onPressed: () async {
+                  await widget.fraisScolaires
+                      .setSectionsPourOption(option, selection.toList());
+                  if (mounted) {
+                    Navigator.pop(ctx);
+                    setState(() {});
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("✅ Sections de l'option mises à jour")),
+                    );
+                  }
+                },
+                child: const Text("Enregistrer"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  List<Widget> _buildOptionsSection() {
+    final optionsNoms = widget.fraisScolaires.getOptionsNoms();
+    return [
+      const Divider(),
+      const Text("Options (Regroupement de Sections) — Facultatif",
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 6),
+      const Text(
+        "Une option regroupe une ou plusieurs sections déjà créées (ex : "
+            "\"Technique\" peut contenir plusieurs sections techniques). "
+            "C'est totalement facultatif : si vous n'imbriquez aucune "
+            "section dans aucune option, rien ne change dans l'application "
+            "ni dans les rapports. Une section ne peut appartenir qu'à une "
+            "seule option à la fois. Dès qu'au moins une option contient "
+            "des sections, un tableau supplémentaire \"Répartition par "
+            "option\" apparaît automatiquement dans les rapports PDF, à "
+            "côté du tableau \"Répartition par section\".",
+        style: TextStyle(color: Colors.grey, fontSize: 12),
+      ),
+      const SizedBox(height: 10),
+      ElevatedButton.icon(
+        icon: const Icon(Icons.add),
+        label: const Text("Créer une nouvelle Option"),
+        onPressed: _addOptionDialog,
+      ),
+      const SizedBox(height: 10),
+      if (optionsNoms.isEmpty)
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 8),
+          child: Text(
+            "Aucune option créée pour le moment — les sections apparaissent "
+                "chacune seule dans les rapports, comme d'habitude.",
+            style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+          ),
+        )
+      else
+        ...optionsNoms.map((option) {
+          final sections = widget.fraisScolaires.getSectionsPourOption(option);
+          return Card(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            child: ListTile(
+              title: Text(option),
+              subtitle: Text(
+                sections.isEmpty
+                    ? "Aucune section imbriquée pour l'instant"
+                    : "Sections imbriquées : ${sections.join(', ')}",
+                style: TextStyle(
+                  color: sections.isEmpty ? Colors.orange : null,
+                ),
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.tune, color: Colors.teal),
+                    tooltip: "Gérer les sections de cette option",
+                    onPressed: () => _manageOptionSectionsDialog(option),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.edit, color: Colors.indigo),
+                    tooltip: "Renommer l'option",
+                    onPressed: () => _renameOptionDialog(option),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, color: Colors.red),
+                    tooltip: "Supprimer l'option",
+                    onPressed: () => _deleteOptionDialog(option),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
@@ -1308,6 +1744,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     final List<String> sectionsSansFrais =
     widget.fraisScolaires.getSectionsSansFraisConfigure();
+
+    final List<Eleve> elevesAvecExceptionPersonnalisee =
+    widget.fraisScolaires.getElevesAvecExceptionPersonnalisee();
 
     return Scaffold(
       appBar: AppBar(
@@ -1418,6 +1857,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ))
                   .toList(),
             ),
+
+            // ⚡ NOUVEAU — Gestion des Options (regroupement facultatif de sections)
+            ..._buildOptionsSection(),
+
             const Divider(),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1604,8 +2047,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                     final bool unMoisEstPlusBas = anciensRequis.entries.any((e) =>
                     widget.fraisScolaires.getRequiredForMonth(
-                        e.key, selectedSectionForFee!, selectedClasseScopeForFee) <
-                        e.value);
+                        e.key, selectedSectionForFee!, selectedClasseScopeForFee) < e.value);
 
                     String mode = 'intelligent';
                     if (unMoisEstPlusBas && mounted) {
@@ -1673,8 +2115,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                   final bool unMoisEstPlusBas = anciensRequis.entries.any((e) =>
                   widget.fraisScolaires.getRequiredForMonth(
-                      e.key, selectedSectionForFee!, selectedClasseScopeForFee) <
-                      e.value);
+                      e.key, selectedSectionForFee!, selectedClasseScopeForFee) < e.value);
 
                   String mode = 'intelligent';
                   if (unMoisEstPlusBas && mounted) {
@@ -1766,6 +2207,198 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: () => _editExceptionForSection(),
               child: const Text("Ajouter / Modifier Exception"),
             ),
+
+            // ==========================================================
+            // ⚡ EXCEPTION DE PAIEMENT PAR ÉLÈVE
+            // ==========================================================
+            const Divider(),
+            const Text("Exception de Paiement par Élève",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              "Pour un élève précis qui doit payer un montant différent de "
+                  "celui de sa section/classe (ex: enfant d'un enseignant). "
+                  "Une fois fixé, ce montant remplace, pour TOUS les mois de "
+                  "l'année, celui de sa section/classe — partout dans "
+                  "l'application (paiement, reçus, PDF, liste en ordre) — "
+                  "sans que cela touche les autres élèves ni le "
+                  "fonctionnement normal du système.",
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: eleveExceptionSearchController,
+              decoration: const InputDecoration(
+                labelText: "Rechercher un élève (nom ou ID)",
+                prefixIcon: Icon(Icons.search),
+                hintText: "Ex: BARAKA ou BB26B10",
+              ),
+              onChanged: (value) {
+                if (_eleveSelectionnePourException != null &&
+                    value !=
+                        '${_eleveSelectionnePourException!.nom} '
+                            '${_eleveSelectionnePourException!.postNom} '
+                            '${_eleveSelectionnePourException!.prenom}') {
+                  _eleveSelectionnePourException = null;
+                  montantPersonnaliseController.clear();
+                }
+                _rechercherElevesPourException(value);
+              },
+            ),
+            if (_resultatsRechercheEleveException.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.only(top: 6),
+                constraints: const BoxConstraints(maxHeight: 220),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade300),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _resultatsRechercheEleveException.length,
+                  itemBuilder: (context, i) {
+                    final e = _resultatsRechercheEleveException[i];
+                    return ListTile(
+                      dense: true,
+                      leading: e.montantMensuelPersonnalise != null
+                          ? const Icon(Icons.star, color: Colors.indigo, size: 18)
+                          : const Icon(Icons.person_outline, size: 18),
+                      title: Text('${e.nom} ${e.postNom} ${e.prenom}'),
+                      subtitle: Text('ID: ${e.id} — ${e.classe} (${e.section})'),
+                      onTap: () => _selectionnerEleveException(e),
+                    );
+                  },
+                ),
+              ),
+            if (_eleveSelectionnePourException != null)
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.indigo.withAlpha(15),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.indigo.shade100),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.person, color: Colors.indigo, size: 18),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            '${_eleveSelectionnePourException!.nom} '
+                                '${_eleveSelectionnePourException!.postNom} '
+                                '${_eleveSelectionnePourException!.prenom} '
+                                '(${_eleveSelectionnePourException!.classe} - '
+                                '${_eleveSelectionnePourException!.section})',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold, color: Colors.indigo),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 18),
+                          tooltip: "Annuler la sélection",
+                          onPressed: () {
+                            setState(() {
+                              _eleveSelectionnePourException = null;
+                              eleveExceptionSearchController.clear();
+                              montantPersonnaliseController.clear();
+                              _resultatsRechercheEleveException = [];
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: montantPersonnaliseController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: "Montant mensuel fixe pour cet élève (FC)",
+                        helperText:
+                        "Ce montant remplacera celui de sa section/classe, pour tous les mois",
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.check),
+                            label: const Text("Fixer le montant"),
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.indigo,
+                                foregroundColor: Colors.white),
+                            onPressed: _enregistrerMontantPersonnalise,
+                          ),
+                        ),
+                        if (_eleveSelectionnePourException!
+                            .montantMensuelPersonnalise !=
+                            null) ...[
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              icon: const Icon(Icons.delete_outline, color: Colors.red),
+                              label: const Text("Retirer",
+                                  style: TextStyle(color: Colors.red)),
+                              onPressed: () => _retirerMontantPersonnalise(
+                                  _eleveSelectionnePourException!),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 16),
+            if (elevesAvecExceptionPersonnalisee.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  "Aucun élève n'a actuellement de montant personnalisé.",
+                  style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+                ),
+              )
+            else ...[
+              Text(
+                "Élèves avec un montant personnalisé (${elevesAvecExceptionPersonnalisee.length}) :",
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+              const SizedBox(height: 6),
+              ...elevesAvecExceptionPersonnalisee.map((e) => Card(
+                margin: const EdgeInsets.symmetric(vertical: 3),
+                child: ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.star, color: Colors.indigo),
+                  title: Text('${e.nom} ${e.postNom} ${e.prenom}'),
+                  subtitle: Text('${e.classe} - ${e.section}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        "${e.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois",
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, color: Colors.indigo),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
+                        tooltip: "Modifier",
+                        onPressed: () => _selectionnerEleveException(e),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+                        tooltip: "Retirer",
+                        onPressed: () => _retirerMontantPersonnalise(e),
+                      ),
+                    ],
+                  ),
+                ),
+              )),
+            ],
+
             const Divider(),
             const Text("Recalcul de Sécurité des Paiements",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -1776,7 +2409,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   "des élèves ont déjà payé avec l'ancien montant. Ce bouton "
                   "ne supprime ni n'ajoute aucun argent : il redistribue "
                   "simplement, mois par mois et pour chaque élève, ce qu'il "
-                  "a déjà payé, en respectant les montants requis ACTUELS.",
+                  "a déjà payé, en respectant les montants requis ACTUELS "
+                  "(y compris les montants personnalisés déjà fixés, qui ne "
+                  "sont jamais écrasés par ce recalcul général).",
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
@@ -2366,6 +3001,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       widget.fraisScolaires.config.monthlyExceptionsByClasse
           .removeWhere((key, _) => key.startsWith("$section|"));
       widget.fraisScolaires.config.classesBySection.remove(section);
+      // ⚡ NOUVEAU — retire aussi la section de toute option qui la contenait.
+      widget.fraisScolaires.retirerSectionDesOptions(section);
     });
     await widget.fraisScolaires.saveData();
   }

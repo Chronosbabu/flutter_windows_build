@@ -14,6 +14,27 @@ import 'dart:math';
 
 const String serverUrl = "https://jsinf.onrender.com";
 
+// ============================================================================
+// ⚡ NOUVEAU — Constantes des types de dépenses et des rubriques
+// ============================================================================
+const String kDepenseGlobale = 'globale';
+const String kDepenseIndependante = 'independante';
+const String kDepenseMixte = 'mixte';
+const String kRubriqueAutre = 'Autre';
+const String kRubriqueNonAffectee = 'Non affectée';
+
+/// Formate un montant avec séparateur de milliers : 1234567 -> "1 234 567".
+String formatMontant(double v) {
+  final neg = v < -0.5;
+  final s = v.abs().round().toString();
+  final buf = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+    buf.write(s[i]);
+  }
+  return '${neg ? '-' : ''}$buf';
+}
+
 class Depense {
   String id;
   String motif;
@@ -21,22 +42,57 @@ class Depense {
   DateTime date;
   String enregistrePar;
 
+  /// 'globale' (toute l'école), 'independante' (une section) ou
+  /// 'mixte' (deux sections ou plus).
+  String portee;
+
+  /// Sections concernées (vide pour une dépense globale).
+  List<String> sections;
+
+  /// Classes concernées (vide = toutes les classes des sections choisies).
+  List<String> classes;
+
+  /// Rubrique (administration) sur laquelle l'argent est sorti.
+  String rubrique;
+
   Depense({
     required this.id,
     required this.motif,
     required this.montant,
     required this.date,
     this.enregistrePar = 'Direction',
-  });
+    this.portee = kDepenseGlobale,
+    List<String>? sections,
+    List<String>? classes,
+    this.rubrique = '',
+  })  : sections = sections ?? [],
+        classes = classes ?? [];
 
-  factory Depense.fromJson(Map<String, dynamic> json) => Depense(
-    id: json['id'] as String? ?? '',
-    motif: json['motif'] as String? ?? '',
-    montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
-    date: DateTime.tryParse(json['date'] as String? ?? '') ??
-        DateTime.now(),
-    enregistrePar: json['enregistrePar'] as String? ?? 'Direction',
-  );
+  factory Depense.fromJson(Map<String, dynamic> json) {
+    final String porteeRaw = json['portee'] as String? ?? kDepenseGlobale;
+    final String portee = (porteeRaw == kDepenseIndependante ||
+        porteeRaw == kDepenseMixte)
+        ? porteeRaw
+        : kDepenseGlobale;
+    return Depense(
+      id: json['id'] as String? ?? '',
+      motif: json['motif'] as String? ?? '',
+      montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+      date: DateTime.tryParse(json['date'] as String? ?? '') ??
+          DateTime.now(),
+      enregistrePar: json['enregistrePar'] as String? ?? 'Direction',
+      portee: portee,
+      sections: (json['sections'] as List<dynamic>?)
+          ?.map((e) => e.toString())
+          .toList() ??
+          [],
+      classes: (json['classes'] as List<dynamic>?)
+          ?.map((e) => e.toString())
+          .toList() ??
+          [],
+      rubrique: json['rubrique'] as String? ?? '',
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -44,6 +100,10 @@ class Depense {
     'montant': montant,
     'date': date.toIso8601String(),
     'enregistrePar': enregistrePar,
+    'portee': portee,
+    'sections': sections,
+    'classes': classes,
+    'rubrique': rubrique,
   };
 
   String get dateFormatee {
@@ -51,6 +111,132 @@ class Depense {
     return '${two(date.day)}/${two(date.month)}/${date.year} à '
         '${two(date.hour)}:${two(date.minute)}';
   }
+
+  String get porteeLabel {
+    switch (portee) {
+      case kDepenseIndependante:
+        return 'Indépendante';
+      case kDepenseMixte:
+        return 'Mixte';
+      case kDepenseGlobale:
+      default:
+        return 'Globale';
+    }
+  }
+
+  String get rubriqueAffichee =>
+      rubrique.trim().isEmpty ? kRubriqueNonAffectee : rubrique.trim();
+
+  String get sectionsLabel {
+    if (portee == kDepenseGlobale || sections.isEmpty) {
+      return "Toute l'école";
+    }
+    return sections.join(', ');
+  }
+
+  String get classesLabel {
+    if (portee == kDepenseGlobale) return 'Toutes';
+    if (classes.isEmpty) return 'Toutes les classes';
+    return classes.join(', ');
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — Statistiques des dépenses par période (jour / mois / année)
+// ============================================================================
+class RubriqueStat {
+  final String rubrique;
+  final double pourcentage;
+  double collecte;
+  double globales = 0;
+  double independantes = 0;
+  double mixtes = 0;
+
+  RubriqueStat({
+    required this.rubrique,
+    required this.pourcentage,
+    required this.collecte,
+  });
+
+  double get total => globales + independantes + mixtes;
+  double get reste => collecte - total;
+}
+
+class SectionStat {
+  final String section;
+  double collecte;
+  double independantes = 0;
+  double mixtes = 0;
+
+  SectionStat({required this.section, required this.collecte});
+
+  double get total => independantes + mixtes;
+  double get reste => collecte - total;
+  bool get aDeLActivite => collecte != 0 || total != 0;
+}
+
+class DepensePeriodeStats {
+  final String period;
+  final List<Depense> depenses;
+  final List<RubriqueStat> rubriques;
+  final List<SectionStat> sections;
+  final double totalCollecte;
+  final double globales;
+  final double independantes;
+  final double mixtes;
+
+  /// Vrai si un filtre de section est appliqué : dans ce cas les dépenses
+  /// globales apparaissent dans la liste mais ne sont pas déduites.
+  final bool globalesExclues;
+
+  DepensePeriodeStats({
+    required this.period,
+    required this.depenses,
+    required this.rubriques,
+    required this.sections,
+    required this.totalCollecte,
+    required this.globales,
+    required this.independantes,
+    required this.mixtes,
+    required this.globalesExclues,
+  });
+
+  double get totalDepenses => globales + independantes + mixtes;
+  double get reste => totalCollecte - totalDepenses;
+
+  RubriqueStat? rubriqueParNom(String nom) {
+    for (final r in rubriques) {
+      if (r.rubrique == nom) return r;
+    }
+    return null;
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — OPTIONS (regroupement facultatif de sections)
+// ----------------------------------------------------------------------------
+// Une « option » est simplement un nom (ex: « Technique ») qui regroupe une ou
+// plusieurs sections déjà existantes. C'est 100 % facultatif : si aucune option
+// n'est créée, l'application se comporte exactement comme avant.
+// Dans les rapports, une option devient UNE colonne/ligne regroupant toutes ses
+// sections ; les sections non regroupées restent chacune seule (comme avant).
+// ============================================================================
+class GroupeOption {
+  /// Nom de l'option, ou nom de la section si elle n'est dans aucune option.
+  final String nom;
+
+  /// Sections (réellement présentes dans le rapport) de ce groupe.
+  final List<String> sections;
+
+  /// Vrai si c'est une vraie option créée par l'utilisateur, faux si c'est
+  /// une section isolée (non regroupée).
+  final bool estOption;
+
+  GroupeOption({
+    required this.nom,
+    required this.sections,
+    required this.estOption,
+  });
 }
 
 class AutreFrais {
@@ -301,11 +487,13 @@ class FraisScolaires {
   Map<String, List<String>> localAttendance = {};
   List<Map<String, dynamic>> localCommunicationsLog = [];
 
+  /// ⚡ NOUVEAU — Options (facultatif) : nom de l'option -> sections qu'elle
+  /// regroupe. Vide par défaut : dans ce cas rien ne change dans l'application
+  /// ni dans les rapports.
+  Map<String, List<String>> optionsSections = {};
+
   int _localIdCounter = 0;
 
-  // ⚡ NOUVEAU — verrou anti-concurrence pour flushReceiptQueue() : empêche
-  // deux vidages simultanés de la file de reçus en attente, qui pouvaient
-  // provoquer l'impression du même reçu plusieurs fois.
   bool _isFlushingReceiptQueue = false;
 
   final List<String> months = [
@@ -315,6 +503,11 @@ class FraisScolaires {
 
   static const List<String> _joursSemaine = [
     'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'
+  ];
+
+  static const List<String> _moisCalendrier = [
+    'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
+    'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'
   ];
 
   FraisScolaires() : config = SchoolConfig(schoolName: "EduPay School RDC");
@@ -569,12 +762,6 @@ class FraisScolaires {
     );
     if (ok) {
       transaction['receiptConfirmed'] = true;
-      // ⚡ NOUVEAU — purge une éventuelle entrée résiduelle de la file
-      // d'attente pour ce même paiement, pour qu'une impression
-      // automatique ultérieure (flushReceiptQueue) ne reproduise jamais
-      // ce reçu. Il s'agit ici d'une réimpression explicitement demandée
-      // (duplicata volontaire) donc l'impression elle-même n'est pas
-      // bloquée, mais on garde le registre cohérent après coup.
       final key = _principalReceiptKey(eleve, transaction);
       if (!isReceiptPrinted(key)) {
         await _markReceiptPrinted(key);
@@ -587,16 +774,10 @@ class FraisScolaires {
 
   // ==========================================================================
   // RÉSUMÉ PROMOTEUR — calculé et poussé au serveur après chaque sauvegarde
-  // ⚡ ENRICHI : inclut désormais la répartition Aujourd'hui / Ce mois /
-  // Cette année, globale ET par section, pour que le promoteur puisse voir
-  // combien chaque administration (enseignants, gestionnaire, etc.) a déjà
-  // accumulé — pas seulement pour la journée, mais aussi pour le mois en
-  // cours, l'année, et pour chaque section de l'école.
   // ==========================================================================
   Map<String, dynamic> computePromoterSummary() {
     final today = DateTime.now().toString().split(' ')[0];
 
-    // --- Aujourd'hui, par section (frais principaux) ---
     final Map<String, double> moneyTodayBySection =
     getMoneyCollectedTodayBySection();
     final double moneyTodayPrincipal =
@@ -609,7 +790,6 @@ class FraisScolaires {
       }
     }
 
-    // --- Ce mois-ci, par section (frais principaux) ---
     final Map<String, double> moneyThisMonthBySection =
     getMoneyCollectedThisMonthBySection();
     final double moneyThisMonthPrincipal =
@@ -623,14 +803,12 @@ class FraisScolaires {
       }
     }
 
-    // --- Cette année (déjà existant) ---
     final double totalPrincipalYear = getYearTotalCollected();
     final double totalAutresFraisYear =
     (autresFraisPaiementsByYear[currentYear] ?? [])
         .fold(0.0, (sum, p) => sum + p.montant);
     final Map<String, double> moneyThisYearBySection = getTotalBySection();
 
-    // --- Répartition GLOBALE par administration (toute l'école) ---
     final adminDistToday = calculateAdminDistribution(moneyTodayPrincipal);
     final adminDistThisMonth =
     calculateAdminDistribution(moneyThisMonthPrincipal);
@@ -643,7 +821,6 @@ class FraisScolaires {
     final autresFraisAdminDistThisYear =
     calculateAutresFraisAdminDistribution(totalAutresFraisYear);
 
-    // --- Répartition PAR SECTION par administration ---
     Map<String, Map<String, double>> distBySection(
         Map<String, double> amountsBySection) {
       final result = <String, Map<String, double>>{};
@@ -672,7 +849,6 @@ class FraisScolaires {
       'currentYear': currentYear,
       'currentMonthName': currentSchoolMonthName ?? '',
 
-      // Aujourd'hui
       'moneyToday': moneyTodayPrincipal + moneyTodayAutresFrais,
       'moneyTodayPrincipal': moneyTodayPrincipal,
       'moneyTodayAutresFrais': moneyTodayAutresFrais,
@@ -681,7 +857,6 @@ class FraisScolaires {
       'moneyTodayBySection': moneyTodayBySection,
       'adminDistributionTodayBySection': adminDistributionTodayBySection,
 
-      // Ce mois-ci
       'moneyThisMonth': moneyThisMonthPrincipal + moneyThisMonthAutresFrais,
       'moneyThisMonthPrincipal': moneyThisMonthPrincipal,
       'moneyThisMonthAutresFrais': moneyThisMonthAutresFrais,
@@ -691,7 +866,6 @@ class FraisScolaires {
       'adminDistributionThisMonthBySection':
       adminDistributionThisMonthBySection,
 
-      // Cette année / global
       'adminDistributionThisYear': adminDistThisYear,
       'autresFraisAdminDistributionThisYear': autresFraisAdminDistThisYear,
       'moneyThisYearBySection': moneyThisYearBySection,
@@ -705,6 +879,13 @@ class FraisScolaires {
       'totalAmountBySection': getTotalBySection(),
       'totalAmountByClass': getTotalByClass(),
       'totalDepenses': getTotalDepenses(),
+      'totalDepensesToday': getTotalDepensesToday(),
+      'totalDepensesThisMonth': getTotalDepensesThisMonth(),
+      'depensesParPortee': {
+        kDepenseGlobale: getTotalDepensesParPortee(kDepenseGlobale),
+        kDepenseIndependante: getTotalDepensesParPortee(kDepenseIndependante),
+        kDepenseMixte: getTotalDepensesParPortee(kDepenseMixte),
+      },
       'soldeNet': getSoldeNetActuel(),
     };
   }
@@ -832,6 +1013,43 @@ class FraisScolaires {
     await saveData();
   }
 
+  // ==========================================================================
+  // SUPPORT POUR L'IMPORTATION D'ÉLÈVES DEPUIS UN FICHIER EXTERNE
+  // ==========================================================================
+  String normalizeSectionKey(String raw) => raw.trim().toUpperCase();
+
+  String? resolveSectionAlias(String rawSectionCandidate) {
+    final key = normalizeSectionKey(rawSectionCandidate);
+    if (config.sectionAliases.containsKey(key)) {
+      return config.sectionAliases[key];
+    }
+    for (final s in config.sections) {
+      if (normalizeSectionKey(s) == key) return s;
+    }
+    return null;
+  }
+
+  Future<void> registerSectionAlias(
+      String rawSectionCandidate, String targetSection) async {
+    final key = normalizeSectionKey(rawSectionCandidate);
+    config.sectionAliases[key] = targetSection;
+    if (!config.sections.contains(targetSection)) {
+      config.sections.add(targetSection);
+    }
+    await saveData();
+  }
+
+  Future<void> registerCustomFieldQuestion(String question) async {
+    final trimmed = question.trim();
+    if (trimmed.isEmpty) return;
+    final exists = config.customFieldQuestions
+        .any((q) => q.trim().toLowerCase() == trimmed.toLowerCase());
+    if (!exists) {
+      config.customFieldQuestions.add(trimmed);
+      await saveData();
+    }
+  }
+
   bool isReceiptPrinted(String key) => printedReceiptKeys.contains(key);
 
   Future<Uint8List?> _loadLogoBytesForPrinting() async {
@@ -855,16 +1073,6 @@ class FraisScolaires {
     return prefs.getString('printer_name') ?? '';
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — Clé unique et STABLE identifiant le reçu d'UNE transaction
-  // du frais principal. TOUTES les voies d'impression (immédiate, file
-  // d'attente `flushReceiptQueue`, et réimpression manuelle
-  // `retryPrintPrincipalReceipt`) utilisent désormais cette même clé.
-  // C'est ce qui garantit qu'un même paiement ne soit JAMAIS imprimé plus
-  // d'une fois, quel que soit le chemin par lequel l'impression est
-  // déclenchée (impression au moment du paiement, impression différée
-  // après reconnexion de l'imprimante, ou clic manuel sur "imprimer").
-  // ==========================================================================
   String _principalReceiptKey(Eleve eleve, Map<String, dynamic> transaction) {
     final String transactionId = transaction['id']?.toString() ?? '';
     if (transactionId.isNotEmpty) {
@@ -913,13 +1121,10 @@ class FraisScolaires {
     final double montantPaye =
         (transaction['amount'] as num?)?.toDouble() ?? 0.0;
 
-    // ⚡ Clé unifiée (voir _principalReceiptKey) — identique à celle
-    // utilisée par flushReceiptQueue() et retryPrintPrincipalReceipt().
     final key = _principalReceiptKey(eleve, transaction);
     if (isReceiptPrinted(key)) return false;
 
-    final double montantRequis =
-    getRequiredForMonth(mois, eleve.section, eleve.classe);
+    final double montantRequis = getRequiredForMonthForEleve(eleve, mois);
     final double totalPaye = getStudentTotalPaid(eleve);
     final double totalRequis = getStudentPending(eleve) + totalPaye;
     final double resteAPayerMoisBrut = montantRequis - (eleve.paid[mois] ?? 0);
@@ -978,15 +1183,6 @@ class FraisScolaires {
     return false;
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — Réimpression manuelle d'UN paiement principal déjà
-  // enregistré (bouton imprimante sur une transaction non confirmée dans
-  // l'écran "Paiements des Élèves"). Avant ce correctif, cette action ne
-  // passait PAS par le registre `printedReceiptKeys`/`receiptQueue`, ce
-  // qui pouvait provoquer une réimpression automatique en double lors du
-  // prochain passage de `flushReceiptQueue()`. Désormais elle utilise la
-  // MÊME clé et le MÊME registre que toutes les autres voies d'impression.
-  // ==========================================================================
   Future<bool> retryPrintPrincipalReceipt({
     required Eleve eleve,
     required Map<String, dynamic> transaction,
@@ -996,10 +1192,6 @@ class FraisScolaires {
     final key = _principalReceiptKey(eleve, transaction);
 
     if (isReceiptPrinted(key)) {
-      // Déjà imprimé avec certitude par une autre voie (impression
-      // automatique au moment du paiement, ou file d'attente) entre-temps
-      // : on synchronise simplement l'état local SANS réimprimer, pour
-      // ne jamais produire un doublon.
       transaction['receiptConfirmed'] = true;
       await saveData();
       return true;
@@ -1070,12 +1262,6 @@ class FraisScolaires {
   }
 
   Future<int> flushReceiptQueue() async {
-    // ⚡ NOUVEAU — verrou anti-concurrence : si un vidage de la file est
-    // déjà en cours (ex: l'écran de paiement a été réinitialisé deux fois
-    // rapidement), on ne relance pas un second vidage en parallèle. Sans
-    // ce verrou, deux exécutions concurrentes pouvaient toutes les deux
-    // constater qu'un reçu n'était "pas encore imprimé" et l'imprimer
-    // chacune une fois, créant un doublon.
     if (_isFlushingReceiptQueue) return 0;
     if (receiptQueue.isEmpty) return 0;
     final printerName = await _currentPrinterName();
@@ -1248,6 +1434,7 @@ class FraisScolaires {
       autresFraisAdministrations.map((a) => a.toJson()).toList(),
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
       'signataires': signataires.map((s) => s.toJson()).toList(),
+      'optionsSections': optionsSections,
       'printedReceiptKeys': printedReceiptKeys,
       'receiptQueue': receiptQueue,
       'backup_password': null,
@@ -1847,6 +2034,9 @@ class FraisScolaires {
         targetData.eleves.firstWhere((e) => e.id == eleve.id);
         existing.classe  = newClasse;
         existing.section = eleve.section;
+        // L'exception de paiement personnalisée suit l'élève
+        // d'une année à l'autre (ex: enfant d'enseignant qui monte de classe).
+        existing.montantMensuelPersonnalise = eleve.montantMensuelPersonnalise;
       } else {
         targetData.eleves.add(Eleve(
           id:      eleve.id,
@@ -1855,6 +2045,7 @@ class FraisScolaires {
           prenom:  eleve.prenom,
           classe:  newClasse,
           section: eleve.section,
+          montantMensuelPersonnalise: eleve.montantMensuelPersonnalise,
         ));
         existingIds.add(eleve.id);
       }
@@ -1913,6 +2104,44 @@ class FraisScolaires {
     return config.feesBySection[section] ?? _montantSecoursSiNonConfigure;
   }
 
+  // ==========================================================================
+  // EXCEPTION DE PAIEMENT PAR ÉLÈVE
+  // ==========================================================================
+  // Point d'entrée UNIQUE utilisé PARTOUT dans l'application pour calculer
+  // le montant requis d'un élève précis pour un mois précis. Si l'élève a
+  // un `montantMensuelPersonnalise` défini, ce montant remplace le calcul
+  // normal par section/classe, pour TOUS les mois. Sinon, comportement
+  // strictement identique à avant (délégué à `getRequiredForMonth`).
+  double getRequiredForMonthForEleve(Eleve eleve, String mois) {
+    if (eleve.montantMensuelPersonnalise != null) {
+      return eleve.montantMensuelPersonnalise!;
+    }
+    return getRequiredForMonth(mois, eleve.section, eleve.classe);
+  }
+
+  /// Fixe (ou retire, si `montant` est `null`) le montant mensuel
+  /// personnalisé d'un élève. Recalcule immédiatement la répartition de
+  /// ses paiements déjà enregistrés selon le nouveau montant, pour que
+  /// tout (paiements, reçus, PDF, liste en ordre) reste cohérent sans
+  /// aucune action supplémentaire.
+  Future<void> setMontantMensuelPersonnalise(
+      Eleve eleve, double? montant) async {
+    eleve.montantMensuelPersonnalise =
+    (montant != null && montant > 0) ? montant : null;
+    recalculerRepartitionMoisPourEleve(eleve);
+    await saveData();
+  }
+
+  /// Liste de tous les élèves ayant actuellement une exception de
+  /// paiement personnalisée, triée par nom (pour l'écran Paramètres).
+  List<Eleve> getElevesAvecExceptionPersonnalisee() {
+    final list = currentData.eleves
+        .where((e) => e.montantMensuelPersonnalise != null)
+        .toList();
+    list.sort((a, b) => a.nom.toLowerCase().compareTo(b.nom.toLowerCase()));
+    return list;
+  }
+
   Map<String, double> getTotalBySection() {
     final totals = <String, double>{};
     for (var e in currentData.eleves) {
@@ -1946,11 +2175,6 @@ class FraisScolaires {
         .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0));
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — Montants collectés (frais principaux) groupés PAR SECTION,
-  // pour "Aujourd'hui" et pour "Ce mois-ci". Le total par section pour
-  // "Cette année" existe déjà via getTotalBySection().
-  // ==========================================================================
   Map<String, double> getMoneyCollectedTodayBySection() {
     final today = DateTime.now().toString().split(' ')[0];
     final Map<String, double> result = {};
@@ -1982,8 +2206,6 @@ class FraisScolaires {
     return result;
   }
 
-  /// Montant total collecté (frais principaux, toutes sections) pour la
-  /// période demandée : 'today', 'month' ou 'year'.
   double getMoneyCollectedForPeriod(String period) {
     switch (period) {
       case 'today':
@@ -2027,6 +2249,232 @@ class FraisScolaires {
   double getTotalPourcentageAdministrations() =>
       config.administrations.fold(0.0, (sum, a) => sum + a.pourcentage);
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — OPTIONS (regroupement facultatif de sections)
+  // ==========================================================================
+
+  /// Vrai si au moins une option contient au moins une section.
+  bool get aDesOptionsActives =>
+      optionsSections.values.any((liste) => liste.isNotEmpty);
+
+  /// Noms de toutes les options créées (même vides), dans l'ordre de création.
+  List<String> getOptionsNoms() => List<String>.from(optionsSections.keys);
+
+  /// Noms des options qui contiennent au moins une section — ce sont celles
+  /// que l'on peut proposer dans un choix (ex. écran des dépenses).
+  List<String> getOptionsUtilisables() => optionsSections.entries
+      .where((e) => e.value.isNotEmpty)
+      .map((e) => e.key)
+      .toList();
+
+  /// Sections regroupées dans une option (liste vide si l'option n'existe pas).
+  List<String> getSectionsPourOption(String option) =>
+      List<String>.from(optionsSections[option] ?? const <String>[]);
+
+  /// Option qui contient cette section, ou `null` si la section est seule.
+  String? getOptionDeSection(String section) {
+    for (final e in optionsSections.entries) {
+      if (e.value.contains(section)) return e.key;
+    }
+    return null;
+  }
+
+  bool _nomDejaPrisParSectionOuOption(String nom, {String? sauf}) {
+    final bas = nom.trim().toLowerCase();
+    for (final k in optionsSections.keys) {
+      if (sauf != null && k == sauf) continue;
+      if (k.trim().toLowerCase() == bas) return true;
+    }
+    for (final s in config.sections) {
+      if (s.trim().toLowerCase() == bas) return true;
+    }
+    return false;
+  }
+
+  /// Crée une option vide. Retourne `null` si tout s'est bien passé, sinon
+  /// un message d'erreur à afficher à l'utilisateur.
+  Future<String?> addOption(String nom) async {
+    final n = nom.trim();
+    if (n.isEmpty) return "Le nom de l'option ne peut pas être vide";
+    if (_nomDejaPrisParSectionOuOption(n)) {
+      return "Ce nom est déjà utilisé par une option ou une section";
+    }
+    optionsSections[n] = <String>[];
+    await saveData();
+    return null;
+  }
+
+  /// Renomme une option (en conservant ses sections et son ordre).
+  /// Retourne `null` si OK, sinon un message d'erreur.
+  Future<String?> renameOption(String ancien, String nouveau) async {
+    final n = nouveau.trim();
+    if (n.isEmpty) return "Le nom de l'option ne peut pas être vide";
+    if (!optionsSections.containsKey(ancien)) return "Option introuvable";
+    if (n == ancien) return null;
+    if (_nomDejaPrisParSectionOuOption(n, sauf: ancien)) {
+      return "Ce nom est déjà utilisé par une option ou une section";
+    }
+    final reconstruit = <String, List<String>>{};
+    optionsSections.forEach((k, v) {
+      reconstruit[k == ancien ? n : k] = v;
+    });
+    optionsSections = reconstruit;
+    await saveData();
+    return null;
+  }
+
+  /// Supprime une option. Ses sections ne sont PAS supprimées : elles
+  /// redeviennent simplement des sections « seules » dans les rapports.
+  Future<void> deleteOption(String option) async {
+    if (optionsSections.remove(option) != null) {
+      await saveData();
+    }
+  }
+
+  /// Définit la liste exacte des sections d'une option. Une section ne peut
+  /// appartenir qu'à UNE seule option : si elle était dans une autre option,
+  /// elle en est retirée automatiquement.
+  Future<void> setSectionsPourOption(
+      String option, List<String> sections) async {
+    if (!optionsSections.containsKey(option)) return;
+    final valides = <String>[];
+    for (final s in sections) {
+      if (config.sections.contains(s) && !valides.contains(s)) {
+        valides.add(s);
+      }
+    }
+    valides.sort((a, b) =>
+        config.sections.indexOf(a).compareTo(config.sections.indexOf(b)));
+
+    for (final e in optionsSections.entries) {
+      if (e.key == option) continue;
+      e.value.removeWhere((s) => valides.contains(s));
+    }
+    optionsSections[option] = valides;
+    await saveData();
+  }
+
+  /// À appeler quand une section est supprimée : la retire de toutes les
+  /// options (sans sauvegarder — l'appelant sauvegarde déjà ensuite).
+  void retirerSectionDesOptions(String section) {
+    for (final liste in optionsSections.values) {
+      liste.removeWhere((s) => s == section);
+    }
+  }
+
+  Map<String, List<String>> _parseOptionsSections(dynamic raw) {
+    final result = <String, List<String>>{};
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        final nom = k.toString().trim();
+        if (nom.isEmpty) return;
+        final liste = <String>[];
+        if (v is List) {
+          for (final s in v) {
+            final t = s.toString();
+            if (t.isNotEmpty && !liste.contains(t)) liste.add(t);
+          }
+        }
+        result[nom] = liste;
+      });
+    }
+    return result;
+  }
+
+  /// Remet les options dans un état propre : noms non vides, une section dans
+  /// une seule option, et plus aucune section qui n'existe plus.
+  void _nettoyerOptions() {
+    final propres = <String, List<String>>{};
+    final dejaAffectees = <String>{};
+    optionsSections.forEach((nom, secs) {
+      final n = nom.trim();
+      if (n.isEmpty || propres.containsKey(n)) return;
+      final liste = <String>[];
+      for (final s in secs) {
+        if (config.sections.isNotEmpty && !config.sections.contains(s)) {
+          continue;
+        }
+        if (dejaAffectees.contains(s) || liste.contains(s)) continue;
+        liste.add(s);
+        dejaAffectees.add(s);
+      }
+      propres[n] = liste;
+    });
+    optionsSections = propres;
+  }
+
+  /// Construit les « groupes » d'un rapport à partir des sections réellement
+  /// présentes : chaque option (avec ses sections présentes) forme un groupe,
+  /// et chaque section non regroupée forme un groupe à elle seule. Triés selon
+  /// l'ordre des sections de l'école.
+  List<GroupeOption> _groupesOptions(Iterable<String> sectionsPresentes) {
+    final presentes = <String>{...sectionsPresentes};
+    final groupes = <GroupeOption>[];
+    final dejaPris = <String>{};
+
+    optionsSections.forEach((nom, secs) {
+      final incluses = secs
+          .where((s) => presentes.contains(s) && !dejaPris.contains(s))
+          .toList();
+      if (incluses.isEmpty) return;
+      dejaPris.addAll(incluses);
+      groupes.add(
+          GroupeOption(nom: nom, sections: incluses, estOption: true));
+    });
+
+    final restantes = <String>[
+      ...config.sections
+          .where((s) => presentes.contains(s) && !dejaPris.contains(s)),
+      ...(presentes
+          .where((s) => !config.sections.contains(s) && !dejaPris.contains(s))
+          .toList()
+        ..sort()),
+    ];
+    for (final s in restantes) {
+      groupes.add(GroupeOption(nom: s, sections: [s], estOption: false));
+    }
+
+    int cle(GroupeOption g) {
+      var m = 1 << 30;
+      for (final s in g.sections) {
+        var i = config.sections.indexOf(s);
+        if (i < 0) i = 1 << 20;
+        if (i < m) m = i;
+      }
+      return m;
+    }
+
+    groupes.sort((a, b) {
+      final c = cle(a).compareTo(cle(b));
+      if (c != 0) return c;
+      return a.nom.compareTo(b.nom);
+    });
+    return groupes;
+  }
+
+  /// Taux mensuel officiel (tarif de section/classe) d'un groupe d'élèves :
+  /// une seule valeur si tous paient pareil, sinon « min - max ».
+  String _tauxMensuelLabel(List<Eleve> eleves) {
+    if (eleves.isEmpty) return '-';
+    final mois = currentSchoolMonthName ?? months.first;
+    double? min;
+    double? max;
+    for (final e in eleves) {
+      final v = getRequiredForMonth(mois, e.section, e.classe);
+      if (min == null || v < min) min = v;
+      if (max == null || v > max) max = v;
+    }
+    if (min == null || max == null) return '-';
+    if ((max - min).abs() < 0.5) return formatMontant(min);
+    return '${formatMontant(min)} - ${formatMontant(max)}';
+  }
+
+  String _pctLabel(double p) =>
+      p == p.roundToDouble() ? p.toStringAsFixed(0) : p.toStringAsFixed(1);
+
+  // ==========================================================================
+  // DÉPENSES — accès de base
+  // ==========================================================================
   List<Depense> getDepensesForYear([String? year]) {
     final y = year ?? currentYear;
     final list = List<Depense>.from(depensesByYear[y] ?? []);
@@ -2040,11 +2488,6 @@ class FraisScolaires {
         .fold(0.0, (sum, d) => sum + d.montant);
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — Dépenses "Aujourd'hui" et "Ce mois-ci" (basées sur le mois
-  // calendaire de la dépense, faute de notion de "mois scolaire" pour les
-  // dépenses).
-  // ==========================================================================
   double getTotalDepensesToday([String? year]) {
     final y = year ?? currentYear;
     final today = DateTime.now().toString().split(' ')[0];
@@ -2058,6 +2501,14 @@ class FraisScolaires {
     final now = DateTime.now();
     return (depensesByYear[y] ?? [])
         .where((d) => d.date.year == now.year && d.date.month == now.month)
+        .fold(0.0, (sum, d) => sum + d.montant);
+  }
+
+  /// Total des dépenses d'un type donné (globale / indépendante / mixte).
+  double getTotalDepensesParPortee(String portee, [String? year]) {
+    final y = year ?? currentYear;
+    return (depensesByYear[y] ?? [])
+        .where((d) => d.portee == portee)
         .fold(0.0, (sum, d) => sum + d.montant);
   }
 
@@ -2076,8 +2527,6 @@ class FraisScolaires {
     return totalCollecte - getTotalDepenses(y);
   }
 
-  /// ⚡ NOUVEAU — Solde net (collecté - dépenses) pour une période donnée :
-  /// 'today', 'month' ou 'year'.
   double getSoldeNetForPeriod(String period, [String? year]) {
     switch (period) {
       case 'today':
@@ -2092,10 +2541,233 @@ class FraisScolaires {
     }
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — DÉPENSES PAR TYPE / SECTION / RUBRIQUE / PÉRIODE
+  // ==========================================================================
+
+  /// Liste des rubriques proposées lors d'une dépense : administrations
+  /// configurées + « Autre ».
+  List<String> getRubriquesDisponibles() {
+    final result = <String>[];
+    for (final a in config.administrations) {
+      final nom = a.nom.trim();
+      if (nom.isNotEmpty && !result.contains(nom)) result.add(nom);
+    }
+    result.add(kRubriqueAutre);
+    return result;
+  }
+
+  /// Répartition d'une dépense par section :
+  /// - globale : aucune (elle concerne toute l'école) ;
+  /// - indépendante : 100 % sur la section choisie ;
+  /// - mixte : parts égales entre les sections choisies.
+  Map<String, double> repartitionDepenseParSection(Depense d) {
+    if (d.portee == kDepenseGlobale || d.sections.isEmpty) return {};
+    final part = d.montant / d.sections.length;
+    return {for (final s in d.sections) s: part};
+  }
+
+  bool _depenseConcerneFiltre(
+      Depense d, String? sectionFilter, String? classFilter) {
+    if (d.portee == kDepenseGlobale) return true;
+    if (sectionFilter != null && !d.sections.contains(sectionFilter)) {
+      return false;
+    }
+    if (classFilter != null &&
+        d.classes.isNotEmpty &&
+        !d.classes.contains(classFilter)) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Dépenses d'une période ('today', 'month' ou 'year'), triées de la plus
+  /// ancienne à la plus récente (ordre du journal de caisse).
+  List<Depense> getDepensesForPeriod(
+      String period, {
+        String? year,
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final y = year ?? currentYear;
+    final now = DateTime.now();
+    final todayStr = now.toString().split(' ')[0];
+    final list = (depensesByYear[y] ?? []).where((d) {
+      bool okPeriode;
+      switch (period) {
+        case 'today':
+          okPeriode = d.date.toString().split(' ')[0] == todayStr;
+          break;
+        case 'month':
+          okPeriode = d.date.year == now.year && d.date.month == now.month;
+          break;
+        case 'year':
+        default:
+          okPeriode = true;
+      }
+      return okPeriode && _depenseConcerneFiltre(d, sectionFilter, classFilter);
+    }).toList();
+    list.sort((a, b) => a.date.compareTo(b.date));
+    return list;
+  }
+
+  Map<String, double> _collecteParSectionPourPeriode(String period) {
+    switch (period) {
+      case 'today':
+        return getMoneyCollectedTodayBySection();
+      case 'month':
+        return getMoneyCollectedThisMonthBySection();
+      case 'year':
+      default:
+        return getTotalBySection();
+    }
+  }
+
+  /// Calcule, pour une période, le tableau par rubrique, le tableau par
+  /// section et le reste après dépenses.
+  DepensePeriodeStats computeDepensesStats(
+      String period, {
+        String? year,
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final collecteAll = _collecteParSectionPourPeriode(period);
+    final collecteBySection = <String, double>{};
+    collecteAll.forEach((s, v) {
+      if (sectionFilter == null || s == sectionFilter) {
+        collecteBySection[s] = v;
+      }
+    });
+    final double totalCollecte =
+    collecteBySection.values.fold(0.0, (a, b) => a + b);
+
+    final depenses = getDepensesForPeriod(
+      period,
+      year: year,
+      sectionFilter: sectionFilter,
+      classFilter: classFilter,
+    );
+
+    // Rubriques : une ligne par administration configurée.
+    final Map<String, RubriqueStat> rub = {};
+    for (final admin in config.administrations) {
+      final nom = admin.nom.trim();
+      if (nom.isEmpty) continue;
+      rub[nom] = RubriqueStat(
+        rubrique: nom,
+        pourcentage: admin.pourcentage,
+        collecte: totalCollecte * (admin.pourcentage / 100),
+      );
+    }
+
+    // Sections.
+    final Map<String, SectionStat> secStats = {};
+    final sectionsBase = sectionFilter != null
+        ? <String>[sectionFilter]
+        : List<String>.from(config.sections);
+    for (final s in sectionsBase) {
+      secStats[s] = SectionStat(section: s, collecte: collecteBySection[s] ?? 0);
+    }
+    collecteBySection.forEach((s, v) {
+      secStats.putIfAbsent(s, () => SectionStat(section: s, collecte: v));
+    });
+
+    double globales = 0;
+    double independantes = 0;
+    double mixtes = 0;
+
+    for (final d in depenses) {
+      final cle = d.rubriqueAffichee;
+      final r = rub.putIfAbsent(
+        cle,
+            () => RubriqueStat(rubrique: cle, pourcentage: 0, collecte: 0),
+      );
+      if (d.portee == kDepenseGlobale) {
+        if (sectionFilter == null) {
+          r.globales += d.montant;
+          globales += d.montant;
+        }
+      } else {
+        final parts = repartitionDepenseParSection(d);
+        parts.forEach((s, amt) {
+          if (sectionFilter != null && s != sectionFilter) return;
+          final st = secStats.putIfAbsent(
+              s, () => SectionStat(section: s, collecte: 0));
+          if (d.portee == kDepenseIndependante) {
+            r.independantes += amt;
+            st.independantes += amt;
+            independantes += amt;
+          } else {
+            r.mixtes += amt;
+            st.mixtes += amt;
+            mixtes += amt;
+          }
+        });
+      }
+    }
+
+    return DepensePeriodeStats(
+      period: period,
+      depenses: depenses,
+      rubriques: rub.values.toList(),
+      sections: secStats.values.toList(),
+      totalCollecte: totalCollecte,
+      globales: globales,
+      independantes: independantes,
+      mixtes: mixtes,
+      globalesExclues: sectionFilter != null,
+    );
+  }
+
+  /// Solde encore disponible (année en cours) sur une rubrique, pour le
+  /// périmètre choisi. Sert à avertir avant une sortie d'argent excessive.
+  /// Retourne `null` si le calcul n'a pas de sens (rubrique « Autre »).
+  double? getSoldeDisponibleRubrique({
+    required String rubrique,
+    required String portee,
+    List<String> sections = const [],
+  }) {
+    if (rubrique == kRubriqueAutre || rubrique.trim().isEmpty) return null;
+    double pct = 0;
+    for (final a in config.administrations) {
+      if (a.nom.trim() == rubrique.trim()) {
+        pct = a.pourcentage;
+        break;
+      }
+    }
+    final collecteSec = getTotalBySection();
+    double collecte = 0;
+    if (portee == kDepenseGlobale) {
+      collecte = collecteSec.values.fold(0.0, (a, b) => a + b) * pct / 100;
+    } else {
+      for (final s in sections) {
+        collecte += (collecteSec[s] ?? 0) * pct / 100;
+      }
+    }
+
+    double depense = 0;
+    for (final d in (depensesByYear[currentYear] ?? [])) {
+      if (d.rubrique.trim() != rubrique.trim()) continue;
+      if (portee == kDepenseGlobale) {
+        depense += d.montant;
+      } else {
+        final parts = repartitionDepenseParSection(d);
+        for (final s in sections) {
+          depense += parts[s] ?? 0;
+        }
+      }
+    }
+    return collecte - depense;
+  }
+
   Future<Depense> addDepense({
     required String motif,
     required double montant,
     String enregistrePar = 'Direction',
+    String portee = kDepenseGlobale,
+    List<String>? sections,
+    List<String>? classes,
+    String rubrique = '',
   }) async {
     final depense = Depense(
       id: 'DEP${DateTime.now().millisecondsSinceEpoch}',
@@ -2103,10 +2775,42 @@ class FraisScolaires {
       montant: montant,
       date: DateTime.now(),
       enregistrePar: enregistrePar,
+      portee: portee,
+      sections: portee == kDepenseGlobale ? [] : (sections ?? []),
+      classes: portee == kDepenseGlobale ? [] : (classes ?? []),
+      rubrique: rubrique.trim(),
     );
     depensesByYear.putIfAbsent(currentYear, () => []).add(depense);
     await saveData();
     return depense;
+  }
+
+  /// ⚡ NOUVEAU — Enregistre une dépense pour une OPTION : toutes les sections
+  /// de l'option sont concernées (dépense « indépendante » si l'option n'a
+  /// qu'une section, « mixte » sinon, avec partage à parts égales).
+  /// À utiliser depuis l'écran des dépenses quand l'utilisateur choisit une
+  /// option au lieu de choisir les sections une par une.
+  Future<Depense> addDepenseParOption({
+    required String motif,
+    required double montant,
+    required String option,
+    String enregistrePar = 'Direction',
+    List<String>? classes,
+    String rubrique = '',
+  }) async {
+    final sections = getSectionsPourOption(option);
+    if (sections.isEmpty) {
+      throw Exception("L'option \"$option\" ne contient aucune section.");
+    }
+    return addDepense(
+      motif: motif,
+      montant: montant,
+      enregistrePar: enregistrePar,
+      portee: sections.length == 1 ? kDepenseIndependante : kDepenseMixte,
+      sections: sections,
+      classes: classes,
+      rubrique: rubrique,
+    );
   }
 
   Future<void> deleteDepense(String id, [String? year]) async {
@@ -2407,9 +3111,6 @@ class FraisScolaires {
   RepartitionDetail getRepartitionForOption(String option) =>
       getRepartitionForOptionPeriod(option, 'year');
 
-  /// ⚡ NOUVEAU — Répartition (total + par administration) pour une
-  /// section (option) donnée, sur la période demandée : 'today', 'month'
-  /// ou 'year'.
   RepartitionDetail getRepartitionForOptionPeriod(
       String option, String period) {
     double total;
@@ -2441,9 +3142,6 @@ class FraisScolaires {
     return "Éducation de Base ($numero)";
   }
 
-  /// ⚡ NOUVEAU — Montant payé par un élève pour une période donnée :
-  /// 'today' (transactions du jour), 'month' (mois scolaire en cours) ou
-  /// 'year' (total annuel déjà payé).
   double _getStudentAmountForPeriod(Eleve eleve, String period) {
     switch (period) {
       case 'today':
@@ -2468,8 +3166,6 @@ class FraisScolaires {
   List<RepartitionDetail> getSousSectionsForOption(String option) =>
       getSousSectionsForOptionPeriod(option, 'year');
 
-  /// ⚡ NOUVEAU — Répartition par sous-section (classe pédagogique) pour la
-  /// période demandée.
   List<RepartitionDetail> getSousSectionsForOptionPeriod(
       String option, String period) {
     final students = getStudentsBySection(option);
@@ -2542,7 +3238,7 @@ class FraisScolaires {
   }
 
   bool isStudentEnOrdrePourMois(Eleve eleve, String mois) {
-    final required     = getRequiredForMonth(mois, eleve.section, eleve.classe);
+    final required     = getRequiredForMonthForEleve(eleve, mois);
     final paidForMonth = eleve.paid[mois] ?? 0;
     return paidForMonth >= required;
   }
@@ -2580,8 +3276,7 @@ class FraisScolaires {
         final Map<String, double> paidSansTransactions = {};
         for (final mois in months) {
           if (restant <= 0) break;
-          final double requis =
-          getRequiredForMonth(mois, eleve.section, eleve.classe);
+          final double requis = getRequiredForMonthForEleve(eleve, mois);
           if (requis <= 0) continue;
           final double aAffecter = restant >= requis ? requis : restant;
           paidSansTransactions[mois] = aAffecter;
@@ -2625,8 +3320,7 @@ class FraisScolaires {
 
       while (monthIndex < months.length) {
         final mois = months[monthIndex];
-        final requis =
-        getRequiredForMonth(mois, eleve.section, eleve.classe);
+        final requis = getRequiredForMonthForEleve(eleve, mois);
         final dejaAffecte = nouveauPaid[mois] ?? 0;
         if (requis > 0 && dejaAffecte < requis) break;
         monthIndex++;
@@ -2660,8 +3354,7 @@ class FraisScolaires {
       final mois = data['moisPaye']?.toString() ?? '';
       if (mois.isEmpty) continue;
 
-      final double montantRequis =
-      getRequiredForMonth(mois, eleve.section, eleve.classe);
+      final double montantRequis = getRequiredForMonthForEleve(eleve, mois);
       final double totalPaye = getStudentTotalPaid(eleve);
       final double totalRequis = getStudentPending(eleve) + totalPaye;
       final double resteBrut = montantRequis - (eleve.paid[mois] ?? 0);
@@ -2709,14 +3402,18 @@ class FraisScolaires {
           classeNumeroFromFullClasse(eleve.classe) != classeNumero) {
         continue;
       }
+      // Un élève avec une exception de paiement personnalisée
+      // ne dépend plus du tarif de sa section/classe : on ne le touche
+      // jamais lors d'un recalcul déclenché par un changement de tarif
+      // général.
+      if (eleve.montantMensuelPersonnalise != null) continue;
 
       bool modifie = false;
       for (final mois in anciensRequisParMois.keys) {
         final double? ancienRequis = anciensRequisParMois[mois];
         if (ancienRequis == null) continue;
 
-        final double nouveauRequis =
-        getRequiredForMonth(mois, eleve.section, eleve.classe);
+        final double nouveauRequis = getRequiredForMonthForEleve(eleve, mois);
 
         if (nouveauRequis >= ancienRequis) continue;
 
@@ -2849,32 +3546,137 @@ class FraisScolaires {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — RÉPARTITION PAR SECTION ET PAR ADMINISTRATION
-  //
-  // Inspiré du modèle papier fourni ("RAPPORT FINANCIER MOIS DE ...") :
-  // un grand tableau où chaque LIGNE est une section de l'école, chaque
-  // COLONNE est une administration configurée (avec son pourcentage), et
-  // chaque cellule est le montant qui revient à cette administration pour
-  // cette section. Une dernière colonne donne le Total (FC) de la
-  // section. Juste en dessous, un second petit tableau (mis en
-  // évidence) donne le TOTAL GÉNÉRAL toutes sections et classes
-  // confondues — exactement la répartition globale déjà calculée
-  // ailleurs dans le rapport, mais présentée ici sous forme de tableau
-  // pour rester cohérente avec le tableau détaillé par section.
-  //
-  // N'est affiché que lorsque le rapport couvre TOUTES les sections ET
-  // TOUTES les classes (aucun filtre Section/Classe appliqué), puisque
-  // c'est le seul cas où une ventilation par section a du sens.
-  //
-  // `students` doit déjà être la liste des élèves correspondant au type
-  // de rapport demandé (journalier / mensuel / annuel) — la même liste
-  // que celle utilisée pour construire le tableau principal du rapport.
+  // ⚡ NOUVEAU — TABLEAU « RÉPARTITION PAR OPTION » (facultatif)
+  // Présentation inspirée de la fiche papier : une colonne par option (ou par
+  // section non regroupée) + une colonne TOTAL ; lignes : effectif, taux
+  // mensuel, montant collecté, puis la part de chaque administration.
+  // Ne s'affiche QUE si au moins une option contient des sections présentes
+  // dans le rapport. Sinon : liste vide, le rapport reste identique à avant.
+  // ==========================================================================
+  List<pw.Widget> _buildRepartitionParOption(
+      List<Eleve> students, Map<String, double> totalBySection) {
+    if (!aDesOptionsActives) return [];
+    if (config.administrations.isEmpty || totalBySection.isEmpty) return [];
+
+    final groupes = _groupesOptions(totalBySection.keys);
+    if (!groupes.any((g) => g.estOption)) return [];
+
+    final admins = config.administrations;
+
+    final List<double> totaux = [];
+    final List<int> effectifs = [];
+    final List<String> taux = [];
+    final List<Eleve> tousLesEleves = [];
+
+    for (final g in groupes) {
+      final double total = g.sections
+          .fold<double>(0.0, (sum, s) => sum + (totalBySection[s] ?? 0));
+      final List<Eleve> elevesGroupe = students
+          .where((e) =>
+      g.sections.contains(e.section) &&
+          (totalBySection[e.section] ?? 0) > 0)
+          .toList();
+      totaux.add(total);
+      effectifs.add(elevesGroupe.length);
+      taux.add(_tauxMensuelLabel(elevesGroupe));
+      tousLesEleves.addAll(elevesGroupe);
+    }
+
+    final double totalGeneral = totaux.fold(0.0, (sum, v) => sum + v);
+    final int effectifGeneral = effectifs.fold(0, (sum, v) => sum + v);
+    final String tauxGeneral = _tauxMensuelLabel(tousLesEleves);
+
+    final headers = <String>[
+      'Rubrique',
+      ...groupes.map((g) => g.estOption
+          ? '${g.nom}\n(${g.sections.length} section${g.sections.length > 1 ? 's' : ''})'
+          : g.nom),
+      'TOTAL',
+    ];
+
+    final rows = <List<String>>[
+      ['Effectif', ...effectifs.map((e) => '$e'), '$effectifGeneral'],
+      ['Taux mensuel (FC)', ...taux, tauxGeneral],
+      [
+        'Montant collecté (FC)',
+        ...totaux.map((t) => formatMontant(t)),
+        formatMontant(totalGeneral),
+      ],
+      for (final a in admins)
+        [
+          '${a.nom} (${_pctLabel(a.pourcentage)}%)',
+          ...totaux.map((t) => formatMontant(t * a.pourcentage / 100)),
+          formatMontant(totalGeneral * a.pourcentage / 100),
+        ],
+    ];
+
+    final double cellFontSize = _tableCellFontSize(headers.length);
+    final double headerFontSize = _tableHeaderFontSize(headers.length);
+
+    final optionsAffichees = groupes.where((g) => g.estOption).toList();
+
+    return [
+      pw.Text(
+        "RÉPARTITION PAR OPTION ET PAR ADMINISTRATION",
+        style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
+      ),
+      pw.SizedBox(height: 4),
+      pw.Text(
+        "Regroupement des sections en options : chaque colonne réunit "
+            "toutes les sections de l'option. Les sections qui ne sont dans "
+            "aucune option figurent chacune dans leur propre colonne.",
+        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+      ),
+      pw.SizedBox(height: 10),
+      pw.TableHelper.fromTextArray(
+        headers: headers,
+        data: rows,
+        columnWidths: _buildColumnWidths([
+          2.0,
+          ...List<double>.filled(groupes.length, 1.4),
+          1.5,
+        ]),
+        headerStyle: pw.TextStyle(
+          fontSize: headerFontSize,
+          fontWeight: pw.FontWeight.bold,
+          color: PdfColors.white,
+        ),
+        headerDecoration: const pw.BoxDecoration(color: PdfColors.indigo800),
+        headerAlignment: pw.Alignment.center,
+        cellStyle: pw.TextStyle(fontSize: cellFontSize),
+        cellAlignment: pw.Alignment.center,
+        cellAlignments: {
+          0: pw.Alignment.centerLeft,
+        },
+        cellPadding:
+        const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        oddRowDecoration: const pw.BoxDecoration(color: PdfColors.indigo50),
+      ),
+      pw.SizedBox(height: 6),
+      ...optionsAffichees.map(
+            (g) => pw.Padding(
+          padding: const pw.EdgeInsets.only(bottom: 1),
+          child: pw.Text(
+            "• ${g.nom} = ${g.sections.join(', ')}",
+            style: pw.TextStyle(
+              fontSize: 9,
+              fontStyle: pw.FontStyle.italic,
+              color: PdfColors.grey800,
+            ),
+          ),
+        ),
+      ),
+      pw.SizedBox(height: 16),
+    ];
+  }
+
+  // ==========================================================================
+  // RÉPARTITION PAR SECTION ET PAR ADMINISTRATION
   // ==========================================================================
   List<pw.Widget> _buildRepartitionParSectionEtAdministration(
       List<Eleve> students) {
     if (config.administrations.isEmpty || students.isEmpty) return [];
 
-    // Total (frais principal) par section, pour les élèves du rapport.
     final Map<String, double> totalBySection = {};
     for (final e in students) {
       totalBySection[e.section] =
@@ -2883,10 +3685,6 @@ class FraisScolaires {
     totalBySection.removeWhere((_, v) => v <= 0);
     if (totalBySection.isEmpty) return [];
 
-    // On respecte l'ordre des sections tel que défini dans la
-    // configuration de l'école, puis on ajoute en fin de liste les
-    // sections "orphelines" (non présentes dans la config), triées par
-    // ordre alphabétique, pour ne perdre aucune donnée.
     final List<String> sectionsOrdonnees = [
       ...config.sections.where((s) => totalBySection.containsKey(s)),
       ...(totalBySection.keys
@@ -2974,8 +3772,11 @@ class FraisScolaires {
         oddRowDecoration: const pw.BoxDecoration(color: PdfColors.indigo50),
       ),
       pw.SizedBox(height: 16),
-      // ---- Petit tableau récapitulatif : TOTAL GÉNÉRAL toutes sections
-      // et classes confondues, clairement mis en évidence. ----
+
+      // ⚡ NOUVEAU — Tableau « Répartition par option » (uniquement si des
+      // options ont été créées ; sinon liste vide = rien ne change).
+      ..._buildRepartitionParOption(students, totalBySection),
+
       pw.Container(
         width: double.infinity,
         padding: const pw.EdgeInsets.all(10),
@@ -3038,6 +3839,568 @@ class FraisScolaires {
     ];
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — SECTION « DÉPENSES » DES RAPPORTS PDF
+  // Trois blocs (journalier, mensuel, annuel), chacun avec : résumé, tableau
+  // par rubrique, tableau par section, détail des dépenses et reste final.
+  // ==========================================================================
+  String _periodeTitrePdf(String period) {
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    switch (period) {
+      case 'today':
+        return "DÉPENSES JOURNALIÈRES — ${two(now.day)}/${two(now.month)}/${now.year}";
+      case 'month':
+        return "DÉPENSES MENSUELLES — ${_moisCalendrier[now.month - 1]} ${now.year}";
+      case 'year':
+      default:
+        return "DÉPENSES ANNUELLES — Année scolaire $currentYear";
+    }
+  }
+
+  String _periodeCourtePdf(String period) {
+    switch (period) {
+      case 'today':
+        return "du jour";
+      case 'month':
+        return "du mois";
+      case 'year':
+      default:
+        return "de l'année";
+    }
+  }
+
+  pw.Widget _pdfLigneMontant(String label, double value, PdfColor color,
+      {bool gras = false, double fontSize = 10.5}) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 2),
+      child: pw.Row(
+        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+        children: [
+          pw.Text(
+            label,
+            style: pw.TextStyle(
+              fontSize: fontSize,
+              color: color,
+              fontWeight: gras ? pw.FontWeight.bold : pw.FontWeight.normal,
+            ),
+          ),
+          pw.Text(
+            '${formatMontant(value)} FC',
+            style: pw.TextStyle(
+              fontSize: fontSize,
+              color: color,
+              fontWeight: gras ? pw.FontWeight.bold : pw.FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  pw.TextStyle _pdfHeaderDepenseStyle() => pw.TextStyle(
+    fontSize: 8.5,
+    fontWeight: pw.FontWeight.bold,
+    color: PdfColors.white,
+  );
+
+  /// ⚡ NOUVEAU — Tableau des dépenses regroupées par option (facultatif).
+  /// Ne produit rien si aucune option n'est utilisée dans la période.
+  List<pw.Widget> _buildDepensesParOptionTable(DepensePeriodeStats s) {
+    if (!aDesOptionsActives) return [];
+    final actives = s.sections.where((x) => x.aDeLActivite).toList();
+    if (actives.isEmpty) return [];
+
+    final groupes = _groupesOptions(actives.map((x) => x.section));
+    if (!groupes.any((g) => g.estOption)) return [];
+
+    final parNom = <String, SectionStat>{
+      for (final x in actives) x.section: x,
+    };
+
+    final rows = <List<String>>[];
+    double totColl = 0;
+    double totInd = 0;
+    double totMix = 0;
+
+    for (final g in groupes) {
+      double coll = 0;
+      double ind = 0;
+      double mix = 0;
+      for (final sec in g.sections) {
+        final st = parNom[sec];
+        if (st == null) continue;
+        coll += st.collecte;
+        ind += st.independantes;
+        mix += st.mixtes;
+      }
+      totColl += coll;
+      totInd += ind;
+      totMix += mix;
+      rows.add([
+        g.estOption ? '${g.nom} (option)' : g.nom,
+        g.estOption ? g.sections.join(', ') : '-',
+        formatMontant(coll),
+        formatMontant(ind),
+        formatMontant(mix),
+        formatMontant(ind + mix),
+        formatMontant(coll - (ind + mix)),
+      ]);
+    }
+
+    rows.add([
+      'TOTAL',
+      '',
+      formatMontant(totColl),
+      formatMontant(totInd),
+      formatMontant(totMix),
+      formatMontant(totInd + totMix),
+      formatMontant(totColl - (totInd + totMix)),
+    ]);
+
+    return [
+      pw.SizedBox(height: 10),
+      pw.Text(
+        "2 bis. Par option (regroupement de sections) — "
+            "${_periodeCourtePdf(s.period).toUpperCase()}",
+        style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+      ),
+      pw.SizedBox(height: 4),
+      pw.TableHelper.fromTextArray(
+        headers: const [
+          'Option / Section',
+          'Sections incluses',
+          'Collecté (FC)',
+          'Dép. indépendantes',
+          'Dép. mixtes (part)',
+          'Total dépensé',
+          'Reste (FC)',
+        ],
+        data: rows,
+        columnWidths: _buildColumnWidths([1.8, 2.4, 1.3, 1.4, 1.4, 1.3, 1.3]),
+        headerStyle: _pdfHeaderDepenseStyle(),
+        headerDecoration: const pw.BoxDecoration(color: PdfColors.red700),
+        headerAlignment: pw.Alignment.center,
+        cellStyle: const pw.TextStyle(fontSize: 8.5),
+        cellAlignment: pw.Alignment.centerRight,
+        cellAlignments: {
+          0: pw.Alignment.centerLeft,
+          1: pw.Alignment.centerLeft,
+        },
+        cellPadding:
+        const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+        oddRowDecoration: const pw.BoxDecoration(color: PdfColors.red50),
+      ),
+      pw.SizedBox(height: 3),
+      pw.Text(
+        "Les dépenses globales de l'école ne sont rattachées à aucune option.",
+        style: pw.TextStyle(
+            fontSize: 8.5,
+            fontStyle: pw.FontStyle.italic,
+            color: PdfColors.grey700),
+      ),
+    ];
+  }
+
+  List<pw.Widget> _buildDepensesPeriodeSection(
+      DepensePeriodeStats s, {
+        String? sectionFilter,
+      }) {
+    final widgets = <pw.Widget>[];
+    final String periodeCourte = _periodeCourtePdf(s.period);
+
+    // ---- Bandeau de titre ------------------------------------------------
+    widgets.add(
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: const pw.BoxDecoration(
+          color: PdfColors.red700,
+          borderRadius: pw.BorderRadius.all(pw.Radius.circular(4)),
+        ),
+        child: pw.Text(
+          _periodeTitrePdf(s.period) +
+              (sectionFilter != null ? "  |  Section : $sectionFilter" : ""),
+          style: pw.TextStyle(
+            fontSize: 12.5,
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.white,
+          ),
+        ),
+      ),
+    );
+    widgets.add(pw.SizedBox(height: 8));
+
+    // ---- Résumé ----------------------------------------------------------
+    widgets.add(
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(10),
+        decoration: pw.BoxDecoration(
+          color: PdfColors.red50,
+          border: pw.Border.all(color: PdfColors.red200, width: 0.8),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+        ),
+        child: pw.Column(
+          children: [
+            _pdfLigneMontant("Total collecté $periodeCourte",
+                s.totalCollecte, PdfColors.green800, gras: true),
+            pw.Divider(thickness: 0.4, color: PdfColors.red200),
+            if (!s.globalesExclues)
+              _pdfLigneMontant("Dépenses globales (toute l'école)",
+                  s.globales, PdfColors.grey900),
+            _pdfLigneMontant("Dépenses indépendantes (une section)",
+                s.independantes, PdfColors.grey900),
+            _pdfLigneMontant("Dépenses mixtes (plusieurs sections)",
+                s.mixtes, PdfColors.grey900),
+            pw.Divider(thickness: 0.4, color: PdfColors.red200),
+            _pdfLigneMontant("TOTAL DES DÉPENSES $periodeCourte".toUpperCase(),
+                s.totalDepenses, PdfColors.red800, gras: true),
+            _pdfLigneMontant(
+              "RESTE APRÈS DÉPENSES",
+              s.reste,
+              s.reste >= 0 ? PdfColors.indigo900 : PdfColors.red800,
+              gras: true,
+              fontSize: 12,
+            ),
+          ],
+        ),
+      ),
+    );
+    widgets.add(pw.SizedBox(height: 12));
+
+    // ---- Tableau 1 : par rubrique ---------------------------------------
+    widgets.add(pw.Text(
+      "1. Par rubrique (administration) — ${periodeCourte.toUpperCase()}",
+      style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+    ));
+    widgets.add(pw.SizedBox(height: 4));
+    if (s.rubriques.isEmpty) {
+      widgets.add(pw.Text(
+        "Aucune rubrique (administration) configurée.",
+        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+      ));
+    } else {
+      final rowsRub = s.rubriques
+          .map((r) => [
+        r.rubrique,
+        r.pourcentage > 0
+            ? '${r.pourcentage.toStringAsFixed(0)}%'
+            : '-',
+        formatMontant(r.collecte),
+        formatMontant(r.globales),
+        formatMontant(r.independantes),
+        formatMontant(r.mixtes),
+        formatMontant(r.total),
+        formatMontant(r.reste),
+      ])
+          .toList();
+      widgets.add(
+        pw.TableHelper.fromTextArray(
+          headers: const [
+            'Rubrique',
+            'Taux',
+            'Collecté (FC)',
+            'Dép. globales',
+            'Dép. indépendantes',
+            'Dép. mixtes',
+            'Total dépensé',
+            'Reste (FC)',
+          ],
+          data: rowsRub,
+          columnWidths: _buildColumnWidths([2.0, 0.7, 1.3, 1.2, 1.4, 1.2, 1.3, 1.3]),
+          headerStyle: _pdfHeaderDepenseStyle(),
+          headerDecoration: const pw.BoxDecoration(color: PdfColors.red700),
+          headerAlignment: pw.Alignment.center,
+          cellStyle: const pw.TextStyle(fontSize: 8.5),
+          cellAlignment: pw.Alignment.centerRight,
+          cellAlignments: {
+            0: pw.Alignment.centerLeft,
+            1: pw.Alignment.center,
+          },
+          cellPadding:
+          const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+          oddRowDecoration: const pw.BoxDecoration(color: PdfColors.red50),
+        ),
+      );
+      final double totColl =
+      s.rubriques.fold(0.0, (a, r) => a + r.collecte);
+      final double totDep = s.rubriques.fold(0.0, (a, r) => a + r.total);
+      widgets.add(pw.SizedBox(height: 3));
+      widgets.add(pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text(
+          "TOTAL : collecté ${formatMontant(totColl)} FC  |  "
+              "dépensé ${formatMontant(totDep)} FC  |  "
+              "reste ${formatMontant(totColl - totDep)} FC",
+          style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
+        ),
+      ));
+    }
+    widgets.add(pw.SizedBox(height: 12));
+
+    // ---- Tableau 2 : par section ----------------------------------------
+    widgets.add(pw.Text(
+      "2. Par section — ${periodeCourte.toUpperCase()}",
+      style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+    ));
+    widgets.add(pw.SizedBox(height: 4));
+    final sectionsActives = s.sections.where((x) => x.aDeLActivite).toList();
+    if (sectionsActives.isEmpty) {
+      widgets.add(pw.Text(
+        "Aucune activité (collecte ou dépense) par section sur cette période.",
+        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+      ));
+    } else {
+      final rowsSec = sectionsActives
+          .map((x) => [
+        x.section,
+        formatMontant(x.collecte),
+        formatMontant(x.independantes),
+        formatMontant(x.mixtes),
+        formatMontant(x.total),
+        formatMontant(x.reste),
+      ])
+          .toList();
+      widgets.add(
+        pw.TableHelper.fromTextArray(
+          headers: const [
+            'Section',
+            'Collecté (FC)',
+            'Dép. indépendantes',
+            'Dép. mixtes (part)',
+            'Total dépensé',
+            'Reste (FC)',
+          ],
+          data: rowsSec,
+          columnWidths: _buildColumnWidths([2.2, 1.4, 1.5, 1.4, 1.4, 1.4]),
+          headerStyle: _pdfHeaderDepenseStyle(),
+          headerDecoration: const pw.BoxDecoration(color: PdfColors.red700),
+          headerAlignment: pw.Alignment.center,
+          cellStyle: const pw.TextStyle(fontSize: 8.5),
+          cellAlignment: pw.Alignment.centerRight,
+          cellAlignments: {0: pw.Alignment.centerLeft},
+          cellPadding:
+          const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+          oddRowDecoration: const pw.BoxDecoration(color: PdfColors.red50),
+        ),
+      );
+    }
+    if (!s.globalesExclues) {
+      widgets.add(pw.SizedBox(height: 3));
+      widgets.add(pw.Text(
+        "Dépenses globales de l'école (non rattachées à une section) : "
+            "${formatMontant(s.globales)} FC.",
+        style: pw.TextStyle(
+            fontSize: 9,
+            fontStyle: pw.FontStyle.italic,
+            color: PdfColors.grey800),
+      ));
+    }
+
+    // ⚡ NOUVEAU — Tableau « Par option » (uniquement si des options existent)
+    widgets.addAll(_buildDepensesParOptionTable(s));
+    widgets.add(pw.SizedBox(height: 12));
+
+    // ---- Tableau 3 : détail des dépenses --------------------------------
+    widgets.add(pw.Text(
+      "3. Détail des dépenses (journal de caisse) — ${periodeCourte.toUpperCase()}",
+      style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+    ));
+    widgets.add(pw.SizedBox(height: 4));
+    if (s.depenses.isEmpty) {
+      widgets.add(pw.Text(
+        "Aucune dépense enregistrée sur cette période.",
+        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+      ));
+    } else {
+      final rowsDet = <List<String>>[];
+      double totalListe = 0;
+      for (var i = 0; i < s.depenses.length; i++) {
+        final d = s.depenses[i];
+        totalListe += d.montant;
+        rowsDet.add([
+          '${i + 1}',
+          d.dateFormatee,
+          d.porteeLabel,
+          d.sectionsLabel,
+          d.classesLabel,
+          d.rubriqueAffichee,
+          d.motif,
+          formatMontant(d.montant),
+          d.enregistrePar,
+        ]);
+      }
+      widgets.add(
+        pw.TableHelper.fromTextArray(
+          headers: const [
+            'N°',
+            'Date et heure',
+            'Type',
+            'Section(s)',
+            'Classe(s)',
+            'Rubrique',
+            'Motif / Explication',
+            'Montant (FC)',
+            'Enregistré par',
+          ],
+          data: rowsDet,
+          columnWidths: _buildColumnWidths(
+              [0.4, 1.5, 1.0, 1.4, 1.3, 1.3, 2.6, 1.1, 1.0]),
+          headerStyle: _pdfHeaderDepenseStyle(),
+          headerDecoration: const pw.BoxDecoration(color: PdfColors.red700),
+          headerAlignment: pw.Alignment.center,
+          cellStyle: const pw.TextStyle(fontSize: 8),
+          cellAlignment: pw.Alignment.centerLeft,
+          cellAlignments: {
+            0: pw.Alignment.center,
+            7: pw.Alignment.centerRight,
+          },
+          cellPadding:
+          const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+          oddRowDecoration: const pw.BoxDecoration(color: PdfColors.red50),
+        ),
+      );
+      widgets.add(pw.SizedBox(height: 3));
+      widgets.add(pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text(
+          "TOTAL DES DÉPENSES LISTÉES : ${formatMontant(totalListe)} FC",
+          style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold),
+        ),
+      ));
+      if (s.globalesExclues) {
+        widgets.add(pw.SizedBox(height: 2));
+        widgets.add(pw.Text(
+          "Note : les dépenses globales apparaissent dans cette liste mais "
+              "ne sont pas déduites des montants de la section ci-dessus.",
+          style: pw.TextStyle(
+              fontSize: 8.5,
+              fontStyle: pw.FontStyle.italic,
+              color: PdfColors.grey700),
+        ));
+      }
+    }
+
+    widgets.add(pw.SizedBox(height: 10));
+    widgets.add(
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: pw.BoxDecoration(
+          color: s.reste >= 0 ? PdfColors.green50 : PdfColors.red100,
+          border: pw.Border.all(
+            color: s.reste >= 0 ? PdfColors.green700 : PdfColors.red700,
+            width: 1,
+          ),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+        ),
+        child: pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text(
+              "RESTE EN CAISSE APRÈS DÉPENSES $periodeCourte".toUpperCase(),
+              style: pw.TextStyle(
+                  fontSize: 11, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.Text(
+              '${formatMontant(s.reste)} FC',
+              style: pw.TextStyle(
+                fontSize: 13,
+                fontWeight: pw.FontWeight.bold,
+                color: s.reste >= 0 ? PdfColors.green800 : PdfColors.red800,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    widgets.add(pw.SizedBox(height: 22));
+    return widgets;
+  }
+
+  List<pw.Widget> _buildDepensesReportSections({
+    String? sectionFilter,
+    String? classFilter,
+  }) {
+    final widgets = <pw.Widget>[
+      pw.NewPage(),
+      pw.Center(
+        child: pw.Text(
+          "RAPPORT DES DÉPENSES",
+          style: pw.TextStyle(
+            fontSize: 17,
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.red800,
+          ),
+        ),
+      ),
+      pw.SizedBox(height: 4),
+      pw.Center(
+        child: pw.Text(
+          "${config.schoolName.toUpperCase()} — Année scolaire $currentYear",
+          style: const pw.TextStyle(fontSize: 10.5, color: PdfColors.grey700),
+        ),
+      ),
+      pw.SizedBox(height: 8),
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(9),
+        decoration: pw.BoxDecoration(
+          color: PdfColors.grey100,
+          border: pw.Border.all(color: PdfColors.grey400, width: 0.6),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+        ),
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              "Comment lire ce rapport",
+              style: pw.TextStyle(
+                  fontSize: 10, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.SizedBox(height: 3),
+            pw.Text(
+              "• Dépense GLOBALE : elle concerne toute l'école (ex. : électricité, "
+                  "frais administratifs généraux).",
+              style: const pw.TextStyle(fontSize: 9),
+            ),
+            pw.Text(
+              "• Dépense INDÉPENDANTE : elle concerne UNE seule section "
+                  "(ex. : achat de craies pour la Maternelle).",
+              style: const pw.TextStyle(fontSize: 9),
+            ),
+            pw.Text(
+              "• Dépense MIXTE : elle concerne DEUX sections ou plus ; le montant "
+                  "est réparti à parts égales entre les sections concernées.",
+              style: const pw.TextStyle(fontSize: 9),
+            ),
+            pw.Text(
+              "• Chaque dépense est imputée à une RUBRIQUE (salaire des "
+                  "enseignants, construction, etc.) : le « Reste » est ce qui "
+                  "demeure dans la rubrique après la sortie d'argent.",
+              style: const pw.TextStyle(fontSize: 9),
+            ),
+          ],
+        ),
+      ),
+      pw.SizedBox(height: 14),
+    ];
+
+    for (final period in const ['today', 'month', 'year']) {
+      final stats = computeDepensesStats(
+        period,
+        sectionFilter: sectionFilter,
+        classFilter: classFilter,
+      );
+      widgets.addAll(_buildDepensesPeriodeSection(
+        stats,
+        sectionFilter: sectionFilter,
+      ));
+    }
+    return widgets;
+  }
+
   List<pw.Widget> _buildCenteredReportHeader({
     required String title,
     String? subtitle,
@@ -3080,6 +4443,277 @@ class FraisScolaires {
     ];
   }
 
+  // ==========================================================================
+  // REÇU PDF INDIVIDUEL D'UN ÉLÈVE (HISTORIQUE DE PAIEMENT)
+  // ==========================================================================
+  pw.Widget _pdfDetailRow(String label, String value) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 2),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 120,
+            child: pw.Text(
+              "$label :",
+              style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 11,
+                color: PdfColors.grey700,
+              ),
+            ),
+          ),
+          pw.Expanded(
+            child: pw.Text(
+              value,
+              style: pw.TextStyle(
+                fontSize: 11,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _pdfTotalRow(String label, double amount, PdfColor color) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 3),
+      child: pw.Row(
+        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+        children: [
+          pw.Text(
+            label,
+            style: pw.TextStyle(
+              fontSize: 12,
+              fontWeight: pw.FontWeight.bold,
+              color: color,
+            ),
+          ),
+          pw.Text(
+            '${amount.toStringAsFixed(0)} FC',
+            style: pw.TextStyle(
+              fontSize: 12,
+              fontWeight: pw.FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _pdfMonthRow(String mois, double paye, double requis) {
+    final double reste = requis - paye;
+    final bool nonCommence = paye == 0 && reste == requis;
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 2),
+      child: pw.Row(
+        children: [
+          pw.Expanded(
+            flex: 3,
+            child: pw.Text(
+              mois,
+              style: pw.TextStyle(
+                fontSize: 10.5,
+                color: nonCommence ? PdfColors.grey600 : PdfColors.black,
+                fontWeight:
+                nonCommence ? pw.FontWeight.normal : pw.FontWeight.bold,
+              ),
+            ),
+          ),
+          pw.Expanded(
+            flex: 3,
+            child: pw.Text(
+              '${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)} FC',
+              style: pw.TextStyle(
+                fontSize: 10.5,
+                color: nonCommence ? PdfColors.grey600 : PdfColors.black,
+              ),
+            ),
+          ),
+          pw.Expanded(
+            flex: 2,
+            child: pw.Align(
+              alignment: pw.Alignment.centerRight,
+              child: reste <= 0
+                  ? pw.Text(
+                'OK',
+                style: pw.TextStyle(
+                  fontSize: 10,
+                  color: PdfColors.green700,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              )
+                  : (nonCommence
+                  ? pw.Text(
+                '-',
+                style: const pw.TextStyle(
+                    fontSize: 10, color: PdfColors.grey600),
+              )
+                  : pw.Text(
+                '-${reste.toStringAsFixed(0)} FC',
+                style: pw.TextStyle(
+                  fontSize: 10,
+                  color: PdfColors.orange800,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              )),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _pdfTransactionRow(Map<String, dynamic> t) {
+    final date = t['date']?.toString() ?? '—';
+    final mois = t['mois']?.toString() ?? '—';
+    final amount = (t['amount'] as num?)?.toDouble() ?? 0.0;
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 2),
+      child: pw.Row(
+        children: [
+          pw.Expanded(
+            child: pw.Text(
+              '$date  —  $mois',
+              style: const pw.TextStyle(fontSize: 10.5),
+            ),
+          ),
+          pw.Text(
+            '${amount.toStringAsFixed(0)} FC',
+            style: pw.TextStyle(
+              fontSize: 10.5,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> generateStudentPaymentHistoryPdf({
+    required Eleve eleve,
+    String? filename,
+  }) async {
+    final pdf = pw.Document();
+
+    final double totalPaye = getStudentTotalPaid(eleve);
+    final double totalRequis = getStudentPending(eleve) + totalPaye;
+    final double resteTotal = totalRequis - totalPaye;
+
+    final sortedTransactions =
+    List<Map<String, dynamic>>.from(eleve.transactions)
+      ..sort((a, b) => (a['date'] ?? '')
+          .toString()
+          .compareTo((b['date'] ?? '').toString()));
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(32),
+        build: (pw.Context context) => [
+          pw.Center(
+            child: pw.Text(
+              config.schoolName.toUpperCase(),
+              textAlign: pw.TextAlign.center,
+              style:
+              pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 18),
+            ),
+          ),
+          pw.SizedBox(height: 2),
+          pw.Center(
+            child: pw.Text(
+              "REÇU DE PAIEMENT",
+              style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 13,
+                decoration: pw.TextDecoration.underline,
+              ),
+            ),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+              "Année scolaire : $currentYear",
+              style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+            ),
+          ),
+          pw.SizedBox(height: 14),
+          pw.Divider(thickness: 1),
+          pw.SizedBox(height: 10),
+
+          _pdfDetailRow(
+              "Nom complet", "${eleve.nom} ${eleve.postNom} ${eleve.prenom}"),
+          _pdfDetailRow("ID", eleve.id.isNotEmpty ? eleve.id : "N/A"),
+          _pdfDetailRow("Promotion", eleve.classe),
+          _pdfDetailRow("Section", eleve.section),
+
+          pw.SizedBox(height: 10),
+          pw.Divider(thickness: 1),
+          pw.SizedBox(height: 10),
+
+          pw.Text(
+            "BILAN FINANCIER",
+            style: pw.TextStyle(
+              fontWeight: pw.FontWeight.bold,
+              fontSize: 13,
+              color: PdfColors.indigo900,
+            ),
+          ),
+          pw.SizedBox(height: 8),
+          ...months.map((mois) {
+            final requis = getRequiredForMonthForEleve(eleve, mois);
+            final paye = (eleve.paid[mois] ?? 0).toDouble();
+            return _pdfMonthRow(mois, paye, requis);
+          }),
+
+          pw.SizedBox(height: 10),
+          pw.Divider(thickness: 1),
+          pw.SizedBox(height: 10),
+
+          _pdfTotalRow("Total payé", totalPaye, PdfColors.green700),
+          _pdfTotalRow(
+              "Total requis (annuel)", totalRequis, PdfColors.indigo900),
+          _pdfTotalRow(
+            "Reste à payer",
+            resteTotal > 0 ? resteTotal : 0,
+            resteTotal > 0 ? PdfColors.red700 : PdfColors.green700,
+          ),
+
+          pw.SizedBox(height: 10),
+          pw.Divider(thickness: 1),
+          pw.SizedBox(height: 10),
+
+          pw.Text(
+            "HISTORIQUE DES PAIEMENTS",
+            style: pw.TextStyle(
+              fontWeight: pw.FontWeight.bold,
+              fontSize: 13,
+              color: PdfColors.indigo900,
+            ),
+          ),
+          pw.SizedBox(height: 8),
+          if (sortedTransactions.isEmpty)
+            pw.Text(
+              "Aucune transaction enregistrée.",
+              style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+            )
+          else
+            ...sortedTransactions.map(_pdfTransactionRow),
+        ],
+      ),
+    );
+
+    final String safeFilename = (filename != null && filename.trim().isNotEmpty)
+        ? filename.trim()
+        : "${eleve.nom}_${eleve.postNom}_${eleve.id}"
+        .replaceAll(RegExp(r'\s+'), '_');
+
+    return await _savePdf(pdf, safeFilename, "historique_paiements");
+  }
+
   Future<Map<String, dynamic>> generatePdf({
     required String filename,
     required String reportType,
@@ -3115,10 +4749,6 @@ class FraisScolaires {
       countLabel = "figurent dans ce rapport";
     }
 
-    // ⚡ NOUVEAU — La ventilation par section n'a de sens que si le rapport
-    // couvre TOUTES les sections ET TOUTES les classes (aucun filtre
-    // appliqué). On capture donc la liste des élèves AVANT application
-    // des filtres Section/Classe, pour construire ce tableau plus loin.
     final List<Eleve> studentsAvantFiltres = List<Eleve>.from(students);
     final bool afficherRepartitionParSection =
         sectionFilter == null && classFilter == null;
@@ -3141,6 +4771,8 @@ class FraisScolaires {
     final adminDistribution         = calculateAdminDistribution(total);
     final double totalMoisEcole     = getCurrentMonthTotalCollected();
     final double totalAnneeEcole    = getYearTotalCollected();
+    final double totalDepensesAnnee = getTotalDepenses();
+    final double soldeNetAnnee      = totalAnneeEcole - totalDepensesAnnee;
     final String currentMonthName =
         currentSchoolMonthName ?? "Hors année scolaire (vacances)";
     final bool showMoisConcerne = reportType == "daily";
@@ -3229,6 +4861,24 @@ class FraisScolaires {
                       "${totalAnneeEcole.toStringAsFixed(0)} FC",
                   style: const pw.TextStyle(fontSize: 11),
                 ),
+                pw.SizedBox(height: 2),
+                pw.Text(
+                  "Total des dépenses de l'année (toute l'école) : "
+                      "${formatMontant(totalDepensesAnnee)} FC",
+                  style: const pw.TextStyle(
+                      fontSize: 11, color: PdfColors.red800),
+                ),
+                pw.SizedBox(height: 2),
+                pw.Text(
+                  "Solde net de l'année après dépenses : "
+                      "${formatMontant(soldeNetAnnee)} FC "
+                      "(détail des dépenses en fin de rapport)",
+                  style: pw.TextStyle(
+                    fontSize: 11,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.indigo900,
+                  ),
+                ),
               ],
             ),
           ),
@@ -3292,9 +4942,6 @@ class FraisScolaires {
             ),
           ],
           pw.SizedBox(height: 30),
-          // ⚡ NOUVEAU — Tableau détaillé de répartition PAR SECTION et par
-          // administration, affiché uniquement lorsque le rapport couvre
-          // toutes les sections et toutes les classes (aucun filtre).
           if (afficherRepartitionParSection)
             ..._buildRepartitionParSectionEtAdministration(
                 studentsAvantFiltres),
@@ -3309,6 +4956,12 @@ class FraisScolaires {
               "${entry.key} : ${entry.value.toStringAsFixed(0)} FC "
                   "(${config.administrations.firstWhere((a) => a.nom == entry.key).pourcentage.toStringAsFixed(0)}%)",
             ),
+          ),
+
+          // ⚡ NOUVEAU — Rapport détaillé des dépenses (jour / mois / année)
+          ..._buildDepensesReportSections(
+            sectionFilter: sectionFilter,
+            classFilter: classFilter,
           ),
 
           ..._buildSignatureSection(city),
@@ -3451,8 +5104,7 @@ class FraisScolaires {
     for (int i = 0; i < students.length; i++) {
       final e              = students[i];
       final montantPaye    = e.paid[mois] ?? 0;
-      final montantRequis  =
-      getRequiredForMonth(mois, e.section, e.classe);
+      final montantRequis  = getRequiredForMonthForEleve(e, mois);
       rows.add([
         '${i + 1}',
         e.nom,
@@ -3799,6 +5451,11 @@ class FraisScolaires {
               .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
               .toList();
         }
+        // ⚡ NOUVEAU — Options (facultatif) : absent = aucune option.
+        if (data['optionsSections'] != null) {
+          optionsSections = _parseOptionsSections(data['optionsSections']);
+          _nettoyerOptions();
+        }
 
         if (data['history'] != null) {
           history = (data['history'] as Map<String, dynamic>).map(
@@ -3977,6 +5634,7 @@ class FraisScolaires {
       autresFraisAdministrations.map((a) => a.toJson()).toList(),
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
       'signataires': signataires.map((s) => s.toJson()).toList(),
+      'optionsSections': optionsSections,
       'localAccessKeys': localAccessKeys,
       'localPendingPayments': localPendingPayments,
       'localPendingRegistrations': localPendingRegistrations,
@@ -4013,6 +5671,7 @@ class FraisScolaires {
     autresFraisAdministrations = [];
     adminAuditLog = [];
     signataires = [];
+    optionsSections = {};
     localAccessKeys = [];
     localPendingPayments = [];
     localPendingRegistrations = [];
@@ -4050,8 +5709,7 @@ class FraisScolaires {
         'TX${DateTime.now().microsecondsSinceEpoch}_${nouvellesTransactions.length}';
 
     while (remaining > 0 && index < months.length) {
-      double required    =
-      getRequiredForMonth(currentMonth, eleve.section, eleve.classe);
+      double required    = getRequiredForMonthForEleve(eleve, currentMonth);
       double alreadyPaid = eleve.paid[currentMonth] ?? 0;
       double needed      = required - alreadyPaid;
 
@@ -4100,7 +5758,7 @@ class FraisScolaires {
         0.0,
             (sum, m) =>
         sum +
-            (getRequiredForMonth(m, eleve.section, eleve.classe) -
+            (getRequiredForMonthForEleve(eleve, m) -
                 (eleve.paid[m] ?? 0)));
   }
 
@@ -4132,6 +5790,7 @@ class FraisScolaires {
         autresFraisAdministrations.map((a) => a.toJson()).toList(),
         'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
         'signataires': signataires.map((s) => s.toJson()).toList(),
+        'optionsSections': optionsSections,
         'printedReceiptKeys': printedReceiptKeys,
         'receiptQueue': receiptQueue,
         'backup_password': password,
@@ -4286,6 +5945,14 @@ class FraisScolaires {
                   : localEleve.id;
               localEleve.classe   = serverEleve.classe;
               localEleve.section  = serverEleve.section;
+              // Synchronise l'exception de paiement
+              // personnalisée depuis le serveur si elle y est définie ;
+              // sinon on garde la valeur locale actuelle (pour ne jamais
+              // effacer une exception fixée localement par un backup
+              // serveur plus ancien qui ne la connaît pas encore).
+              localEleve.montantMensuelPersonnalise =
+                  serverEleve.montantMensuelPersonnalise ??
+                      localEleve.montantMensuelPersonnalise;
 
               final Map<String, Map<String, dynamic>> transactionsFusionnees =
               {};
@@ -4442,6 +6109,19 @@ class FraisScolaires {
         }
       }
     }
+    // ⚡ NOUVEAU — Options : on AJOUTE seulement les options du serveur qui
+    // n'existent pas encore en local (on n'écrase jamais celles de l'utilisateur).
+    if (serverData['optionsSections'] != null) {
+      final serverOptions = _parseOptionsSections(serverData['optionsSections']);
+      serverOptions.forEach((nom, secs) {
+        if (optionsSections.containsKey(nom)) return;
+        final dejaUtilisees = optionsSections.values.expand((l) => l).toSet();
+        optionsSections[nom] =
+            secs.where((s) => !dejaUtilisees.contains(s)).toList();
+      });
+    }
+    _nettoyerOptions();
+
     if (serverData['printedReceiptKeys'] != null) {
       final serverKeys = (serverData['printedReceiptKeys'] as List<dynamic>)
           .map((e) => e.toString());

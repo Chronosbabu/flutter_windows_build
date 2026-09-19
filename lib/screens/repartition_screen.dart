@@ -15,12 +15,12 @@ class RepartitionScreen extends StatefulWidget {
 class _RepartitionScreenState extends State<RepartitionScreen> {
   FraisScolaires get fraisScolaires => widget.fraisScolaires;
 
-  // ⚡ NOUVEAU — période sélectionnée pour la répartition globale par
+  // Période sélectionnée pour la répartition globale par
   // administration : 'today', 'month' ou 'year'.
   String _periodeGlobale = 'year';
 
   // ==========================================================================
-  // ⚡ VÉRIFICATION MOT DE PASSE (même principe que Paramètres)
+  // VÉRIFICATION MOT DE PASSE (même principe que Paramètres)
   // Sécurise toute sortie de caisse (ajout d'une dépense) et toute
   // suppression d'historique de dépenses.
   // ==========================================================================
@@ -77,8 +77,39 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
   }
 
   // ==========================================================================
-  // Dialogue : ajouter une nouvelle dépense (motif + montant)
-  // ⚡ SÉCURISÉ — demande le mot de passe de sauvegarde avant d'ouvrir le
+  // Libellés / couleurs des types de dépenses
+  // ==========================================================================
+  String _labelPortee(String portee) {
+    switch (portee) {
+      case kDepenseIndependante:
+        return "Indépendante";
+      case kDepenseMixte:
+        return "Mixte";
+      case kDepenseGlobale:
+      default:
+        return "Globale";
+    }
+  }
+
+  Color _couleurPortee(String portee) {
+    switch (portee) {
+      case kDepenseIndependante:
+        return Colors.deepOrange;
+      case kDepenseMixte:
+        return Colors.purple;
+      case kDepenseGlobale:
+      default:
+        return Colors.red.shade700;
+    }
+  }
+
+  // ==========================================================================
+  // Dialogue : ajouter une nouvelle dépense
+  //   1. Type : Globale / Indépendante / Mixte
+  //   2. Section(s) concernée(s) (+ classes, facultatif)
+  //   3. Rubrique (administration) sur laquelle l'argent sort
+  //   4. Motif + montant
+  // SÉCURISÉ — demande le mot de passe de sauvegarde avant d'ouvrir le
   // formulaire.
   // ==========================================================================
   Future<void> _startAddDepense() async {
@@ -90,46 +121,308 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final motifController = TextEditingController();
     final montantController = TextEditingController();
 
+    String portee = kDepenseGlobale;
+    String? sectionIndep;
+    final Set<String> sectionsMixte = {};
+    final Set<String> classesSel = {};
+    String? rubrique;
+
+    final sectionsDisponibles = fraisScolaires.config.sections;
+    final rubriquesDisponibles = fraisScolaires.getRubriquesDisponibles();
+
+    List<String> sectionsChoisies() {
+      if (portee == kDepenseIndependante) {
+        final s = sectionIndep;
+        return s == null ? <String>[] : <String>[s];
+      }
+      if (portee == kDepenseMixte) return sectionsMixte.toList();
+      return <String>[];
+    }
+
+    List<String> classesProposees() {
+      final result = <String>[];
+      for (final s in sectionsChoisies()) {
+        for (final c in fraisScolaires.getAllDisplayClassesForSection(s)) {
+          if (!result.contains(c)) result.add(c);
+        }
+      }
+      return result;
+    }
+
+    double? soldeDisponible() {
+      final r = rubrique;
+      if (r == null) return null;
+      final secs = sectionsChoisies();
+      if (portee != kDepenseGlobale && secs.isEmpty) return null;
+      return fraisScolaires.getSoldeDisponibleRubrique(
+        rubrique: r,
+        portee: portee,
+        sections: secs,
+      );
+    }
+
     await showDialog(
       context: context,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
+            final secs = sectionsChoisies();
+            final classesOptions = classesProposees();
+            final solde = soldeDisponible();
+
             return AlertDialog(
               title: const Row(
                 children: [
                   Icon(Icons.money_off, color: Colors.red),
                   SizedBox(width: 8),
-                  Text("Nouvelle Dépense"),
+                  Expanded(child: Text("Nouvelle Dépense")),
                 ],
               ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: motifController,
-                    autofocus: true,
-                    textCapitalization: TextCapitalization.sentences,
-                    maxLines: 2,
-                    decoration: const InputDecoration(
-                      labelText: "Motif / Justification",
-                      hintText:
-                      "Ex: Achat de craies, réparation, transport...",
-                      border: OutlineInputBorder(),
-                    ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text("1. Type de dépense",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          ChoiceChip(
+                            label: const Text("Globale (toute l'école)"),
+                            selected: portee == kDepenseGlobale,
+                            selectedColor: Colors.red.shade100,
+                            onSelected: (_) => setDialogState(() {
+                              portee = kDepenseGlobale;
+                              classesSel.clear();
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Indépendante (1 section)"),
+                            selected: portee == kDepenseIndependante,
+                            selectedColor: Colors.deepOrange.shade100,
+                            onSelected: (_) => setDialogState(() {
+                              portee = kDepenseIndependante;
+                              classesSel.clear();
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Mixte (2 sections ou plus)"),
+                            selected: portee == kDepenseMixte,
+                            selectedColor: Colors.purple.shade100,
+                            onSelected: (_) => setDialogState(() {
+                              portee = kDepenseMixte;
+                              classesSel.clear();
+                            }),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        portee == kDepenseGlobale
+                            ? "Concerne toute l'école."
+                            : portee == kDepenseIndependante
+                            ? "Concerne une seule section."
+                            : "Concerne plusieurs sections : le montant sera "
+                            "réparti à parts égales entre elles.",
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.black54),
+                      ),
+
+                      // ---- Section(s) -----------------------------------
+                      if (portee == kDepenseIndependante) ...[
+                        const SizedBox(height: 14),
+                        const Text("2. Section concernée",
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 13)),
+                        const SizedBox(height: 6),
+                        DropdownButtonFormField<String>(
+                          value: sectionIndep,
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            labelText: "Choisir la section",
+                            border: OutlineInputBorder(),
+                          ),
+                          items: sectionsDisponibles
+                              .map((s) =>
+                              DropdownMenuItem(value: s, child: Text(s)))
+                              .toList(),
+                          onChanged: (v) => setDialogState(() {
+                            sectionIndep = v;
+                            classesSel.clear();
+                          }),
+                        ),
+                      ],
+                      if (portee == kDepenseMixte) ...[
+                        const SizedBox(height: 14),
+                        const Text("2. Sections concernées (2 ou plus)",
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 13)),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: sectionsDisponibles.map((s) {
+                            final sel = sectionsMixte.contains(s);
+                            return FilterChip(
+                              label: Text(s),
+                              selected: sel,
+                              selectedColor: Colors.purple.shade100,
+                              onSelected: (v) => setDialogState(() {
+                                if (v) {
+                                  sectionsMixte.add(s);
+                                } else {
+                                  sectionsMixte.remove(s);
+                                }
+                                classesSel.clear();
+                              }),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+
+                      // ---- Classes (facultatif) -------------------------
+                      if (portee != kDepenseGlobale &&
+                          classesOptions.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        const Text("Classes concernées (facultatif)",
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 13)),
+                        const SizedBox(height: 2),
+                        Text(
+                          classesSel.isEmpty
+                              ? "Aucune sélection = toutes les classes."
+                              : "${classesSel.length} classe(s) choisie(s).",
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: classesOptions.map((c) {
+                            final sel = classesSel.contains(c);
+                            return FilterChip(
+                              label: Text(c),
+                              selected: sel,
+                              onSelected: (v) => setDialogState(() {
+                                if (v) {
+                                  classesSel.add(c);
+                                } else {
+                                  classesSel.remove(c);
+                                }
+                              }),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+
+                      // ---- Rubrique -------------------------------------
+                      const SizedBox(height: 14),
+                      Text(
+                          portee == kDepenseGlobale
+                              ? "2. Rubrique (administration)"
+                              : "3. Rubrique (administration)",
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String>(
+                        value: rubrique,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: "Sortir l'argent de la rubrique",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: rubriquesDisponibles
+                            .map((r) =>
+                            DropdownMenuItem(value: r, child: Text(r)))
+                            .toList(),
+                        onChanged: (v) => setDialogState(() => rubrique = v),
+                      ),
+                      if (fraisScolaires.config.administrations.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 4),
+                          child: Text(
+                            "Aucune administration configurée dans les "
+                                "Paramètres : seule la rubrique « Autre » est "
+                                "disponible.",
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.orange),
+                          ),
+                        ),
+                      if (solde != null) ...[
+                        const SizedBox(height: 6),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: solde >= 0
+                                ? Colors.green.withAlpha(25)
+                                : Colors.red.withAlpha(25),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            "Solde disponible sur cette rubrique : "
+                                "${formatMontant(solde)} FC",
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: solde >= 0
+                                  ? Colors.green.shade800
+                                  : Colors.red.shade800,
+                            ),
+                          ),
+                        ),
+                      ],
+
+                      // ---- Motif + montant ------------------------------
+                      const SizedBox(height: 14),
+                      Text(
+                          portee == kDepenseGlobale
+                              ? "3. Motif et montant"
+                              : "4. Motif et montant",
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: motifController,
+                        textCapitalization: TextCapitalization.sentences,
+                        maxLines: 2,
+                        decoration: const InputDecoration(
+                          labelText: "Motif / Justification",
+                          hintText:
+                          "Ex: Achat de craies, réparation, transport...",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: montantController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                          labelText: "Montant à faire sortir (FC)",
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.attach_money),
+                        ),
+                      ),
+                      if (secs.isNotEmpty && portee != kDepenseGlobale) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          "Imputée à : ${secs.join(', ')}"
+                              "${classesSel.isNotEmpty ? ' — ${classesSel.join(', ')}' : ''}",
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.black54),
+                        ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: montantController,
-                    keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: "Montant à faire sortir (FC)",
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.attach_money),
-                    ),
-                  ),
-                ],
+                ),
               ),
               actions: [
                 TextButton(
@@ -146,24 +439,83 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                     final montantText =
                     montantController.text.trim().replaceAll(',', '.');
                     final montant = double.tryParse(montantText);
+                    final r = rubrique;
+                    final sectionsFinales = sectionsChoisies();
 
-                    if (motif.isEmpty) {
+                    void erreur(String message) {
                       ScaffoldMessenger.of(dialogContext).showSnackBar(
-                        const SnackBar(
-                            content: Text("Veuillez indiquer un motif.")),
+                        SnackBar(content: Text(message)),
                       );
+                    }
+
+                    if (portee == kDepenseIndependante &&
+                        sectionsFinales.isEmpty) {
+                      erreur("Veuillez choisir la section concernée.");
+                      return;
+                    }
+                    if (portee == kDepenseMixte && sectionsFinales.length < 2) {
+                      erreur("Une dépense mixte doit concerner au moins "
+                          "deux sections.");
+                      return;
+                    }
+                    if (r == null) {
+                      erreur("Veuillez choisir la rubrique.");
+                      return;
+                    }
+                    if (motif.isEmpty) {
+                      erreur("Veuillez indiquer un motif.");
                       return;
                     }
                     if (montant == null || montant <= 0) {
-                      ScaffoldMessenger.of(dialogContext).showSnackBar(
-                        const SnackBar(content: Text("Montant invalide.")),
-                      );
+                      erreur("Montant invalide.");
                       return;
+                    }
+
+                    // Avertissement si la sortie dépasse le solde disponible.
+                    final soldeActuel = soldeDisponible();
+                    if (soldeActuel != null && montant > soldeActuel) {
+                      final continuer = await showDialog<bool>(
+                        context: dialogContext,
+                        builder: (ctx) => AlertDialog(
+                          title: const Row(
+                            children: [
+                              Icon(Icons.warning_amber_rounded,
+                                  color: Colors.orange),
+                              SizedBox(width: 8),
+                              Expanded(child: Text("Solde insuffisant")),
+                            ],
+                          ),
+                          content: Text(
+                            "Le solde disponible sur la rubrique « $r » est de "
+                                "${formatMontant(soldeActuel)} FC, mais vous "
+                                "voulez sortir ${formatMontant(montant)} FC.\n\n"
+                                "Le reste deviendra négatif. Continuer quand même ?",
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text("Annuler"),
+                            ),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.red,
+                                  foregroundColor: Colors.white),
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text("Continuer"),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (continuer != true) return;
                     }
 
                     await fraisScolaires.addDepense(
                       motif: motif,
                       montant: montant,
+                      portee: portee,
+                      sections: sectionsFinales,
+                      classes: classesSel.toList(),
+                      rubrique: r,
                     );
 
                     if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -181,7 +533,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
 
   // ==========================================================================
   // Confirmation de suppression d'une dépense (erreur de saisie, etc.)
-  // ⚡ SÉCURISÉ — demande le mot de passe de sauvegarde après confirmation.
+  // SÉCURISÉ — demande le mot de passe de sauvegarde après confirmation.
   // ==========================================================================
   Future<bool> _confirmDeleteDepense(Depense depense) async {
     final confirm = await showDialog<bool>(
@@ -190,7 +542,9 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
         title: const Text("Supprimer cette dépense ?"),
         content: Text(
           "${depense.motif}\n"
-              "${depense.montant.toStringAsFixed(0)} FC — ${depense.dateFormatee}",
+              "${formatMontant(depense.montant)} FC — ${depense.dateFormatee}\n"
+              "Type : ${depense.porteeLabel} | ${depense.sectionsLabel}\n"
+              "Rubrique : ${depense.rubriqueAffichee}",
         ),
         actions: [
           TextButton(
@@ -227,7 +581,8 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
         ),
         content: Text(
           "Cette action va supprimer DÉFINITIVEMENT les $count dépense(s) "
-              "enregistrées pour l'année ${fraisScolaires.currentYear}.\n\n"
+              "enregistrées pour l'année ${fraisScolaires.currentYear} "
+              "(tous types confondus).\n\n"
               "Cette action est irréversible. Voulez-vous continuer ?",
         ),
         actions: [
@@ -251,84 +606,139 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
   }
 
   // ==========================================================================
-  // Dialogue : historique complet des dépenses de l'année
+  // Dialogue : historique complet des dépenses de l'année (filtrable par type)
   // ==========================================================================
   void _openHistoriqueDialog() {
+    String filtre = 'all';
     showDialog(
       context: context,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
-            final depenses = fraisScolaires.getDepensesForYear();
+            final toutes = fraisScolaires.getDepensesForYear();
+            final depenses = filtre == 'all'
+                ? toutes
+                : toutes.where((d) => d.portee == filtre).toList();
+            final totalAffiche =
+            depenses.fold(0.0, (sum, d) => sum + d.montant);
+
+            Widget filtreChip(String value, String label) {
+              return ChoiceChip(
+                label: Text(label, style: const TextStyle(fontSize: 11)),
+                selected: filtre == value,
+                selectedColor: Colors.indigo.shade100,
+                onSelected: (_) => setDialogState(() => filtre = value),
+              );
+            }
+
             return AlertDialog(
               title: const Row(
                 children: [
                   Icon(Icons.history, color: Colors.indigo),
                   SizedBox(width: 8),
-                  Text("Historique des Dépenses"),
+                  Expanded(child: Text("Historique des Dépenses")),
                 ],
               ),
               content: SizedBox(
                 width: double.maxFinite,
-                child: depenses.isEmpty
-                    ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 24),
-                  child: Text(
-                    "Aucune dépense enregistrée pour cette année.",
-                    textAlign: TextAlign.center,
-                  ),
-                )
-                    : ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: depenses.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final d = depenses[index];
-                    return ListTile(
-                      dense: true,
-                      leading: const Icon(Icons.remove_circle,
-                          color: Colors.red),
-                      title: Text(d.motif),
-                      subtitle: Text(d.dateFormatee,
-                          style: const TextStyle(fontSize: 11)),
-                      trailing: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            "-${d.montant.toStringAsFixed(0)} FC",
-                            style: const TextStyle(
-                                color: Colors.red,
-                                fontWeight: FontWeight.bold),
-                          ),
-                          InkWell(
-                            onTap: () async {
-                              final deleted =
-                              await _confirmDeleteDepense(d);
-                              if (deleted) setDialogState(() {});
-                            },
-                            child: const Padding(
-                              padding: EdgeInsets.only(top: 4),
-                              child: Icon(Icons.delete_outline,
-                                  size: 18, color: Colors.grey),
-                            ),
-                          ),
-                        ],
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        filtreChip('all', "Toutes"),
+                        filtreChip(kDepenseGlobale, "Globales"),
+                        filtreChip(kDepenseIndependante, "Indépendantes"),
+                        filtreChip(kDepenseMixte, "Mixtes"),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        "Total affiché : ${formatMontant(totalAffiche)} FC",
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.bold),
                       ),
-                    );
-                  },
+                    ),
+                    const Divider(height: 10),
+                    Flexible(
+                      child: depenses.isEmpty
+                          ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Text(
+                          "Aucune dépense enregistrée pour ce filtre.",
+                          textAlign: TextAlign.center,
+                        ),
+                      )
+                          : ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: depenses.length,
+                        separatorBuilder: (_, __) =>
+                        const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final d = depenses[index];
+                          final couleur = _couleurPortee(d.portee);
+                          return ListTile(
+                            dense: true,
+                            isThreeLine: true,
+                            leading: Icon(Icons.remove_circle,
+                                color: couleur),
+                            title: Text(d.motif),
+                            subtitle: Text(
+                              "${d.porteeLabel} — ${d.sectionsLabel}\n"
+                                  "Rubrique : ${d.rubriqueAffichee}"
+                                  "${d.portee != kDepenseGlobale && d.classes.isNotEmpty ? '\nClasses : ${d.classes.join(', ')}' : ''}\n"
+                                  "${d.dateFormatee}",
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                            trailing: Column(
+                              mainAxisAlignment:
+                              MainAxisAlignment.center,
+                              crossAxisAlignment:
+                              CrossAxisAlignment.end,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  "-${formatMontant(d.montant)} FC",
+                                  style: TextStyle(
+                                      color: couleur,
+                                      fontWeight: FontWeight.bold),
+                                ),
+                                InkWell(
+                                  onTap: () async {
+                                    final deleted =
+                                    await _confirmDeleteDepense(d);
+                                    if (deleted) {
+                                      setDialogState(() {});
+                                    }
+                                  },
+                                  child: const Padding(
+                                    padding: EdgeInsets.only(top: 4),
+                                    child: Icon(Icons.delete_outline,
+                                        size: 18, color: Colors.grey),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
               actions: [
-                if (depenses.isNotEmpty)
+                if (toutes.isNotEmpty)
                   TextButton.icon(
                     icon: const Icon(Icons.delete_forever, color: Colors.red),
                     label: const Text("Tout effacer",
                         style: TextStyle(color: Colors.red)),
                     onPressed: () async {
                       final cleared =
-                      await _confirmClearAllDepenses(depenses.length);
+                      await _confirmClearAllDepenses(toutes.length);
                       if (cleared) setDialogState(() {});
                     },
                   ),
@@ -361,7 +771,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — Ouvre l'écran "Courbe d'Évolution".
+  // Ouvre l'écran "Courbe d'Évolution".
   // ==========================================================================
   void _openEvolution() {
     Navigator.push(
@@ -419,6 +829,34 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     );
   }
 
+  Widget _ligneCategorie(String label, double montant, Color couleur) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration:
+                BoxDecoration(color: couleur, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Text(label, style: const TextStyle(fontSize: 13)),
+            ],
+          ),
+          Text(
+            "-${formatMontant(montant)} FC",
+            style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: couleur),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final totalCollecte = fraisScolaires.getYearTotalCollected();
@@ -428,17 +866,26 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final soldeNet = totalCollecte - totalDepenses;
     final depensesApercu = depenses.take(3).toList();
 
-    // ⚡ NOUVEAU — valeurs pour la période choisie dans la répartition
-    // globale par administration.
-    final double collectePeriode =
-    fraisScolaires.getMoneyCollectedForPeriod(_periodeGlobale);
-    final double depensesPeriode = _periodeGlobale == 'today'
-        ? fraisScolaires.getTotalDepensesToday()
-        : _periodeGlobale == 'month'
-        ? fraisScolaires.getTotalDepensesThisMonth()
-        : totalDepenses;
-    final double soldeNetPeriode =
-    fraisScolaires.getSoldeNetForPeriod(_periodeGlobale);
+    final double depGlobales =
+    fraisScolaires.getTotalDepensesParPortee(kDepenseGlobale);
+    final double depIndep =
+    fraisScolaires.getTotalDepensesParPortee(kDepenseIndependante);
+    final double depMixtes =
+    fraisScolaires.getTotalDepensesParPortee(kDepenseMixte);
+
+    // Statistiques (collecté, dépenses par rubrique, reste) pour la période
+    // choisie dans la répartition globale par administration.
+    final stats = fraisScolaires.computeDepensesStats(_periodeGlobale);
+    final double collectePeriode = stats.totalCollecte;
+    final double depensesPeriode = stats.totalDepenses;
+    final double soldeNetPeriode = stats.reste;
+
+    final nomsAdmins = fraisScolaires.config.administrations
+        .map((a) => a.nom.trim())
+        .toSet();
+    final rubriquesHorsAdmin = stats.rubriques
+        .where((r) => !nomsAdmins.contains(r.rubrique) && r.total != 0)
+        .toList();
 
     return Scaffold(
       appBar: AppBar(title: const Text("Répartition par Administration")),
@@ -469,7 +916,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                         children: [
                           const Text("Total des dépenses",
                               style: TextStyle(color: Colors.black54)),
-                          Text("- ${totalDepenses.toStringAsFixed(0)} FC",
+                          Text("- ${formatMontant(totalDepenses)} FC",
                               style: const TextStyle(
                                   color: Colors.red,
                                   fontWeight: FontWeight.w600)),
@@ -482,7 +929,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                           const Text("Solde net en caisse",
                               style: TextStyle(
                                   fontWeight: FontWeight.bold, fontSize: 16)),
-                          Text("${soldeNet.toStringAsFixed(0)} FC",
+                          Text("${formatMontant(soldeNet)} FC",
                               style: const TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 16,
@@ -528,8 +975,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            // Bouton "Autres Répartitions" (par Option et par Section
-            // pédagogique).
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -544,7 +989,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            // ⚡ NOUVEAU — bouton "Courbe d'Évolution".
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -560,6 +1004,35 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             ),
 
             const SizedBox(height: 20),
+
+            // ---------------------------------------------------------------
+            // Dépenses par catégorie (année en cours)
+            // ---------------------------------------------------------------
+            if (totalDepenses > 0) ...[
+              const Text("Dépenses par catégorie (Cette Année)",
+                  style:
+                  TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.red.withAlpha(15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    _ligneCategorie("Globales (toute l'école)", depGlobales,
+                        _couleurPortee(kDepenseGlobale)),
+                    _ligneCategorie("Indépendantes (une section)", depIndep,
+                        _couleurPortee(kDepenseIndependante)),
+                    _ligneCategorie("Mixtes (plusieurs sections)", depMixtes,
+                        _couleurPortee(kDepenseMixte)),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
 
             // ---------------------------------------------------------------
             // Aperçu des dernières dépenses (max 3, sans surcharger l'écran)
@@ -579,15 +1052,20 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                 ],
               ),
               ...depensesApercu.map((d) => ListTile(
-                leading: const Icon(Icons.remove_circle_outline,
-                    color: Colors.red),
+                leading: Icon(Icons.remove_circle_outline,
+                    color: _couleurPortee(d.portee)),
                 title: Text(d.motif),
-                subtitle: Text(d.dateFormatee,
-                    style: const TextStyle(fontSize: 11)),
+                subtitle: Text(
+                  "${_labelPortee(d.portee)} — ${d.sectionsLabel}\n"
+                      "Rubrique : ${d.rubriqueAffichee} • ${d.dateFormatee}",
+                  style: const TextStyle(fontSize: 11),
+                ),
+                isThreeLine: true,
                 trailing: Text(
-                  "-${d.montant.toStringAsFixed(0)} FC",
-                  style: const TextStyle(
-                      color: Colors.red, fontWeight: FontWeight.bold),
+                  "-${formatMontant(d.montant)} FC",
+                  style: TextStyle(
+                      color: _couleurPortee(d.portee),
+                      fontWeight: FontWeight.bold),
                 ),
               )),
               const Divider(),
@@ -605,17 +1083,17 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             const Divider(),
 
             // ---------------------------------------------------------------
-            // ⚡ ENRICHI — Répartition GLOBALE aux administrations, avec
-            // choix de la période (Aujourd'hui / Ce mois / Cette année),
-            // pas seulement journalier.
+            // Répartition GLOBALE aux administrations, avec choix de la
+            // période. Le reste de chaque administration tient compte des
+            // dépenses imputées à sa rubrique.
             // ---------------------------------------------------------------
             const Text("Répartition Globale aux Administrations",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
             const Text(
               "Ce que chaque administration (enseignants, gestionnaire, "
-                  "etc.) a déjà accumulé pour TOUTE L'ÉCOLE, sur la période "
-                  "choisie ci-dessous.",
+                  "etc.) a accumulé pour TOUTE L'ÉCOLE sur la période choisie, "
+                  "après déduction des dépenses sorties de sa rubrique.",
               style: TextStyle(fontSize: 12, color: Colors.black54),
             ),
             const SizedBox(height: 10),
@@ -639,7 +1117,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                     style: const TextStyle(
                         fontSize: 13, fontWeight: FontWeight.bold),
                   ),
-                  Text("${collectePeriode.toStringAsFixed(0)} FC",
+                  Text("${formatMontant(collectePeriode)} FC",
                       style: const TextStyle(
                           fontSize: 18,
                           color: Colors.green,
@@ -648,13 +1126,13 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                     const SizedBox(height: 6),
                     Text(
                       "Dépenses sur cette période : "
-                          "-${depensesPeriode.toStringAsFixed(0)} FC",
+                          "-${formatMontant(depensesPeriode)} FC",
                       style: const TextStyle(fontSize: 12, color: Colors.red),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       "Solde net sur cette période : "
-                          "${soldeNetPeriode.toStringAsFixed(0)} FC",
+                          "${formatMontant(soldeNetPeriode)} FC",
                       style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
@@ -675,13 +1153,39 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               )
             else
               ...fraisScolaires.config.administrations.map((admin) {
-                double montant = soldeNetPeriode * (admin.pourcentage / 100);
+                final r = stats.rubriqueParNom(admin.nom.trim());
+                final double collecte = r?.collecte ??
+                    (collectePeriode * admin.pourcentage / 100);
+                final double depense = r?.total ?? 0;
+                final double reste = collecte - depense;
                 return ListTile(
                   title: Text(admin.nom),
-                  subtitle: Text("${admin.pourcentage}%"),
-                  trailing: Text("${montant.toStringAsFixed(0)} FC"),
+                  subtitle: Text(
+                    "${admin.pourcentage}% • Part : ${formatMontant(collecte)} FC"
+                        "${depense > 0 ? ' • Dépenses : -${formatMontant(depense)} FC' : ''}",
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  trailing: Text(
+                    "${formatMontant(reste)} FC",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: reste >= 0 ? Colors.black87 : Colors.red,
+                    ),
+                  ),
                 );
               }).toList(),
+            ...rubriquesHorsAdmin.map((r) => ListTile(
+              title: Text(r.rubrique),
+              subtitle: const Text(
+                "Rubrique hors administration",
+                style: TextStyle(fontSize: 11),
+              ),
+              trailing: Text(
+                "-${formatMontant(r.total)} FC",
+                style: const TextStyle(
+                    fontWeight: FontWeight.bold, color: Colors.red),
+              ),
+            )),
           ],
         ),
       ),
@@ -695,9 +1199,9 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
 // l'intérieur d'une option, par Section pédagogique (ex: Électricité,
 // Commerciale...) ou "Éducation de Base" pour les classes sans section
 // (7ème/8ème dans le système éducatif de la RDC).
-// ⚡ ENRICHI — sélecteur de période (Aujourd'hui / Ce mois / Cette année)
-// permettant de voir, PAR SECTION, ce que chaque administration a déjà
-// obtenu, pas seulement le total annuel.
+// Sélecteur de période (Aujourd'hui / Ce mois / Cette année). Le reste de
+// chaque administration déduit les dépenses indépendantes et mixtes
+// rattachées à la section.
 // ==============================================================================
 class _AutresRepartitionsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -796,16 +1300,16 @@ class _AutresRepartitionsScreenState
                 borderRadius: BorderRadius.circular(8),
               ),
               child: const Text(
-                "Ces montants sont calculés sur les sommes BRUTES "
-                    "collectées par option/section, avant déduction des "
-                    "dépenses globales de l'école (les dépenses ne sont "
-                    "pas rattachées à une option ou section précise).",
+                "Les totaux par option/section sont BRUTS (avant "
+                    "dépenses). Dans le détail d'une option, le « reste » de "
+                    "chaque administration déduit les dépenses indépendantes "
+                    "et mixtes rattachées à cette section. Les dépenses "
+                    "globales de l'école ne sont pas déduites ici.",
                 style: TextStyle(fontSize: 12, color: Colors.indigo),
               ),
             ),
             const SizedBox(height: 12),
 
-            // ⚡ NOUVEAU — sélecteur de période, applicable à toute la page.
             const Text("Période",
                 style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
@@ -869,6 +1373,15 @@ class _AutresRepartitionsScreenState
     final sousSections =
     fraisScolaires.getSousSectionsForOptionPeriod(option, _periode);
 
+    // Statistiques de dépenses rattachées à cette section pour la période.
+    final stats = fraisScolaires.computeDepensesStats(
+      _periode,
+      sectionFilter: option,
+    );
+    final rubriquesAffichees = stats.rubriques
+        .where((r) => r.collecte != 0 || r.total != 0)
+        .toList();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -891,10 +1404,25 @@ class _AutresRepartitionsScreenState
                       fontSize: 22, color: Colors.green,
                       fontWeight: FontWeight.bold),
                 ),
+                if (stats.totalDepenses > 0) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    "Dépenses de la section : "
+                        "-${formatMontant(stats.totalDepenses)} FC",
+                    style: const TextStyle(fontSize: 12, color: Colors.red),
+                  ),
+                  Text(
+                    "Reste après dépenses : ${formatMontant(stats.reste)} FC",
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.indigo),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 const Text("Répartition par administration :",
                     style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-                if (detailOption.parAdministration.isEmpty)
+                if (rubriquesAffichees.isEmpty)
                   const Padding(
                     padding: EdgeInsets.only(top: 4),
                     child: Text(
@@ -903,16 +1431,36 @@ class _AutresRepartitionsScreenState
                     ),
                   )
                 else
-                  ...detailOption.parAdministration.entries.map(
-                        (e) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
+                  ...rubriquesAffichees.map(
+                        (r) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
                       child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(e.key),
-                          Text("${e.value.toStringAsFixed(0)} FC",
-                              style:
-                              const TextStyle(fontWeight: FontWeight.w600)),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(r.rubrique),
+                                Text(
+                                  "Part : ${formatMontant(r.collecte)} FC"
+                                      "${r.total > 0 ? ' − Dépenses : ${formatMontant(r.total)} FC' : ''}",
+                                  style: const TextStyle(
+                                      fontSize: 11, color: Colors.black54),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Text(
+                            "${formatMontant(r.reste)} FC",
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: r.reste >= 0
+                                  ? Colors.black87
+                                  : Colors.red,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -982,7 +1530,7 @@ class _AutresRepartitionsScreenState
 }
 
 // ==============================================================================
-// ⚡ NOUVEAU — ÉCRAN "COURBE D'ÉVOLUTION"
+// ÉCRAN "COURBE D'ÉVOLUTION"
 // Courbe mensuelle (Septembre → Juin) des montants collectés, comme un
 // graphique en ligne Excel classique. Filtrable par Option, Section
 // pédagogique (ou "Éducation de Base" pour 7ème/8ème) et Classe.
