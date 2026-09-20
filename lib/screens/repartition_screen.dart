@@ -103,12 +103,21 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     }
   }
 
+  // ⚡ NOUVEAU — formatte une date (sans l'heure) au format jj/mm/aaaa,
+  // utilisé pour l'affichage du sélecteur de date dans le formulaire
+  // d'ajout d'une dépense.
+  String _formatDateCourte(DateTime d) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return "${two(d.day)}/${two(d.month)}/${d.year}";
+  }
+
   // ==========================================================================
   // Dialogue : ajouter une nouvelle dépense
   //   1. Type : Globale / Indépendante / Mixte
   //   2. Section(s) concernée(s) (+ classes, facultatif)
   //   3. Rubrique (administration) sur laquelle l'argent sort
   //   4. Motif + montant
+  //   5. Date (facultatif — aujourd'hui par défaut)
   // SÉCURISÉ — demande le mot de passe de sauvegarde avant d'ouvrir le
   // formulaire.
   // ==========================================================================
@@ -126,6 +135,11 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final Set<String> sectionsMixte = {};
     final Set<String> classesSel = {};
     String? rubrique;
+    // ⚡ NOUVEAU — date optionnelle de la dépense. Si non renseignée
+    // (null), la date d'aujourd'hui sera utilisée automatiquement par
+    // `addDepense`. Utile lorsque le caissier enregistre aujourd'hui
+    // une dépense faite un autre jour (ex. hier).
+    DateTime? dateSelectionnee;
 
     final sectionsDisponibles = fraisScolaires.config.sections;
     final rubriquesDisponibles = fraisScolaires.getRubriquesDisponibles();
@@ -169,6 +183,12 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             final secs = sectionsChoisies();
             final classesOptions = classesProposees();
             final solde = soldeDisponible();
+
+            // ⚡ Détermine le numéro d'étape suivant, en fonction de la
+            // présence ou non des sections/classes (portée globale ou
+            // non), pour que la numérotation de la section "Date"
+            // s'enchaîne correctement avec "Motif et montant".
+            final int numeroDate = portee == kDepenseGlobale ? 4 : 5;
 
             return AlertDialog(
               title: const Row(
@@ -420,6 +440,84 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                               fontSize: 11, color: Colors.black54),
                         ),
                       ],
+
+                      // ---- Date (facultatif) -----------------------------
+                      // ⚡ NOUVEAU — permet de préciser la date réelle de
+                      // la dépense si elle diffère du jour de saisie.
+                      // Laissé vide, le système prend automatiquement la
+                      // date d'aujourd'hui, exactement comme avant.
+                      const SizedBox(height: 14),
+                      Text(
+                        "$numeroDate. Date (facultatif)",
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        "Laissez vide pour utiliser la date d'aujourd'hui. "
+                            "Utile si vous enregistrez maintenant une "
+                            "dépense faite un autre jour (par ex. hier).",
+                        style: TextStyle(fontSize: 11, color: Colors.black54),
+                      ),
+                      const SizedBox(height: 6),
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: dialogContext,
+                            initialDate: dateSelectionnee ?? DateTime.now(),
+                            firstDate: DateTime(2020),
+                            lastDate:
+                            DateTime.now().add(const Duration(days: 365)),
+                            helpText: "Choisir la date de la dépense",
+                            cancelText: "Annuler",
+                            confirmText: "Valider",
+                          );
+                          if (picked != null) {
+                            setDialogState(() => dateSelectionnee = picked);
+                          }
+                        },
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 12),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey.shade400),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.calendar_today,
+                                  size: 18, color: Colors.indigo),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  dateSelectionnee == null
+                                      ? "Aujourd'hui (par défaut)"
+                                      : _formatDateCourte(dateSelectionnee!),
+                                  style: TextStyle(
+                                    color: dateSelectionnee == null
+                                        ? Colors.black54
+                                        : Colors.black87,
+                                    fontWeight: dateSelectionnee == null
+                                        ? FontWeight.normal
+                                        : FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              if (dateSelectionnee != null)
+                                InkWell(
+                                  onTap: () => setDialogState(
+                                          () => dateSelectionnee = null),
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(2),
+                                    child: Icon(Icons.close,
+                                        size: 18, color: Colors.grey),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -516,6 +614,10 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                       sections: sectionsFinales,
                       classes: classesSel.toList(),
                       rubrique: r,
+                      // ⚡ NOUVEAU — date optionnelle ; si l'utilisateur
+                      // n'a rien choisi, `addDepense` utilisera
+                      // automatiquement la date d'aujourd'hui.
+                      date: dateSelectionnee,
                     );
 
                     if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -561,6 +663,44 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     if (confirm != true) return false;
     if (!await _verifyBackupPassword()) return false;
     await fraisScolaires.deleteDepense(depense.id);
+    return true;
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — Modifier la date d'une dépense déjà enregistrée.
+  // Utile lorsque le caissier a oublié d'enregistrer une sortie de
+  // caisse le jour même et le fait plus tard : il peut corriger la date
+  // pour qu'elle reflète le jour réel de la dépense. La dépense
+  // apparaîtra alors dans le rapport journalier/mensuel/annuel
+  // correspondant à sa NOUVELLE date.
+  // SÉCURISÉ — demande le mot de passe de sauvegarde après le choix de
+  // la nouvelle date.
+  // ==========================================================================
+  Future<bool> _editDepenseDate(Depense depense) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: depense.date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      helpText: "Choisir la date réelle de cette dépense",
+      cancelText: "Annuler",
+      confirmText: "Valider",
+    );
+    if (picked == null) return false;
+
+    // On conserve l'heure d'origine et on ne change que le jour, le mois
+    // et l'année, pour rester cohérent avec le format "date + heure"
+    // utilisé dans dateFormatee.
+    final newDate = DateTime(
+      picked.year,
+      picked.month,
+      picked.day,
+      depense.date.hour,
+      depense.date.minute,
+    );
+
+    if (!await _verifyBackupPassword()) return false;
+    await fraisScolaires.updateDepenseDate(depense.id, newDate);
     return true;
   }
 
@@ -707,19 +847,42 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                                       color: couleur,
                                       fontWeight: FontWeight.bold),
                                 ),
-                                InkWell(
-                                  onTap: () async {
-                                    final deleted =
-                                    await _confirmDeleteDepense(d);
-                                    if (deleted) {
-                                      setDialogState(() {});
-                                    }
-                                  },
-                                  child: const Padding(
-                                    padding: EdgeInsets.only(top: 4),
-                                    child: Icon(Icons.delete_outline,
-                                        size: 18, color: Colors.grey),
-                                  ),
+                                // ⚡ NOUVEAU — bouton pour modifier la
+                                // date de cette dépense, à côté du
+                                // bouton de suppression déjà existant.
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    InkWell(
+                                      onTap: () async {
+                                        final edited =
+                                        await _editDepenseDate(d);
+                                        if (edited) {
+                                          setDialogState(() {});
+                                        }
+                                      },
+                                      child: const Padding(
+                                        padding:
+                                        EdgeInsets.only(top: 4, right: 10),
+                                        child: Icon(Icons.edit_calendar,
+                                            size: 18, color: Colors.indigo),
+                                      ),
+                                    ),
+                                    InkWell(
+                                      onTap: () async {
+                                        final deleted =
+                                        await _confirmDeleteDepense(d);
+                                        if (deleted) {
+                                          setDialogState(() {});
+                                        }
+                                      },
+                                      child: const Padding(
+                                        padding: EdgeInsets.only(top: 4),
+                                        child: Icon(Icons.delete_outline,
+                                            size: 18, color: Colors.grey),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),

@@ -2227,6 +2227,71 @@ class FraisScolaires {
         .toList();
   }
 
+  /// ==================== JOURNAL DE CAISSE ====================
+  /// Ces méthodes permettent au caissier de retrouver, à n'importe quel
+  /// moment, l'historique complet des paiements qu'il a enregistrés un
+  /// jour précis (aujourd'hui ou n'importe quel autre jour passé), avec
+  /// la possibilité de filtrer par mois scolaire payé, par section et
+  /// par classe — exactement comme les filtres déjà utilisés ailleurs
+  /// dans l'application.
+
+  /// Retourne la liste des paiements (transactions) effectués à une date
+  /// précise (au format 'YYYY-MM-DD', identique à celui stocké dans les
+  /// transactions via `DateTime.now().toString().split(' ')[0]`), avec
+  /// filtres optionnels par mois scolaire payé, par section et par
+  /// classe. Chaque élément de la liste retournée est une Map contenant
+  /// 'eleve' (l'Eleve concerné) et 'transaction' (la Map brute de la
+  /// transaction, avec ses champs 'id', 'date', 'mois', 'amount', etc.).
+  List<Map<String, dynamic>> getPaiementsPourDate({
+    required String date,
+    String? mois,
+    String? sectionFilter,
+    String? classFilter,
+  }) {
+    final List<Map<String, dynamic>> result = [];
+    for (final e in currentData.eleves) {
+      if (sectionFilter != null && e.section != sectionFilter) continue;
+      if (classFilter != null && e.classe != classFilter) continue;
+      for (final t in e.transactions) {
+        if (t['date']?.toString() != date) continue;
+        final String moisTransaction = t['mois']?.toString() ?? '';
+        if (mois != null && moisTransaction != mois) continue;
+        result.add({
+          'eleve': e,
+          'transaction': t,
+        });
+      }
+    }
+    result.sort((a, b) {
+      final Eleve ea = a['eleve'] as Eleve;
+      final Eleve eb = b['eleve'] as Eleve;
+      final c = ea.nom.toLowerCase().compareTo(eb.nom.toLowerCase());
+      if (c != 0) return c;
+      return ea.prenom.toLowerCase().compareTo(eb.prenom.toLowerCase());
+    });
+    return result;
+  }
+
+  /// Montant total des paiements pour une date donnée, avec les mêmes
+  /// filtres optionnels que [getPaiementsPourDate] (mois, section,
+  /// classe).
+  double getTotalPaiementsPourDate({
+    required String date,
+    String? mois,
+    String? sectionFilter,
+    String? classFilter,
+  }) {
+    return getPaiementsPourDate(
+      date: date,
+      mois: mois,
+      sectionFilter: sectionFilter,
+      classFilter: classFilter,
+    ).fold(0.0, (sum, item) {
+      final t = item['transaction'] as Map<String, dynamic>;
+      return sum + ((t['amount'] as num?)?.toDouble() ?? 0.0);
+    });
+  }
+
   Map<String, double> calculateAdminDistribution(double totalAmount) {
     final distribution = <String, double>{};
     for (var admin in config.administrations) {
@@ -2536,6 +2601,12 @@ class FraisScolaires {
     final y = year ?? currentYear;
     final now = DateTime.now();
     final todayStr = now.toString().split(' ')[0];
+    // ⚡ Le filtrage par période se base sur `d.date`, qui reflète la date
+    // choisie par l'utilisateur (aujourd'hui par défaut, ou une date
+    // passée s'il en a défini une lors de l'ajout ou de la modification
+    // de la dépense). Une dépense apparaît donc dans le rapport
+    // journalier/mensuel/annuel correspondant à SA date, pas à la date
+    // à laquelle elle a été saisie dans l'application.
     final list = (depensesByYear[y] ?? []).where((d) {
       bool okPeriode;
       switch (period) {
@@ -2705,12 +2776,17 @@ class FraisScolaires {
     List<String>? sections,
     List<String>? classes,
     String rubrique = '',
+    // ⚡ NOUVEAU — date optionnelle de la sortie de caisse. Si non fournie
+    // (null), la date d'aujourd'hui est utilisée, exactement comme avant.
+    // Permet d'enregistrer aujourd'hui une dépense faite un autre jour
+    // (par exemple hier), en précisant sa date réelle.
+    DateTime? date,
   }) async {
     final depense = Depense(
       id: 'DEP${DateTime.now().millisecondsSinceEpoch}',
       motif: motif.trim(),
       montant: montant,
-      date: DateTime.now(),
+      date: date ?? DateTime.now(),
       enregistrePar: enregistrePar,
       portee: portee,
       sections: portee == kDepenseGlobale ? [] : (sections ?? []),
@@ -2729,6 +2805,9 @@ class FraisScolaires {
     String enregistrePar = 'Direction',
     List<String>? classes,
     String rubrique = '',
+    // ⚡ NOUVEAU — date optionnelle, transmise à addDepense (voir
+    // ci-dessus).
+    DateTime? date,
   }) async {
     final sections = getSectionsPourOption(option);
     if (sections.isEmpty) {
@@ -2742,12 +2821,37 @@ class FraisScolaires {
       sections: sections,
       classes: classes,
       rubrique: rubrique,
+      date: date,
     );
   }
 
   Future<void> deleteDepense(String id, [String? year]) async {
     final y = year ?? currentYear;
     depensesByYear[y]?.removeWhere((d) => d.id == id);
+    await saveData();
+  }
+
+  /// ⚡ NOUVEAU — permet de changer la date d'une dépense déjà
+  /// enregistrée. Utile lorsque le caissier a oublié d'enregistrer une
+  /// sortie de caisse le jour même et le fait plus tard : il peut
+  /// corriger la date pour qu'elle reflète le jour réel de la dépense.
+  /// La dépense corrigée apparaît alors automatiquement dans les
+  /// rapports (journalier/mensuel/annuel) correspondant à sa NOUVELLE
+  /// date, puisque `getDepensesForPeriod` filtre déjà sur `d.date`.
+  Future<void> updateDepenseDate(
+      String id,
+      DateTime newDate, [
+        String? year,
+      ]) async {
+    final y = year ?? currentYear;
+    final list = depensesByYear[y];
+    if (list == null) return;
+    for (final d in list) {
+      if (d.id == id) {
+        d.date = newDate;
+        break;
+      }
+    }
     await saveData();
   }
 
@@ -4290,6 +4394,13 @@ class FraisScolaires {
               "• Chaque dépense est imputée à une RUBRIQUE (salaire des "
                   "enseignants, construction, etc.) : le « Reste » est ce qui "
                   "demeure dans la rubrique après la sortie d'argent.",
+              style: const pw.TextStyle(fontSize: 9),
+            ),
+            pw.Text(
+              "• Chaque dépense apparaît dans le rapport correspondant à SA "
+                  "PROPRE DATE (celle indiquée à l'enregistrement, ou "
+                  "corrigée ensuite dans l'historique), et non à la date à "
+                  "laquelle elle a été saisie dans l'application.",
               style: const pw.TextStyle(fontSize: 9),
             ),
           ],

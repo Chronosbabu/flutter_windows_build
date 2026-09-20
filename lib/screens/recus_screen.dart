@@ -15,6 +15,12 @@ import '../models.dart';
 /// une éventuelle exception de paiement personnalisée pour cet élève
 /// (montant mensuel fixe défini dans Paramètres). Si l'élève n'a aucune
 /// exception, le comportement reste strictement identique à avant.
+///
+/// ⚡ NOUVEAU — un bouton "Journal de caisse" dans l'AppBar ouvre un
+/// écran permettant au caissier de retrouver, à tout moment, tous les
+/// paiements qu'il a enregistrés un jour précis (aujourd'hui par défaut,
+/// ou n'importe quel autre jour passé), avec les mêmes filtres que
+/// partout ailleurs dans l'app : mois payé, section, classe.
 class RecusScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const RecusScreen({super.key, required this.fraisScolaires});
@@ -87,6 +93,17 @@ class _RecusScreenState extends State<RecusScreen> {
     }
   }
 
+  // ⚡ NOUVEAU — ouvre l'écran "Journal de Caisse".
+  void _openJournalCaisse() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _JournalCaisseScreen(
+          fraisScolaires: widget.fraisScolaires,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final classOptions = selectedSectionFilter != null
@@ -106,6 +123,14 @@ class _RecusScreenState extends State<RecusScreen> {
         title: const Text("Historique des Reçus"),
         backgroundColor: Colors.indigo,
         foregroundColor: Colors.white,
+        actions: [
+          // ⚡ NOUVEAU — bouton d'accès au journal de caisse.
+          IconButton(
+            tooltip: "Journal de caisse (paiements par jour)",
+            icon: const Icon(Icons.point_of_sale),
+            onPressed: _openJournalCaisse,
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -776,6 +801,335 @@ class _RecusScreenState extends State<RecusScreen> {
               fontSize: 13,
               fontWeight: FontWeight.bold,
               color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// ==================== JOURNAL DE CAISSE ====================
+/// ⚡ NOUVEAU — écran permettant au caissier de retrouver, à tout moment,
+/// l'historique complet des paiements qu'il a enregistrés un jour précis
+/// (aujourd'hui par défaut, ou n'importe quel autre jour passé), avec la
+/// possibilité de filtrer par mois scolaire payé, par section et par
+/// classe — exactement les mêmes filtres que ceux déjà utilisés ailleurs
+/// dans l'application (page des reçus, listes d'élèves, etc.).
+///
+/// S'appuie sur `FraisScolaires.getPaiementsPourDate` et
+/// `FraisScolaires.getTotalPaiementsPourDate`.
+class _JournalCaisseScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const _JournalCaisseScreen({required this.fraisScolaires});
+
+  @override
+  State<_JournalCaisseScreen> createState() => _JournalCaisseScreenState();
+}
+
+class _JournalCaisseScreenState extends State<_JournalCaisseScreen> {
+  late DateTime selectedDate;
+  String? selectedMois;
+  String? selectedSection;
+  String? selectedClasse;
+
+  @override
+  void initState() {
+    super.initState();
+    selectedDate = DateTime.now();
+  }
+
+  String get _dateKey => selectedDate.toString().split(' ')[0];
+
+  bool get _estAujourdhui {
+    final now = DateTime.now();
+    return selectedDate.year == now.year &&
+        selectedDate.month == now.month &&
+        selectedDate.day == now.day;
+  }
+
+  String get _dateAffichee {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return "${two(selectedDate.day)}/${two(selectedDate.month)}/${selectedDate.year}";
+  }
+
+  Future<void> _choisirDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: selectedDate,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      helpText: "Choisir une date",
+      cancelText: "Annuler",
+      confirmText: "Valider",
+    );
+    if (picked != null) {
+      setState(() => selectedDate = picked);
+    }
+  }
+
+  void _allerAJour(int offsetJours) {
+    final nouvelleDate = selectedDate.add(Duration(days: offsetJours));
+    if (nouvelleDate.isAfter(DateTime.now())) return;
+    setState(() => selectedDate = nouvelleDate);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final paiements = widget.fraisScolaires.getPaiementsPourDate(
+      date: _dateKey,
+      mois: selectedMois,
+      sectionFilter: selectedSection,
+      classFilter: selectedClasse,
+    );
+    final double total = widget.fraisScolaires.getTotalPaiementsPourDate(
+      date: _dateKey,
+      mois: selectedMois,
+      sectionFilter: selectedSection,
+      classFilter: selectedClasse,
+    );
+
+    final classOptions = selectedSection != null
+        ? List<String>.from(widget.fraisScolaires
+        .getAllDisplayClassesForSection(selectedSection!))
+        : List<String>.from(widget.fraisScolaires.getAllDisplayClasses());
+    if (selectedClasse != null && !classOptions.contains(selectedClasse)) {
+      classOptions.add(selectedClasse!);
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Journal de Caisse"),
+        backgroundColor: Colors.indigo,
+        foregroundColor: Colors.white,
+      ),
+      body: Column(
+        children: [
+          // ==================== SÉLECTEUR DE DATE ====================
+          Container(
+            width: double.infinity,
+            color: Colors.indigo.withAlpha(20),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.chevron_left, color: Colors.indigo),
+                  onPressed: () => _allerAJour(-1),
+                  tooltip: "Jour précédent",
+                ),
+                Expanded(
+                  child: InkWell(
+                    onTap: _choisirDate,
+                    child: Column(
+                      children: [
+                        Text(
+                          _estAujourdhui
+                              ? "Aujourd'hui — $_dateAffichee"
+                              : _dateAffichee,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.indigo,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        const Text(
+                          "Toucher pour choisir une autre date",
+                          style: TextStyle(fontSize: 11, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: Icon(
+                    Icons.chevron_right,
+                    color: _estAujourdhui ? Colors.grey : Colors.indigo,
+                  ),
+                  onPressed: _estAujourdhui ? null : () => _allerAJour(1),
+                  tooltip: "Jour suivant",
+                ),
+              ],
+            ),
+          ),
+          if (!_estAujourdhui)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: TextButton.icon(
+                onPressed: () =>
+                    setState(() => selectedDate = DateTime.now()),
+                icon: const Icon(Icons.today, size: 16),
+                label: const Text("Revenir à aujourd'hui"),
+              ),
+            ),
+
+          // ==================== FILTRES ====================
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Column(
+              children: [
+                DropdownButton<String>(
+                  isExpanded: true,
+                  hint: const Text("Tous les mois"),
+                  value: selectedMois,
+                  items: [
+                    const DropdownMenuItem(
+                      value: null,
+                      child: Text("Tous les mois"),
+                    ),
+                    ...widget.fraisScolaires.months.map(
+                          (m) => DropdownMenuItem(value: m, child: Text(m)),
+                    ),
+                  ],
+                  onChanged: (val) => setState(() => selectedMois = val),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        hint: const Text("Toutes les sections"),
+                        value: selectedSection,
+                        items: [
+                          const DropdownMenuItem(
+                            value: null,
+                            child: Text("Toutes les sections"),
+                          ),
+                          ...widget.fraisScolaires.config.sections.map(
+                                (s) =>
+                                DropdownMenuItem(value: s, child: Text(s)),
+                          ),
+                        ],
+                        onChanged: (val) {
+                          setState(() {
+                            selectedSection = val;
+                            selectedClasse = null;
+                          });
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        hint: const Text("Toutes les classes"),
+                        value: selectedClasse,
+                        items: [
+                          const DropdownMenuItem(
+                            value: null,
+                            child: Text("Toutes les classes"),
+                          ),
+                          ...classOptions.map(
+                                (c) =>
+                                DropdownMenuItem(value: c, child: Text(c)),
+                          ),
+                        ],
+                        onChanged: (val) =>
+                            setState(() => selectedClasse = val),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // ==================== RÉSUMÉ ====================
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.withAlpha(20),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.green.withAlpha(60)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "${paiements.length} paiement(s)",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green,
+                    ),
+                  ),
+                  Text(
+                    "Total : ${total.toStringAsFixed(0)} FC",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      color: Colors.green,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // ==================== LISTE DES PAIEMENTS ====================
+          Expanded(
+            child: paiements.isEmpty
+                ? const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.inbox, size: 64, color: Colors.grey),
+                  SizedBox(height: 12),
+                  Text(
+                    "Aucun paiement trouvé pour ce jour",
+                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                  ),
+                ],
+              ),
+            )
+                : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: paiements.length,
+              itemBuilder: (context, index) {
+                final item = paiements[index];
+                final eleve = item['eleve'] as Eleve;
+                final transaction =
+                item['transaction'] as Map<String, dynamic>;
+                final double montant =
+                    (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+                final String mois =
+                    transaction['mois']?.toString() ?? '-';
+
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  elevation: 2,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                  child: ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: Colors.indigo.withAlpha(30),
+                      child: const Icon(Icons.receipt_long,
+                          color: Colors.indigo),
+                    ),
+                    title: Text(
+                      "${eleve.nom} ${eleve.postNom} ${eleve.prenom}",
+                      style:
+                      const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      "${eleve.classe}  •  ${eleve.section}  •  Mois payé : $mois",
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: Text(
+                      "${montant.toStringAsFixed(0)} FC",
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ],
