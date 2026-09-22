@@ -2,25 +2,6 @@ import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 
-/// Page des reçus : affiche l'historique complet de tous les paiements
-/// de tous les élèves de l'année en cours. Chaque reçu montre :
-///   - Le nom de l'école en titre principal (gras)
-///   - Le nom complet de l'élève
-///   - Sa promotion (classe + section)
-///   - Le détail mois par mois (montant payé / requis / reste)
-///   - L'historique de chaque transaction avec la date
-///
-/// ⚡ Le montant "requis" par mois utilise désormais
-/// `getRequiredForMonthForEleve`, qui prend en compte automatiquement
-/// une éventuelle exception de paiement personnalisée pour cet élève
-/// (montant mensuel fixe défini dans Paramètres). Si l'élève n'a aucune
-/// exception, le comportement reste strictement identique à avant.
-///
-/// ⚡ NOUVEAU — un bouton "Journal de caisse" dans l'AppBar ouvre un
-/// écran permettant au caissier de retrouver, à tout moment, tous les
-/// paiements qu'il a enregistrés un jour précis (aujourd'hui par défaut,
-/// ou n'importe quel autre jour passé), avec les mêmes filtres que
-/// partout ailleurs dans l'app : mois payé, section, classe.
 class RecusScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const RecusScreen({super.key, required this.fraisScolaires});
@@ -36,6 +17,7 @@ class _RecusScreenState extends State<RecusScreen> {
   List<Eleve> filtered = [];
 
   bool _generatingPdf = false;
+  bool _printingReceipt = false;
 
   @override
   void initState() {
@@ -93,7 +75,30 @@ class _RecusScreenState extends State<RecusScreen> {
     }
   }
 
-  // ⚡ NOUVEAU — ouvre l'écran "Journal de Caisse".
+  Future<void> _imprimerBilanPourEleve(Eleve eleve) async {
+    if (_printingReceipt) return;
+    setState(() => _printingReceipt = true);
+    try {
+      final result = await widget.fraisScolaires
+          .printStudentPaymentHistoryReceipt(eleve: eleve);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result['success'] == true
+                  ? "🖨️ Bilan financier imprimé avec succès"
+                  : "❌ Échec : ${result['error'] ?? 'erreur inconnue'}",
+            ),
+            backgroundColor:
+            result['success'] == true ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _printingReceipt = false);
+    }
+  }
+
   void _openJournalCaisse() {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -124,7 +129,6 @@ class _RecusScreenState extends State<RecusScreen> {
         backgroundColor: Colors.indigo,
         foregroundColor: Colors.white,
         actions: [
-          // ⚡ NOUVEAU — bouton d'accès au journal de caisse.
           IconButton(
             tooltip: "Journal de caisse (paiements par jour)",
             icon: const Icon(Icons.point_of_sale),
@@ -134,7 +138,6 @@ class _RecusScreenState extends State<RecusScreen> {
       ),
       body: Column(
         children: [
-          // ==================== EN-TÊTE ÉCOLE ====================
           Container(
             width: double.infinity,
             color: Colors.indigo.withAlpha(20),
@@ -162,8 +165,6 @@ class _RecusScreenState extends State<RecusScreen> {
               ],
             ),
           ),
-
-          // ==================== FILTRES ====================
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             child: Column(
@@ -231,8 +232,6 @@ class _RecusScreenState extends State<RecusScreen> {
               ],
             ),
           ),
-
-          // ==================== COMPTEUR ====================
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             child: Align(
@@ -246,8 +245,6 @@ class _RecusScreenState extends State<RecusScreen> {
               ),
             ),
           ),
-
-          // ==================== LISTE DES REÇUS ====================
           Expanded(
             child: filtered.isEmpty
                 ? const Center(
@@ -278,7 +275,6 @@ class _RecusScreenState extends State<RecusScreen> {
     );
   }
 
-  // ==================== CARTE RÉSUMÉ D'UN ÉLÈVE ====================
   Widget _buildReceiptCard(Eleve eleve) {
     final double totalPaye =
     widget.fraisScolaires.getStudentTotalPaid(eleve);
@@ -298,7 +294,6 @@ class _RecusScreenState extends State<RecusScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Nom de l'école en titre
               Text(
                 widget.fraisScolaires.config.schoolName.toUpperCase(),
                 style: const TextStyle(
@@ -309,8 +304,6 @@ class _RecusScreenState extends State<RecusScreen> {
                 ),
               ),
               const Divider(height: 10),
-
-              // Nom de l'élève
               Row(
                 children: [
                   Expanded(
@@ -322,9 +315,6 @@ class _RecusScreenState extends State<RecusScreen> {
                       ),
                     ),
                   ),
-                  // ⚡ NOUVEAU — badge visuel si l'élève a une exception
-                  // de paiement personnalisée, pour que ce soit visible
-                  // dès la liste des reçus sans avoir à ouvrir le détail.
                   if (eleve.montantMensuelPersonnalise != null)
                     Container(
                       margin: const EdgeInsets.only(left: 6),
@@ -346,8 +336,6 @@ class _RecusScreenState extends State<RecusScreen> {
                 ],
               ),
               const SizedBox(height: 4),
-
-              // Promotion (classe + section)
               Row(
                 children: [
                   const Icon(Icons.school, size: 14, color: Colors.grey),
@@ -362,8 +350,6 @@ class _RecusScreenState extends State<RecusScreen> {
                 ],
               ),
               const SizedBox(height: 10),
-
-              // Montants
               Row(
                 children: [
                   Expanded(
@@ -392,8 +378,6 @@ class _RecusScreenState extends State<RecusScreen> {
                 ],
               ),
               const SizedBox(height: 8),
-
-              // Nombre de transactions
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -465,7 +449,6 @@ class _RecusScreenState extends State<RecusScreen> {
     );
   }
 
-  // ==================== DÉTAIL COMPLET DU REÇU ====================
   void _showReceiptDetail(Eleve eleve) {
     showDialog(
       context: context,
@@ -479,7 +462,6 @@ class _RecusScreenState extends State<RecusScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // ---- Titre : nom de l'école ----
                 Center(
                   child: Text(
                     widget.fraisScolaires.config.schoolName.toUpperCase(),
@@ -510,15 +492,11 @@ class _RecusScreenState extends State<RecusScreen> {
                   ),
                 ),
                 const Divider(height: 20),
-
-                // ---- Infos élève ----
                 _detailRow("Nom complet",
                     "${eleve.nom} ${eleve.postNom} ${eleve.prenom}"),
                 _detailRow("ID", eleve.id),
                 _detailRow("Promotion", eleve.classe),
                 _detailRow("Section", eleve.section),
-                // ⚡ NOUVEAU — affiche clairement le montant personnalisé
-                // s'il existe, directement dans le détail du reçu.
                 if (eleve.montantMensuelPersonnalise != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
@@ -539,8 +517,6 @@ class _RecusScreenState extends State<RecusScreen> {
                     ),
                   ),
                 const Divider(height: 20),
-
-                // ---- Bilan financier ----
                 const Text(
                   "BILAN FINANCIER",
                   style: TextStyle(
@@ -551,15 +527,11 @@ class _RecusScreenState extends State<RecusScreen> {
                 ),
                 const SizedBox(height: 8),
                 ...widget.fraisScolaires.months.map((mois) {
-                  // ⚡ CORRIGÉ — utilise désormais getRequiredForMonthForEleve
-                  // pour que le montant requis tienne compte de l'exception
-                  // de paiement personnalisée de cet élève, si elle existe.
                   final requis = widget.fraisScolaires
                       .getRequiredForMonthForEleve(eleve, mois);
                   final paye = (eleve.paid[mois] ?? 0).toDouble();
                   final reste = requis - paye;
                   if (paye == 0 && reste == requis) {
-                    // Mois non commencé → on l'affiche quand même en gris
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
                       child: Row(
@@ -627,8 +599,6 @@ class _RecusScreenState extends State<RecusScreen> {
                   );
                 }),
                 const Divider(height: 20),
-
-                // ---- Totaux ----
                 Builder(builder: (context) {
                   final totalPaye =
                   widget.fraisScolaires.getStudentTotalPaid(eleve);
@@ -650,8 +620,6 @@ class _RecusScreenState extends State<RecusScreen> {
                   );
                 }),
                 const Divider(height: 20),
-
-                // ---- Historique des transactions ----
                 const Text(
                   "HISTORIQUE DES PAIEMENTS",
                   style: TextStyle(
@@ -705,18 +673,8 @@ class _RecusScreenState extends State<RecusScreen> {
                     }).toList();
                   })(),
                 const SizedBox(height: 16),
-
-                // Boutons "Fermer" et "PDF" côte à côte.
                 Row(
                   children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => Navigator.pop(ctx),
-                        icon: const Icon(Icons.close),
-                        label: const Text("Fermer"),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
                     Expanded(
                       child: ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
@@ -728,6 +686,7 @@ class _RecusScreenState extends State<RecusScreen> {
                             : () async {
                           setStateDialog(() {});
                           await _genererPdfPourEleve(eleve);
+                          if (ctx.mounted) setStateDialog(() {});
                         },
                         icon: _generatingPdf
                             ? const SizedBox(
@@ -740,7 +699,41 @@ class _RecusScreenState extends State<RecusScreen> {
                         label: const Text("PDF"),
                       ),
                     ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green.shade700,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: _printingReceipt
+                            ? null
+                            : () async {
+                          setStateDialog(() {});
+                          await _imprimerBilanPourEleve(eleve);
+                          if (ctx.mounted) setStateDialog(() {});
+                        },
+                        icon: _printingReceipt
+                            ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                            : const Icon(Icons.print),
+                        label: const Text("Imprimer"),
+                      ),
+                    ),
                   ],
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close),
+                    label: const Text("Fermer"),
+                  ),
                 ),
               ],
             ),
@@ -809,16 +802,6 @@ class _RecusScreenState extends State<RecusScreen> {
   }
 }
 
-/// ==================== JOURNAL DE CAISSE ====================
-/// ⚡ NOUVEAU — écran permettant au caissier de retrouver, à tout moment,
-/// l'historique complet des paiements qu'il a enregistrés un jour précis
-/// (aujourd'hui par défaut, ou n'importe quel autre jour passé), avec la
-/// possibilité de filtrer par mois scolaire payé, par section et par
-/// classe — exactement les mêmes filtres que ceux déjà utilisés ailleurs
-/// dans l'application (page des reçus, listes d'élèves, etc.).
-///
-/// S'appuie sur `FraisScolaires.getPaiementsPourDate` et
-/// `FraisScolaires.getTotalPaiementsPourDate`.
 class _JournalCaisseScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const _JournalCaisseScreen({required this.fraisScolaires});
@@ -905,7 +888,6 @@ class _JournalCaisseScreenState extends State<_JournalCaisseScreen> {
       ),
       body: Column(
         children: [
-          // ==================== SÉLECTEUR DE DATE ====================
           Container(
             width: double.infinity,
             color: Colors.indigo.withAlpha(20),
@@ -963,8 +945,6 @@ class _JournalCaisseScreenState extends State<_JournalCaisseScreen> {
                 label: const Text("Revenir à aujourd'hui"),
               ),
             ),
-
-          // ==================== FILTRES ====================
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
             child: Column(
@@ -1035,8 +1015,6 @@ class _JournalCaisseScreenState extends State<_JournalCaisseScreen> {
               ],
             ),
           ),
-
-          // ==================== RÉSUMÉ ====================
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Container(
@@ -1069,8 +1047,6 @@ class _JournalCaisseScreenState extends State<_JournalCaisseScreen> {
               ),
             ),
           ),
-
-          // ==================== LISTE DES PAIEMENTS ====================
           Expanded(
             child: paiements.isEmpty
                 ? const Center(

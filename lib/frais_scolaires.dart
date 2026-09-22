@@ -2227,21 +2227,6 @@ class FraisScolaires {
         .toList();
   }
 
-  /// ==================== JOURNAL DE CAISSE ====================
-  /// Ces méthodes permettent au caissier de retrouver, à n'importe quel
-  /// moment, l'historique complet des paiements qu'il a enregistrés un
-  /// jour précis (aujourd'hui ou n'importe quel autre jour passé), avec
-  /// la possibilité de filtrer par mois scolaire payé, par section et
-  /// par classe — exactement comme les filtres déjà utilisés ailleurs
-  /// dans l'application.
-
-  /// Retourne la liste des paiements (transactions) effectués à une date
-  /// précise (au format 'YYYY-MM-DD', identique à celui stocké dans les
-  /// transactions via `DateTime.now().toString().split(' ')[0]`), avec
-  /// filtres optionnels par mois scolaire payé, par section et par
-  /// classe. Chaque élément de la liste retournée est une Map contenant
-  /// 'eleve' (l'Eleve concerné) et 'transaction' (la Map brute de la
-  /// transaction, avec ses champs 'id', 'date', 'mois', 'amount', etc.).
   List<Map<String, dynamic>> getPaiementsPourDate({
     required String date,
     String? mois,
@@ -2272,9 +2257,6 @@ class FraisScolaires {
     return result;
   }
 
-  /// Montant total des paiements pour une date donnée, avec les mêmes
-  /// filtres optionnels que [getPaiementsPourDate] (mois, section,
-  /// classe).
   double getTotalPaiementsPourDate({
     required String date,
     String? mois,
@@ -2601,12 +2583,6 @@ class FraisScolaires {
     final y = year ?? currentYear;
     final now = DateTime.now();
     final todayStr = now.toString().split(' ')[0];
-    // ⚡ Le filtrage par période se base sur `d.date`, qui reflète la date
-    // choisie par l'utilisateur (aujourd'hui par défaut, ou une date
-    // passée s'il en a défini une lors de l'ajout ou de la modification
-    // de la dépense). Une dépense apparaît donc dans le rapport
-    // journalier/mensuel/annuel correspondant à SA date, pas à la date
-    // à laquelle elle a été saisie dans l'application.
     final list = (depensesByYear[y] ?? []).where((d) {
       bool okPeriode;
       switch (period) {
@@ -2776,10 +2752,6 @@ class FraisScolaires {
     List<String>? sections,
     List<String>? classes,
     String rubrique = '',
-    // ⚡ NOUVEAU — date optionnelle de la sortie de caisse. Si non fournie
-    // (null), la date d'aujourd'hui est utilisée, exactement comme avant.
-    // Permet d'enregistrer aujourd'hui une dépense faite un autre jour
-    // (par exemple hier), en précisant sa date réelle.
     DateTime? date,
   }) async {
     final depense = Depense(
@@ -2805,8 +2777,6 @@ class FraisScolaires {
     String enregistrePar = 'Direction',
     List<String>? classes,
     String rubrique = '',
-    // ⚡ NOUVEAU — date optionnelle, transmise à addDepense (voir
-    // ci-dessus).
     DateTime? date,
   }) async {
     final sections = getSectionsPourOption(option);
@@ -2831,13 +2801,6 @@ class FraisScolaires {
     await saveData();
   }
 
-  /// ⚡ NOUVEAU — permet de changer la date d'une dépense déjà
-  /// enregistrée. Utile lorsque le caissier a oublié d'enregistrer une
-  /// sortie de caisse le jour même et le fait plus tard : il peut
-  /// corriger la date pour qu'elle reflète le jour réel de la dépense.
-  /// La dépense corrigée apparaît alors automatiquement dans les
-  /// rapports (journalier/mensuel/annuel) correspondant à sa NOUVELLE
-  /// date, puisque `getDepensesForPeriod` filtre déjà sur `d.date`.
   Future<void> updateDepenseDate(
       String id,
       DateTime newDate, [
@@ -3704,13 +3667,13 @@ class FraisScolaires {
   }
 
   List<pw.Widget> _buildRepartitionParSectionEtAdministration(
-      List<Eleve> students) {
+      List<Eleve> students, String period) {
     if (config.administrations.isEmpty || students.isEmpty) return [];
 
     final Map<String, double> totalBySection = {};
     for (final e in students) {
       totalBySection[e.section] =
-          (totalBySection[e.section] ?? 0) + getStudentTotalPaid(e);
+          (totalBySection[e.section] ?? 0) + _getStudentAmountForPeriod(e, period);
     }
     totalBySection.removeWhere((_, v) => v <= 0);
     if (totalBySection.isEmpty) return [];
@@ -4733,12 +4696,68 @@ class FraisScolaires {
     return await _savePdf(pdf, safeFilename, "historique_paiements");
   }
 
+  Future<Map<String, dynamic>> printStudentPaymentHistoryReceipt({
+    required Eleve eleve,
+    bool duplicata = false,
+  }) async {
+    final String printerName = await _currentPrinterName();
+    if (printerName.isEmpty) {
+      return {
+        'success': false,
+        'error': "Aucune imprimante configurée. Configurez-la dans Paramètres.",
+      };
+    }
+
+    final Uint8List? logoBytes = await _loadLogoBytesForPrinting();
+
+    final Map<String, double> paidByMonth = {};
+    final Map<String, double> requiredByMonth = {};
+    for (final mois in months) {
+      paidByMonth[mois] = (eleve.paid[mois] ?? 0).toDouble();
+      requiredByMonth[mois] = getRequiredForMonthForEleve(eleve, mois);
+    }
+
+    final double totalPaye = getStudentTotalPaid(eleve);
+    final double totalRequis = getStudentPending(eleve) + totalPaye;
+
+    final List<Map<String, dynamic>> transactions = eleve.transactions
+        .map((t) => Map<String, dynamic>.from(t))
+        .toList();
+
+    final bool ok = await EscPosPrinterService.printStudentPaymentHistoryReceipt(
+      printerName: printerName,
+      schoolName: config.schoolName,
+      currentYear: currentYear,
+      studentName: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      studentId: eleve.id.isNotEmpty ? eleve.id : "N/A",
+      classe: eleve.classe,
+      section: eleve.section,
+      months: months,
+      paidByMonth: paidByMonth,
+      requiredByMonth: requiredByMonth,
+      totalPaye: totalPaye,
+      totalRequis: totalRequis,
+      transactions: transactions,
+      logoBytes: logoBytes,
+      duplicata: duplicata,
+    );
+
+    if (!ok) {
+      return {
+        'success': false,
+        'error': "Échec de l'impression. Vérifiez l'imprimante.",
+      };
+    }
+    return {'success': true};
+  }
+
   Future<Map<String, dynamic>> generatePdf({
     required String filename,
     required String reportType,
     String? sectionFilter,
     String? classFilter,
     String? city,
+    bool includeDepenses = true,
   }) async {
     if (reportType == "student_list") {
       return await _generateStudentListPdf(
@@ -4748,6 +4767,23 @@ class FraisScolaires {
         city:          city,
       );
     }
+
+    // ==========================================================================
+    // ⚡ CORRECTION — Le montant affiché pour chaque élève et le total du
+    // rapport doivent correspondre EXACTEMENT à la période du rapport :
+    //   - "daily"   -> uniquement ce que l'élève a payé AUJOURD'HUI
+    //   - "monthly" -> uniquement ce que l'élève a payé CE MOIS-CI
+    //   - "annual"  -> le total payé depuis le début de l'année (inchangé)
+    // Avant, on utilisait toujours getStudentTotalPaid() (le cumul depuis
+    // le début de l'année), ce qui faisait apparaître, dans un rapport
+    // journalier ou mensuel, un montant qui incluait aussi les paiements
+    // des jours/mois précédents. On utilise maintenant
+    // _getStudentAmountForPeriod(), qui calcule le montant réellement
+    // rattaché à la période demandée.
+    // ==========================================================================
+    final String periodePourMontant = reportType == "daily"
+        ? "today"
+        : (reportType == "monthly" ? "month" : "year");
 
     final pdf     = pw.Document();
     List<Eleve> students;
@@ -4786,7 +4822,7 @@ class FraisScolaires {
     }
 
     final double total              = students.fold(
-        0.0, (sum, e) => sum + getStudentTotalPaid(e));
+        0.0, (sum, e) => sum + _getStudentAmountForPeriod(e, periodePourMontant));
     final adminDistribution         = calculateAdminDistribution(total);
     final double totalMoisEcole     = getCurrentMonthTotalCollected();
     final double totalAnneeEcole    = getYearTotalCollected();
@@ -4804,7 +4840,7 @@ class FraisScolaires {
     ];
 
     final rows = students.map((e) {
-      final montant = getStudentTotalPaid(e);
+      final montant = _getStudentAmountForPeriod(e, periodePourMontant);
       final row = [
         e.id.isNotEmpty ? e.id : "N/A",
         "${e.nom} ${e.postNom} ${e.prenom}",
@@ -4880,24 +4916,26 @@ class FraisScolaires {
                       "${totalAnneeEcole.toStringAsFixed(0)} FC",
                   style: const pw.TextStyle(fontSize: 11),
                 ),
-                pw.SizedBox(height: 2),
-                pw.Text(
-                  "Total des dépenses de l'année (toute l'école) : "
-                      "${formatMontant(totalDepensesAnnee)} FC",
-                  style: const pw.TextStyle(
-                      fontSize: 11, color: PdfColors.red800),
-                ),
-                pw.SizedBox(height: 2),
-                pw.Text(
-                  "Solde net de l'année après dépenses : "
-                      "${formatMontant(soldeNetAnnee)} FC "
-                      "(détail des dépenses en fin de rapport)",
-                  style: pw.TextStyle(
-                    fontSize: 11,
-                    fontWeight: pw.FontWeight.bold,
-                    color: PdfColors.indigo900,
+                if (includeDepenses) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    "Total des dépenses de l'année (toute l'école) : "
+                        "${formatMontant(totalDepensesAnnee)} FC",
+                    style: const pw.TextStyle(
+                        fontSize: 11, color: PdfColors.red800),
                   ),
-                ),
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    "Solde net de l'année après dépenses : "
+                        "${formatMontant(soldeNetAnnee)} FC "
+                        "(détail des dépenses en fin de rapport)",
+                    style: pw.TextStyle(
+                      fontSize: 11,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PdfColors.indigo900,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -4963,7 +5001,7 @@ class FraisScolaires {
           pw.SizedBox(height: 30),
           if (afficherRepartitionParSection)
             ..._buildRepartitionParSectionEtAdministration(
-                studentsAvantFiltres),
+                studentsAvantFiltres, periodePourMontant),
           pw.Text(
             "RÉPARTITION GLOBALE PAR ADMINISTRATION",
             style: pw.TextStyle(
@@ -4977,10 +5015,17 @@ class FraisScolaires {
             ),
           ),
 
-          ..._buildDepensesReportSections(
-            sectionFilter: sectionFilter,
-            classFilter: classFilter,
-          ),
+          // ==========================================================================
+          // ⚡ NOUVEAU — La partie "Dépenses" (journalières, mensuelles et
+          // annuelles) n'apparaît dans le PDF que si includeDepenses == true.
+          // Si false, on passe directement au bloc des signataires : rien
+          // concernant les dépenses n'apparaît nulle part dans le document.
+          // ==========================================================================
+          if (includeDepenses)
+            ..._buildDepensesReportSections(
+              sectionFilter: sectionFilter,
+              classFilter: classFilter,
+            ),
 
           ..._buildSignatureSection(city),
         ],

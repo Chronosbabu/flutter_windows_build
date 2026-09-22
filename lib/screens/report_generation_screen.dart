@@ -13,7 +13,7 @@ class ReportGenerationScreen extends StatefulWidget {
 
 class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   // ==========================================================================
-  // ⚡ NOUVEAU — CATÉGORIE DE RAPPORT
+  // ⚡ CATÉGORIE DE RAPPORT
   // "principal" = frais mensuel principal (comportement inchangé, via
   //               fs.generatePdf).
   // "autres"    = autres frais de paiement / frais additionnels-éphémères
@@ -37,8 +37,20 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   String? selectedAutreFraisId;
 
   // ==========================================================================
-  // ⚡ NOUVEAU — VILLE POUR LA MENTION "Fait à ..., le ..." DU BLOC DE
-  // SIGNATURES.
+  // ⚡ NOUVEAU — INCLURE (OU NON) LA PARTIE "DÉPENSES" DANS LE PDF.
+  //
+  // Ce bouton ne concerne que le rapport "Frais Principal", car c'est le
+  // seul qui appelle `_buildDepensesReportSections` dans
+  // `frais_scolaires.dart` (le rapport "Autres Frais" n'a jamais eu de
+  // section Dépenses). Quand `includeDepenses` est à false, `fs.generatePdf`
+  // saute complètement cette partie (journalières / mensuelles / annuelles)
+  // et passe directement au bloc "Signataires" — rien concernant les
+  // dépenses n'apparaît nulle part dans le document.
+  // ==========================================================================
+  bool includeDepenses = true;
+
+  // ==========================================================================
+  // VILLE POUR LA MENTION "Fait à ..., le ..." DU BLOC DE SIGNATURES.
   //
   // `frais_scolaires.dart` accepte déjà un paramètre `city` sur
   // `generatePdf` et `generateAutresFraisPdf`, et retombe sur
@@ -84,7 +96,7 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           // ====================================================================
-          // ⚡ NOUVEAU — Choix de la catégorie de rapport.
+          // Choix de la catégorie de rapport.
           // ====================================================================
           _sectionCard(
             title: "1. Catégorie de rapport",
@@ -137,8 +149,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
               ),
             )
           else
-          // ⚡ NOUVEAU — sélection du type de frais additionnel (ou tous
-          // types confondus), pour le rapport "Autres Frais de Paiement".
+          // Sélection du type de frais additionnel (ou tous types
+          // confondus), pour le rapport "Autres Frais de Paiement".
             _sectionCard(
               title: "2. Type de frais additionnel",
               subtitle: "Choisissez un frais précis (ex: Frais de l'État) "
@@ -176,6 +188,38 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
               ),
             ),
           const SizedBox(height: 16),
+
+          // ====================================================================
+          // ⚡ NOUVEAU — "2 bis." Inclure ou non les dépenses dans le PDF.
+          // Uniquement pertinent pour le rapport "Frais Principal", car le
+          // rapport "Autres Frais" ne contient de toute façon jamais de
+          // section Dépenses.
+          // ====================================================================
+          if (reportCategory == "principal") ...[
+            _sectionCard(
+              title: "2 bis. Dépenses dans le rapport",
+              subtitle: includeDepenses
+                  ? "La partie \"Dépenses\" (journalières, mensuelles et "
+                  "annuelles, avec répartition par rubrique et par "
+                  "section) sera incluse dans le PDF."
+                  : "Aucune information sur les dépenses n'apparaîtra dans "
+                  "le PDF. Seuls les élèves, les montants et les "
+                  "signataires y figureront.",
+              child: SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: includeDepenses,
+                onChanged: (val) => setState(() => includeDepenses = val),
+                title: const Text("Inclure la partie \"Dépenses\""),
+                secondary: Icon(
+                  includeDepenses
+                      ? Icons.checklist_rtl
+                      : Icons.checklist_rtl_outlined,
+                  color: includeDepenses ? Colors.indigo : Colors.grey,
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
 
           // ====================================================================
           // Filtres Section / Classe — communs aux deux catégories.
@@ -236,8 +280,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
           const SizedBox(height: 16),
 
           // ====================================================================
-          // ⚡ NOUVEAU — Ville pour la mention "Fait à ..., le ..." des
-          // signatures. Pré-remplie avec la dernière ville utilisée
+          // Ville pour la mention "Fait à ..., le ..." des signatures.
+          // Pré-remplie avec la dernière ville utilisée
           // (fs.lastReportCity), et sauvegardée automatiquement à chaque
           // génération de rapport (voir _generateReport) pour ne plus
           // avoir à la ressaisir la prochaine fois.
@@ -363,9 +407,9 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — Classes à proposer dans le filtre "Classe", limitées à la
-  // section choisie s'il y en a une. Fonctionne pour les deux catégories
-  // de rapport puisqu'elles s'appuient toutes deux sur les élèves de
+  // Classes à proposer dans le filtre "Classe", limitées à la section
+  // choisie s'il y en a une. Fonctionne pour les deux catégories de
+  // rapport puisqu'elles s'appuient toutes deux sur les élèves de
   // `currentData`.
   // ==========================================================================
   List<String> _classesForCurrentSectionFilter() {
@@ -541,16 +585,17 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — Aiguille vers la bonne méthode de génération PDF selon la
-  // catégorie choisie :
+  // Aiguille vers la bonne méthode de génération PDF selon la catégorie
+  // choisie :
   //   - "principal" -> fs.generatePdf (le paramètre `city` y ajoute déjà,
   //     pour le rapport journalier, la colonne "Mois Concerné(s)" par
-  //     élève, et pour le rapport annuel, le récapitulatif mensuel — ces
-  //     deux comportements sont déjà gérés dans frais_scolaires.dart et
-  //     n'ont rien à faire ici)
+  //     élève, et pour le rapport annuel, le récapitulatif mensuel ; le
+  //     paramètre `includeDepenses` contrôle désormais si toute la partie
+  //     "Dépenses" apparaît ou non dans le PDF)
   //   - "autres"    -> fs.generateAutresFraisPdf (filtre par type de
   //     frais + section + classe, avec le même bloc de signatures que le
-  //     rapport principal)
+  //     rapport principal — ce rapport n'a de toute façon jamais eu de
+  //     section Dépenses, donc `includeDepenses` ne le concerne pas)
   //
   // Dans les deux cas, la ville saisie est :
   //   1. Sauvegardée via fs.setLastReportCity, pour être pré-remplie
@@ -578,6 +623,7 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
         sectionFilter: selectedSection,
         classFilter: selectedClass,
         city: city,
+        includeDepenses: includeDepenses,
       );
     } else {
       final filename =
