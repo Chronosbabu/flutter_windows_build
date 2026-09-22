@@ -225,7 +225,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
       ];
     }
 
-    // Mode normal : 3 boutons côte à côte
+    // Mode normal : 4 boutons côte à côte
     return [
       IconButton(
         icon: const Icon(Icons.move_up),
@@ -236,6 +236,19 @@ class _StudentListScreenState extends State<StudentListScreen> {
         icon: const Icon(Icons.delete_forever, color: Colors.red),
         tooltip: "Supprimer un élève",
         onPressed: _startDeletionMode,
+      ),
+      // ==================================================================
+      // ⚡ NOUVEAU — BOUTON "ÉLÈVES SUPPRIMÉS"
+      // ==================================================================
+      // Ouvre directement la page listant tous les élèves supprimés /
+      // exclus (archivés). Leur argent déjà payé reste comptabilisé dans
+      // la caisse de l'école et leur historique complet reste consultable
+      // ici, tant qu'on ne le supprime pas volontairement depuis cette
+      // page (protégé par mot de passe admin).
+      IconButton(
+        icon: const Icon(Icons.history),
+        tooltip: "Élèves Supprimés",
+        onPressed: _openElevesSupprimesScreen,
       ),
       IconButton(
         icon: const Icon(Icons.picture_as_pdf),
@@ -294,6 +307,23 @@ class _StudentListScreenState extends State<StudentListScreen> {
         },
       ),
     );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — OUVERTURE DE LA PAGE "ÉLÈVES SUPPRIMÉS"
+  // ==========================================================================
+  void _openElevesSupprimesScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            ElevesSupprimesScreen(fraisScolaires: widget.fraisScolaires),
+      ),
+    ).then((_) {
+      // Au retour de cette page (après une éventuelle suppression
+      // définitive dans l'archive), on rafraîchit l'écran au cas où.
+      if (mounted) setState(() {});
+    });
   }
 
   // ====================================================================
@@ -377,9 +407,16 @@ class _StudentListScreenState extends State<StudentListScreen> {
   //   1. Vérification du mot de passe administrateur (backupPassword de
   //      AppState, le même que pour les autres actions sensibles).
   //   2. Boîte de dialogue d'avertissement avec les informations de
-  //      l'élève et rappel que la suppression est IRRÉVERSIBLE.
+  //      l'élève et rappel que l'élève ne sera plus visible dans ce
+  //      registre.
   //   3. Si l'utilisateur confirme, l'élève est retiré de
-  //      currentData.eleves et les données sont sauvegardées localement.
+  //      currentData.eleves ET ARCHIVÉ dans "Élèves Supprimés"
+  //      (⚡ NOUVEAU — au lieu d'une suppression définitive). L'argent
+  //      déjà payé par cet élève reste comptabilisé dans la caisse de
+  //      l'école, et tout son historique de paiements reste consultable
+  //      dans la page "Élèves Supprimés", tant qu'on ne le supprime pas
+  //      volontairement et définitivement depuis cette page (protégé par
+  //      mot de passe admin).
   //   4. Toutes les autres pages (PaiementEleveScreen, etc.) lisent
   //      currentData.eleves en direct : elles se mettent à jour
   //      automatiquement à leur prochain rebuild.
@@ -450,7 +487,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
           children: const [
             Icon(Icons.warning_amber_rounded, color: Colors.red, size: 26),
             SizedBox(width: 8),
-            Text("Suppression irréversible",
+            Text("Suppression de l'élève",
                 style: TextStyle(color: Colors.red)),
           ],
         ),
@@ -459,7 +496,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              "Vous êtes sur le point de supprimer définitivement l'élève "
+              "Vous êtes sur le point de retirer du registre actif l'élève "
                   "suivant de l'année scolaire en cours :",
               style: TextStyle(fontSize: 13.5),
             ),
@@ -489,9 +526,13 @@ class _StudentListScreenState extends State<StudentListScreen> {
             ),
             const SizedBox(height: 14),
             const Text(
-              "⚠️  Cette action supprime l'élève ET tout son historique de "
-                  "paiements pour cette année. Elle ne peut pas être annulée.\n\n"
-                  "Après suppression, pensez à sauvegarder sur le serveur "
+              "ℹ️  L'élève n'apparaîtra plus dans ce registre. Cependant, "
+                  "l'argent déjà payé reste comptabilisé dans la caisse de "
+                  "l'école, et son historique complet (paiements, "
+                  "informations) reste consultable dans \"Élèves "
+                  "Supprimés\" tant qu'on ne le supprime pas définitivement "
+                  "depuis cette page.\n\n"
+                  "Après cette action, pensez à sauvegarder sur le serveur "
                   "(Paramètres → Sauvegarder sur le Serveur) pour que la "
                   "modification soit prise en compte sur tous les appareils.",
               style: TextStyle(fontSize: 12.5, color: Colors.black87),
@@ -505,7 +546,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("Supprimer définitivement",
+            child: const Text("Supprimer",
                 style: TextStyle(color: Colors.white)),
           ),
         ],
@@ -514,18 +555,19 @@ class _StudentListScreenState extends State<StudentListScreen> {
 
     if (confirmed != true) return;
 
-    // --- Étape 3 : Suppression locale et sauvegarde ---
-    setState(() {
-      widget.fraisScolaires.currentData.eleves
-          .removeWhere((e) => e.id == eleve.id);
-    });
-    await widget.fraisScolaires.saveData();
+    // --- Étape 3 : Archivage (⚡ NOUVEAU) au lieu d'une suppression définitive ---
+    await widget.fraisScolaires.archiverEtSupprimerEleve(
+      eleve,
+      motif: 'Suppression manuelle depuis le registre des élèves',
+    );
+    if (mounted) setState(() {});
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            "✅ ${eleve.nom} ${eleve.postNom} ${eleve.prenom} a été supprimé(e). "
+            "✅ ${eleve.nom} ${eleve.postNom} ${eleve.prenom} a été retiré(e) "
+                "du registre actif (visible dans \"Élèves Supprimés\"). "
                 "Pensez à sauvegarder sur le serveur dans Paramètres.",
           ),
           duration: const Duration(seconds: 6),
@@ -1372,6 +1414,419 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                     ),
                   ),
                 ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ==============================================================================
+// ⚡ NOUVEAU — PAGE "ÉLÈVES SUPPRIMÉS" (HISTORIQUE / ARCHIVE)
+// ==============================================================================
+// Accessible depuis le bouton 🕘 dans l'AppBar du Registre des Élèves.
+// Liste tous les élèves qui ont été supprimés/exclus du registre actif
+// (widget.fraisScolaires.getElevesSupprimes()). L'argent déjà payé par ces
+// élèves reste comptabilisé dans la caisse de l'école (géré directement dans
+// FraisScolaires, aucune logique financière n'est dupliquée ici).
+//
+// Depuis cette page, on peut :
+//   - Consulter la date et le motif de suppression de chaque élève.
+//   - Supprimer DÉFINITIVEMENT un élève de l'archive (protégé par mot de
+//     passe admin + confirmation) : son historique nominatif disparaît,
+//     mais l'argent reste acquis à la caisse de l'école puisqu'il a déjà
+//     été comptabilisé au moment du paiement.
+//   - Vider complètement l'archive (protégé par mot de passe admin +
+//     confirmation).
+class ElevesSupprimesScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const ElevesSupprimesScreen({super.key, required this.fraisScolaires});
+
+  @override
+  State<ElevesSupprimesScreen> createState() => _ElevesSupprimesScreenState();
+}
+
+class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
+  String searchQuery = "";
+
+  String _formatDateSuppression(String? iso) {
+    if (iso == null || iso.trim().isEmpty) return "Date inconnue";
+    final date = DateTime.tryParse(iso);
+    if (date == null) return "Date inconnue";
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(date.day)}/${two(date.month)}/${date.year} à '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+
+  Future<bool> _verifyAdminPassword() async {
+    final appState = Provider.of<AppState>(context, listen: false);
+
+    if (appState.backupPassword == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              "Aucun mot de passe administrateur défini. "
+                  "Définissez-en un dans les Paramètres avant de continuer."),
+        ),
+      );
+      return false;
+    }
+
+    final passController = TextEditingController();
+    final bool? passwordOk = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Vérification Administrateur"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              "Entrez le mot de passe administrateur pour continuer.",
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: passController,
+              obscureText: true,
+              decoration:
+              const InputDecoration(labelText: "Mot de passe"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            onPressed: () {
+              if (passController.text.trim() == appState.backupPassword) {
+                Navigator.pop(ctx, true);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Mot de passe incorrect.")),
+                );
+              }
+            },
+            child: const Text("Confirmer"),
+          ),
+        ],
+      ),
+    );
+
+    return passwordOk == true;
+  }
+
+  Future<void> _requestDeleteForever(Eleve eleve) async {
+    final bool passwordOk = await _verifyAdminPassword();
+    if (!passwordOk) return;
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 26),
+            SizedBox(width: 8),
+            Text("Suppression définitive",
+                style: TextStyle(color: Colors.red)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Vous êtes sur le point de supprimer définitivement l'historique "
+                  "de l'élève suivant :",
+              style: TextStyle(fontSize: 13.5),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Colors.red.shade200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "${eleve.nom} ${eleve.postNom} ${eleve.prenom}",
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 14),
+                  ),
+                  const SizedBox(height: 4),
+                  Text("ID : ${eleve.id}"),
+                  Text(
+                      "Classe : ${eleve.classe}  |  Section : ${eleve.section}"),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              "⚠️  Cette action est IRRÉVERSIBLE : l'historique nominatif de "
+                  "cet élève (informations, transactions) disparaîtra "
+                  "complètement du logiciel. L'argent déjà payé reste acquis "
+                  "à la caisse de l'école, puisqu'il a déjà été comptabilisé "
+                  "au moment du paiement.\n\n"
+                  "Après suppression, pensez à sauvegarder sur le serveur "
+                  "(Paramètres → Sauvegarder sur le Serveur).",
+              style: TextStyle(fontSize: 12.5, color: Colors.black87),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Supprimer définitivement",
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    await widget.fraisScolaires.supprimerDefinitivementEleveArchive(eleve.id);
+    if (mounted) setState(() {});
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "✅ Historique de ${eleve.nom} ${eleve.postNom} ${eleve.prenom} "
+                "supprimé définitivement. Pensez à sauvegarder sur le serveur.",
+          ),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
+  }
+
+  Future<void> _requestClearAll() async {
+    if (widget.fraisScolaires.getElevesSupprimes().isEmpty) return;
+
+    final bool passwordOk = await _verifyAdminPassword();
+    if (!passwordOk) return;
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 26),
+            SizedBox(width: 8),
+            Text("Vider tout l'historique",
+                style: TextStyle(color: Colors.red)),
+          ],
+        ),
+        content: const Text(
+          "Vous êtes sur le point de supprimer définitivement TOUT "
+              "l'historique des élèves supprimés. Cette action est "
+              "IRRÉVERSIBLE. L'argent déjà payé par ces élèves reste acquis "
+              "à la caisse de l'école, puisqu'il a déjà été comptabilisé au "
+              "moment du paiement.\n\n"
+              "Voulez-vous vraiment continuer ?",
+          style: TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Tout supprimer",
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    await widget.fraisScolaires.viderHistoriqueElevesSupprimes();
+    if (mounted) setState(() {});
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              "✅ Historique des élèves supprimés vidé. Pensez à sauvegarder "
+                  "sur le serveur."),
+          duration: Duration(seconds: 6),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allSupprimes = widget.fraisScolaires.getElevesSupprimes();
+    final filtered = allSupprimes.where((e) {
+      return e.nom.toLowerCase().contains(searchQuery.toLowerCase()) ||
+          e.postNom.toLowerCase().contains(searchQuery.toLowerCase()) ||
+          e.prenom.toLowerCase().contains(searchQuery.toLowerCase()) ||
+          e.id.toLowerCase().contains(searchQuery.toLowerCase());
+    }).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Élèves Supprimés"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_sweep),
+            tooltip: "Vider tout l'historique",
+            onPressed: allSupprimes.isEmpty ? null : _requestClearAll,
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.indigo.withOpacity(0.07),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.indigo.withOpacity(0.3)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.info_outline, color: Colors.indigo, size: 22),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      "Ces élèves ne figurent plus dans le registre actif, "
+                          "mais l'argent qu'ils ont déjà payé reste comptabilisé "
+                          "dans la caisse de l'école. La suppression définitive "
+                          "d'un historique nécessite le mot de passe "
+                          "administrateur.",
+                      style: TextStyle(fontSize: 12.5, color: Colors.indigo),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            TextField(
+              decoration: const InputDecoration(
+                labelText: "Rechercher par nom, post-nom, ID...",
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (value) {
+                setState(() => searchQuery = value);
+              },
+            ),
+            const SizedBox(height: 16),
+            Text(
+              "Total : ${filtered.length} élève(s) supprimé(s)",
+              style:
+              const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: filtered.isEmpty
+                  ? const Center(child: Text("Aucun élève supprimé trouvé"))
+                  : ListView.builder(
+                itemCount: filtered.length,
+                itemBuilder: (context, index) {
+                  final e = filtered[index];
+                  final double totalPaye =
+                  widget.fraisScolaires.getStudentTotalPaid(e);
+                  final String? dateSuppr = widget.fraisScolaires
+                      .getDateSuppressionEleve(e.id);
+                  final String? motif = widget.fraisScolaires
+                      .getMotifSuppressionEleve(e.id);
+
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          CircleAvatar(
+                            backgroundColor: Colors.grey.shade300,
+                            backgroundImage: (e.photoBase64 != null &&
+                                e.photoBase64!.isNotEmpty)
+                                ? MemoryImage(base64Decode(e.photoBase64!))
+                                : null,
+                            child: (e.photoBase64 == null ||
+                                e.photoBase64!.isEmpty)
+                                ? Text(
+                              e.id.isNotEmpty
+                                  ? e.id.substring(0, 2)
+                                  : "?",
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold),
+                            )
+                                : null,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "${e.nom} ${e.postNom} ${e.prenom}",
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14.5),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  "${e.section} - ${e.classe}  |  ID : ${e.id}",
+                                  style: const TextStyle(
+                                      fontSize: 12.5, color: Colors.black54),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  "Total déjà payé : ${formatMontant(totalPaye)} FC",
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    color: Colors.green,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  "Supprimé le : ${_formatDateSuppression(dateSuppr)}",
+                                  style: const TextStyle(
+                                      fontSize: 11.5, color: Colors.grey),
+                                ),
+                                if (motif != null && motif.trim().isNotEmpty)
+                                  Text(
+                                    "Motif : $motif",
+                                    style: const TextStyle(
+                                        fontSize: 11.5, color: Colors.grey),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_forever,
+                                color: Colors.red, size: 26),
+                            tooltip: "Supprimer définitivement l'historique",
+                            onPressed: () => _requestDeleteForever(e),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
           ],

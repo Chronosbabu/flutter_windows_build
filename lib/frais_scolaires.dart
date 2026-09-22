@@ -453,6 +453,24 @@ class FraisScolaires {
   Map<String, List<String>> localAttendance = {};
   List<Map<String, dynamic>> localCommunicationsLog = [];
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — HISTORIQUE DES ÉLÈVES SUPPRIMÉS / EXCLUS
+  // ==========================================================================
+  // Quand un élève est supprimé ou exclu définitivement du registre actif :
+  //   - il n'apparaît plus dans currentData.eleves (donc plus dans les listes
+  //     et filtres du registre normal) ;
+  //   - MAIS tout l'argent qu'il avait déjà payé reste comptabilisé dans les
+  //     totaux de l'école (caisse, totaux par section, par classe, par mois,
+  //     par année), car les fonctions de calcul monétaire ci-dessous
+  //     additionnent aussi elevesSupprimesData.eleves ;
+  //   - son historique complet (transactions, informations) est conservé
+  //     dans elevesSupprimesData et reste consultable dans la page
+  //     "Élèves Supprimés", tant qu'on ne le supprime pas volontairement et
+  //     définitivement depuis cette page (protégé par mot de passe admin).
+  SchoolYearData elevesSupprimesData = SchoolYearData(eleves: []);
+  Map<String, String> dateSuppressionEleves = {};
+  Map<String, String> motifSuppressionEleves = {};
+
   Map<String, List<String>> optionsSections = {};
 
   int _localIdCounter = 0;
@@ -1391,6 +1409,9 @@ class FraisScolaires {
       'optionsSections': optionsSections,
       'printedReceiptKeys': printedReceiptKeys,
       'receiptQueue': receiptQueue,
+      'elevesSupprimesData': elevesSupprimesData.toJson(),
+      'dateSuppressionEleves': dateSuppressionEleves,
+      'motifSuppressionEleves': motifSuppressionEleves,
       'backup_password': null,
     };
   }
@@ -2136,12 +2157,24 @@ class FraisScolaires {
     for (var e in currentData.eleves) {
       totals[e.section] = (totals[e.section] ?? 0) + getStudentTotalPaid(e);
     }
+    // ⚡ NOUVEAU — l'argent déjà payé par les élèves supprimés/exclus reste
+    // comptabilisé dans les totaux par section (il reste dans la caisse de
+    // l'école même si l'élève n'apparaît plus dans le registre actif).
+    for (var e in elevesSupprimesData.eleves) {
+      totals[e.section] = (totals[e.section] ?? 0) + getStudentTotalPaid(e);
+    }
     return totals;
   }
 
   Map<String, double> getTotalByClass() {
     final totals = <String, double>{};
     for (var e in currentData.eleves) {
+      final key = "${e.section} - ${e.classe}";
+      totals[key] = (totals[key] ?? 0) + getStudentTotalPaid(e);
+    }
+    // ⚡ NOUVEAU — idem pour le total par classe : l'argent des élèves
+    // supprimés/exclus reste compté dans le total de leur ancienne classe.
+    for (var e in elevesSupprimesData.eleves) {
       final key = "${e.section} - ${e.classe}";
       totals[key] = (totals[key] ?? 0) + getStudentTotalPaid(e);
     }
@@ -2154,6 +2187,10 @@ class FraisScolaires {
               (sum, m) =>
           sum +
               currentData.eleves.fold(
+                  0.0, (s, e) => s + (e.paid[m] ?? 0)) +
+              // ⚡ NOUVEAU — l'argent déjà payé par les élèves
+              // supprimés/exclus reste comptabilisé dans le total annuel.
+              elevesSupprimesData.eleves.fold(
                   0.0, (s, e) => s + (e.paid[m] ?? 0)));
 
   double getCurrentMonthTotalCollected() {
@@ -2161,13 +2198,19 @@ class FraisScolaires {
     if (idx < 0 || idx >= months.length) return 0.0;
     final moisCourant = months[idx];
     return currentData.eleves
-        .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0));
+        .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0)) +
+        // ⚡ NOUVEAU — idem pour le total du mois en cours.
+        elevesSupprimesData.eleves
+            .fold(0.0, (sum, e) => sum + (e.paid[moisCourant] ?? 0));
   }
 
   Map<String, double> getMoneyCollectedTodayBySection() {
     final today = DateTime.now().toString().split(' ')[0];
     final Map<String, double> result = {};
-    for (final e in currentData.eleves) {
+    // ⚡ NOUVEAU — on inclut aussi les élèves supprimés/exclus : si un
+    // paiement a eu lieu aujourd'hui avant la suppression de l'élève,
+    // ce montant reste compté dans la caisse du jour.
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
       double sumToday = 0;
       for (final t in e.transactions) {
         if (t['date'] == today) {
@@ -2186,7 +2229,9 @@ class FraisScolaires {
     if (idx < 0 || idx >= months.length) return {};
     final moisCourant = months[idx];
     final Map<String, double> result = {};
-    for (final e in currentData.eleves) {
+    // ⚡ NOUVEAU — idem pour le mois en cours : l'argent déjà payé par les
+    // élèves supprimés/exclus reste comptabilisé dans la caisse du mois.
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
       final montant = e.paid[moisCourant] ?? 0;
       if (montant != 0) {
         result[e.section] = (result[e.section] ?? 0) + montant;
@@ -5622,6 +5667,20 @@ class FraisScolaires {
               .map((e) => Map<String, dynamic>.from(e as Map))
               .toList();
         }
+        if (data['elevesSupprimesData'] != null) {
+          elevesSupprimesData =
+              SchoolYearData.fromJson(data['elevesSupprimesData']);
+        }
+        if (data['dateSuppressionEleves'] != null) {
+          dateSuppressionEleves =
+              (data['dateSuppressionEleves'] as Map<String, dynamic>)
+                  .map((key, value) => MapEntry(key, value.toString()));
+        }
+        if (data['motifSuppressionEleves'] != null) {
+          motifSuppressionEleves =
+              (data['motifSuppressionEleves'] as Map<String, dynamic>)
+                  .map((key, value) => MapEntry(key, value.toString()));
+        }
 
         await _assignMissingIds();
       } catch (_) {
@@ -5705,6 +5764,9 @@ class FraisScolaires {
       'localCommunicationsLog': localCommunicationsLog,
       'printedReceiptKeys': printedReceiptKeys,
       'receiptQueue': receiptQueue,
+      'elevesSupprimesData': elevesSupprimesData.toJson(),
+      'dateSuppressionEleves': dateSuppressionEleves,
+      'motifSuppressionEleves': motifSuppressionEleves,
     };
     await file.writeAsString(json.encode(data));
   }
@@ -5742,6 +5804,9 @@ class FraisScolaires {
     localCommunicationsLog = [];
     printedReceiptKeys = [];
     receiptQueue = [];
+    elevesSupprimesData = SchoolYearData(eleves: []);
+    dateSuppressionEleves = {};
+    motifSuppressionEleves = {};
   }
 
   Future<void> changeYear(String newYear) async {
@@ -5947,6 +6012,9 @@ class FraisScolaires {
         'optionsSections': optionsSections,
         'printedReceiptKeys': printedReceiptKeys,
         'receiptQueue': receiptQueue,
+        'elevesSupprimesData': elevesSupprimesData.toJson(),
+        'dateSuppressionEleves': dateSuppressionEleves,
+        'motifSuppressionEleves': motifSuppressionEleves,
         'backup_password': password,
       };
 
@@ -6297,6 +6365,29 @@ class FraisScolaires {
         }
       }
     }
+    if (serverData['elevesSupprimesData'] != null) {
+      final serverElevesSupprimes =
+      SchoolYearData.fromJson(serverData['elevesSupprimesData']);
+      final existingSupprimesIds =
+      elevesSupprimesData.eleves.map((e) => e.id).toSet();
+      for (var e in serverElevesSupprimes.eleves) {
+        if (!existingSupprimesIds.contains(e.id)) {
+          elevesSupprimesData.eleves.add(e);
+        }
+      }
+    }
+    if (serverData['dateSuppressionEleves'] != null) {
+      (serverData['dateSuppressionEleves'] as Map<String, dynamic>)
+          .forEach((key, value) {
+        dateSuppressionEleves.putIfAbsent(key, () => value.toString());
+      });
+    }
+    if (serverData['motifSuppressionEleves'] != null) {
+      (serverData['motifSuppressionEleves'] as Map<String, dynamic>)
+          .forEach((key, value) {
+        motifSuppressionEleves.putIfAbsent(key, () => value.toString());
+      });
+    }
 
     currentYear = serverData['currentYear'] ?? currentYear;
     if (history.containsKey(currentYear)) {
@@ -6458,5 +6549,66 @@ class FraisScolaires {
     } catch (e) {
       return {'success': false, 'error': 'Erreur inattendue : $e'};
     }
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MÉTHODES DE GESTION DE L'ARCHIVE DES ÉLÈVES SUPPRIMÉS
+  // ==========================================================================
+  // getElevesSupprimes() : retourne la liste des élèves archivés, triée du
+  //   plus récemment supprimé au plus ancien, pour affichage dans la page
+  //   "Élèves Supprimés".
+  // getDateSuppressionEleve() / getMotifSuppressionEleve() : métadonnées
+  //   associées à un élève archivé (utilisées pour l'affichage).
+  // archiverEtSupprimerEleve() : retire l'élève de currentData.eleves (donc
+  //   du registre actif) et l'ajoute à l'archive elevesSupprimesData. Comme
+  //   l'objet Eleve conserve intact son historique de paiements (paid,
+  //   transactions), et comme les fonctions de calcul monétaire ci-dessus
+  //   additionnent aussi elevesSupprimesData.eleves, l'argent déjà payé par
+  //   cet élève continue d'être comptabilisé dans la caisse de l'école.
+  // supprimerDefinitivementEleveArchive() : supprime définitivement et
+  //   irréversiblement un élève de l'archive (l'historique nominatif
+  //   disparaît, mais l'argent reste acquis puisqu'il a déjà été
+  //   comptabilisé au moment du paiement).
+  // viderHistoriqueElevesSupprimes() : vide complètement l'archive.
+  List<Eleve> getElevesSupprimes() {
+    final list = List<Eleve>.from(elevesSupprimesData.eleves);
+    list.sort((a, b) {
+      final dateA = dateSuppressionEleves[a.id] ?? '';
+      final dateB = dateSuppressionEleves[b.id] ?? '';
+      return dateB.compareTo(dateA);
+    });
+    return list;
+  }
+
+  String? getDateSuppressionEleve(String eleveId) =>
+      dateSuppressionEleves[eleveId];
+
+  String? getMotifSuppressionEleve(String eleveId) =>
+      motifSuppressionEleves[eleveId];
+
+  Future<void> archiverEtSupprimerEleve(
+      Eleve eleve, {
+        String motif = 'Suppression manuelle',
+      }) async {
+    currentData.eleves.removeWhere((e) => e.id == eleve.id);
+    elevesSupprimesData.eleves.removeWhere((e) => e.id == eleve.id);
+    elevesSupprimesData.eleves.add(eleve);
+    dateSuppressionEleves[eleve.id] = DateTime.now().toIso8601String();
+    motifSuppressionEleves[eleve.id] = motif;
+    await saveData();
+  }
+
+  Future<void> supprimerDefinitivementEleveArchive(String eleveId) async {
+    elevesSupprimesData.eleves.removeWhere((e) => e.id == eleveId);
+    dateSuppressionEleves.remove(eleveId);
+    motifSuppressionEleves.remove(eleveId);
+    await saveData();
+  }
+
+  Future<void> viderHistoriqueElevesSupprimes() async {
+    elevesSupprimesData = SchoolYearData(eleves: []);
+    dateSuppressionEleves = {};
+    motifSuppressionEleves = {};
+    await saveData();
   }
 }
