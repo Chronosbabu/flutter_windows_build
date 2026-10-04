@@ -4884,7 +4884,50 @@ class FraisScolaires {
               (a) => '${a.nom} (${a.pourcentage.toStringAsFixed(0)}%)'),
     ];
 
-    final rows = students.map((e) {
+    // ==========================================================================
+    // ⚡ NOUVEAU — ORDRE D'AFFICHAGE DE LA LISTE DES ÉLÈVES (rapport
+    // journalier, mensuel et annuel) : les élèves sont rangés par SECTION
+    // (dans l'ordre des sections de l'école), puis par CLASSE (dans l'ordre
+    // des classes de la section), puis par nom alphabétique.
+    //
+    // IMPORTANT : on trie une COPIE de la liste (studentsTriesPourListe)
+    // qui sert UNIQUEMENT à construire les lignes du tableau ci-dessous.
+    // La liste "students" n'est jamais modifiée (en rapport annuel elle
+    // pointe vers currentData.eleves : on ne la trie donc surtout pas),
+    // et aucun total, aucune répartition, aucun comptage n'est touché :
+    // seul l'ORDRE des lignes dans la liste imprimée change.
+    // ==========================================================================
+    final List<Eleve> studentsTriesPourListe = List<Eleve>.from(students);
+    int indexSectionPourTri(String section) {
+      final i = config.sections.indexOf(section);
+      return i < 0 ? (1 << 20) : i;
+    }
+
+    int indexClassePourTri(Eleve e) {
+      final liste = config.classesBySection[e.section];
+      if (liste == null) return 1 << 20;
+      final i = liste.indexOf(classeNumeroFromFullClasse(e.classe));
+      return i < 0 ? (1 << 20) : i;
+    }
+
+    studentsTriesPourListe.sort((a, b) {
+      int c = indexSectionPourTri(a.section)
+          .compareTo(indexSectionPourTri(b.section));
+      if (c != 0) return c;
+      c = a.section.toLowerCase().compareTo(b.section.toLowerCase());
+      if (c != 0) return c;
+      c = indexClassePourTri(a).compareTo(indexClassePourTri(b));
+      if (c != 0) return c;
+      c = a.classe.toLowerCase().compareTo(b.classe.toLowerCase());
+      if (c != 0) return c;
+      c = a.nom.toLowerCase().compareTo(b.nom.toLowerCase());
+      if (c != 0) return c;
+      c = a.postNom.toLowerCase().compareTo(b.postNom.toLowerCase());
+      if (c != 0) return c;
+      return a.prenom.toLowerCase().compareTo(b.prenom.toLowerCase());
+    });
+
+    final rows = studentsTriesPourListe.map((e) {
       final montant = _getStudentAmountForPeriod(e, periodePourMontant);
       final row = [
         e.id.isNotEmpty ? e.id : "N/A",
@@ -6126,6 +6169,78 @@ class FraisScolaires {
     }
   }
 
+  // ==========================================================================
+  // ⚡ CORRECTION — FUSION DES TRANSACTIONS SANS DOUBLONS (idempotente)
+  // ==========================================================================
+  // CAUSE DU BUG « le montant se multiplie à chaque clic sur Récupérer » :
+  // l'ancienne version donnait aux transactions SANS 'id' une clé contenant
+  // un compteur (legacy:date|mois|montant|compteur++). Chaque transaction
+  // avait donc une clé unique et n'était JAMAIS reconnue comme doublon :
+  // elle était ré-ajoutée à chaque récupération, puis 'paid' était
+  // reconstruit à partir de la liste gonflée.
+  //
+  // NOUVELLE RÈGLE (cliquer 1 fois ou 20 fois = exactement le même résultat) :
+  //   1. Les transactions AVEC id sont dédoublonnées par id.
+  //   2. Les transactions SANS id sont dédoublonnées par signature
+  //      (date|mois|montant) — une seule par signature.
+  //   3. Si le serveur a déjà donné un id stable "LEG_..." à une ancienne
+  //      transaction, la version locale sans id de la même signature est
+  //      considérée comme la même transaction (donc non ajoutée en double).
+  //   4. Si aucune transaction n'existe de part et d'autre, on conserve les
+  //      montants 'paid' existants au lieu de les effacer.
+  // ==========================================================================
+  String _signatureTransaction(Map<String, dynamic> t) {
+    final double montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
+    return '${t['date'] ?? ''}|${t['mois'] ?? ''}|${montant.toStringAsFixed(2)}';
+  }
+
+  List<Map<String, dynamic>> _fusionnerTransactionsSansDoublons(
+      List<Map<String, dynamic>> locales,
+      List<Map<String, dynamic>> serveur,
+      ) {
+    final Map<String, Map<String, dynamic>> parId = {};
+    final Set<String> signaturesAvecIdLegacy = {};
+    final List<Map<String, dynamic>> sansId = [];
+
+    void classer(Map<String, dynamic> t) {
+      final String tid = t['id']?.toString().trim() ?? '';
+      if (tid.isNotEmpty) {
+        // Pour une même id, la version du serveur (ajoutée en second) n'écrase
+        // pas la version locale : on garde la première rencontrée.
+        if (!parId.containsKey(tid)) {
+          parId[tid] = t;
+          if (tid.startsWith('LEG_')) {
+            signaturesAvecIdLegacy.add(_signatureTransaction(t));
+          }
+        }
+      } else {
+        sansId.add(t);
+      }
+    }
+
+    for (final t in serveur) {
+      classer(Map<String, dynamic>.from(t));
+    }
+    for (final t in locales) {
+      classer(Map<String, dynamic>.from(t));
+    }
+
+    final List<Map<String, dynamic>> resultat = parId.values.toList();
+    final Set<String> signaturesSansIdVues = {};
+    for (final t in sansId) {
+      final String sig = _signatureTransaction(t);
+      if (signaturesAvecIdLegacy.contains(sig)) continue;
+      if (signaturesSansIdVues.contains(sig)) continue;
+      signaturesSansIdVues.add(sig);
+      resultat.add(t);
+    }
+
+    resultat.sort((a, b) => (a['date'] ?? '')
+        .toString()
+        .compareTo((b['date'] ?? '').toString()));
+    return resultat;
+  }
+
   Future<void> mergeRestoredData(Map<String, dynamic> serverData) async {
     config = SchoolConfig.fromJson(serverData['config'] ?? {});
 
@@ -6178,47 +6293,43 @@ class FraisScolaires {
               }
               localEleve.moisDebloque ??= serverEleve.moisDebloque;
 
-              final Map<String, Map<String, dynamic>> transactionsFusionnees =
-              {};
-              int compteurSansId = 0;
+              // ⚡ CORRECTION — fusion idempotente (voir explication plus haut)
+              final List<Map<String, dynamic>> mergedTransactions =
+              _fusionnerTransactionsSansDoublons(
+                List<Map<String, dynamic>>.from(localEleve.transactions),
+                List<Map<String, dynamic>>.from(serverEleve.transactions),
+              );
 
-              void ajouterTransaction(Map<String, dynamic> t) {
-                final tid = t['id']?.toString() ?? '';
-                final String cle = tid.isNotEmpty
-                    ? 'id:$tid'
-                    : 'legacy:${t['date']}|${t['mois']}|${t['amount']}|'
-                    '${compteurSansId++}';
-                transactionsFusionnees.putIfAbsent(cle, () => t);
+              if (mergedTransactions.isEmpty) {
+                // Aucune transaction nulle part : on ne touche pas aux
+                // montants payés existants (on garde le plus élevé par mois
+                // entre local et serveur au lieu de tout effacer).
+                final Map<String, double> paidConserve =
+                Map<String, double>.from(localEleve.paid);
+                serverEleve.paid.forEach((mois, montant) {
+                  final double actuel = paidConserve[mois] ?? 0.0;
+                  if (montant > actuel) paidConserve[mois] = montant;
+                });
+                localEleve.paid
+                  ..clear()
+                  ..addAll(paidConserve);
+              } else {
+                localEleve.transactions
+                  ..clear()
+                  ..addAll(mergedTransactions);
+
+                final Map<String, double> paidReconstruit = {};
+                for (var t in mergedTransactions) {
+                  final mois = t['mois']?.toString() ?? '';
+                  if (mois.isEmpty) continue;
+                  final montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
+                  paidReconstruit[mois] =
+                      (paidReconstruit[mois] ?? 0) + montant;
+                }
+                localEleve.paid
+                  ..clear()
+                  ..addAll(paidReconstruit);
               }
-
-              for (var t in localEleve.transactions) {
-                ajouterTransaction(Map<String, dynamic>.from(t));
-              }
-              for (var t in serverEleve.transactions) {
-                ajouterTransaction(Map<String, dynamic>.from(t));
-              }
-
-              final mergedTransactions = transactionsFusionnees.values
-                  .toList()
-                ..sort((a, b) => (a['date'] ?? '')
-                    .toString()
-                    .compareTo((b['date'] ?? '').toString()));
-
-              localEleve.transactions
-                ..clear()
-                ..addAll(mergedTransactions);
-
-              final Map<String, double> paidReconstruit = {};
-              for (var t in mergedTransactions) {
-                final mois = t['mois']?.toString() ?? '';
-                if (mois.isEmpty) continue;
-                final montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
-                paidReconstruit[mois] =
-                    (paidReconstruit[mois] ?? 0) + montant;
-              }
-              localEleve.paid
-                ..clear()
-                ..addAll(paidReconstruit);
             } else {
               localEleves.add(serverEleve);
             }
