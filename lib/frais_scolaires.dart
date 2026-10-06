@@ -205,6 +205,34 @@ class GroupeOption {
   });
 }
 
+// ============================================================================
+// ⚡ NOUVEAU — GROUPE DE "AUTRES FRAIS" PORTANT LE MÊME NOM
+// ============================================================================
+// Quand plusieurs frais additionnels ont le même nom (ex : "Frais de l'État"
+// ajouté une fois par classe/section avec des montants différents), ils sont
+// considérés comme UN SEUL type de frais UNIQUEMENT pour la génération des
+// rapports. Rien n'est modifié dans les données : chaque frais garde son id,
+// son montant et ses paiements. Ce groupe sert seulement à les rassembler
+// dans le rapport PDF.
+// ============================================================================
+class AutreFraisGroupe {
+  final String cle;
+  final String nom;
+  final List<String> ids;
+  final double montantMin;
+  final double montantMax;
+
+  AutreFraisGroupe({
+    required this.cle,
+    required this.nom,
+    required this.ids,
+    required this.montantMin,
+    required this.montantMax,
+  });
+
+  int get nombreDeFraisFusionnes => ids.length;
+}
+
 class AutreFrais {
   String id;
   String nom;
@@ -2875,6 +2903,67 @@ class FraisScolaires {
     return list;
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — FUSION (POUR LES RAPPORTS UNIQUEMENT) DES "AUTRES FRAIS"
+  // PORTANT LE MÊME NOM
+  // ==========================================================================
+  // Deux frais sont considérés comme "le même type de frais" quand leur nom
+  // est identique après normalisation (espaces superflus retirés, majuscules/
+  // minuscules ignorées). Exemple : "Frais de l'État", "frais de l'état " et
+  // "FRAIS DE L'ÉTAT" forment un seul groupe.
+  //
+  // ⚠️ AUCUNE donnée n'est modifiée : ni les frais, ni les montants, ni les
+  // paiements, ni les reçus, ni les calculs de caisse. Ces méthodes ne font
+  // que LIRE la liste `autresFrais` pour proposer un regroupement dans
+  // l'écran de génération de rapport.
+  // ==========================================================================
+  String normaliserNomFrais(String nom) =>
+      nom.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
+
+  List<AutreFraisGroupe> getAutresFraisGroupes() {
+    final Map<String, List<AutreFrais>> parCle = {};
+    for (final f in autresFrais) {
+      final cle = normaliserNomFrais(f.nom);
+      if (cle.isEmpty) continue;
+      parCle.putIfAbsent(cle, () => []).add(f);
+    }
+
+    final result = <AutreFraisGroupe>[];
+    parCle.forEach((cle, liste) {
+      double min = double.infinity;
+      double max = double.negativeInfinity;
+      void considerer(double v) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+
+      for (final f in liste) {
+        considerer(f.montant);
+        for (final v in f.montantsParSection.values) {
+          considerer(v);
+        }
+        for (final v in f.montantsParClasse.values) {
+          considerer(v);
+        }
+      }
+      if (min == double.infinity) {
+        min = 0;
+        max = 0;
+      }
+
+      result.add(AutreFraisGroupe(
+        cle: cle,
+        nom: liste.first.nom.trim(),
+        ids: liste.map((f) => f.id).toList(),
+        montantMin: min,
+        montantMax: max,
+      ));
+    });
+
+    result.sort((a, b) => a.nom.toLowerCase().compareTo(b.nom.toLowerCase()));
+    return result;
+  }
+
   Future<AutreFrais> addAutreFrais({
     required String nom,
     required double montant,
@@ -5354,46 +5443,160 @@ class FraisScolaires {
     );
   }
 
+  // ==========================================================================
+  // ⚡ MODIFIÉ — RAPPORT "AUTRES FRAIS DE PAIEMENT" AVEC FUSION PAR NOM
+  // ==========================================================================
+  // Quand un type de frais est choisi (autreFraisGroupeCle, ou à défaut
+  // autreFraisId), TOUS les frais portant le même nom (même s'ils ont été
+  // ajoutés un par un avec des montants différents selon la section/classe)
+  // sont fusionnés EN UN SEUL RAPPORT. Cette fusion se fait uniquement au
+  // moment de générer le PDF : aucune donnée enregistrée n'est modifiée, et
+  // aucun calcul de caisse, de reçu ou de répartition n'est touché.
+  //
+  // Organisation du rapport fusionné (pour que le lecteur ne se perde pas) :
+  //   1. En-tête + cadre de synthèse (total, nombre de paiements, élèves
+  //      concernés / ayant payé / restant à payer)
+  //   2. Récapitulatif PAR SECTION
+  //   3. Récapitulatif PAR CLASSE (montant unitaire, concernés, payés,
+  //      restants, total)
+  //   4. Détail des paiements, rangé par section puis par classe puis par nom
+  //   5. Répartition par administration (inchangée)
+  //   6. Signataires (inchangés)
+  //
+  // Les filtres Section / Classe restent utilisables : ils limitent tous les
+  // tableaux ci-dessus à la section/classe choisie. Les sections/classes où
+  // ce frais n'a pas été défini n'apparaissent simplement pas.
+  //
+  // Sans type choisi ("Tous types confondus"), le comportement d'origine est
+  // conservé tel quel.
+  // ==========================================================================
   Future<Map<String, dynamic>> generateAutresFraisPdf({
     required String filename,
     String? autreFraisId,
+    String? autreFraisGroupeCle,
     String? sectionFilter,
     String? classFilter,
     String? city,
   }) async {
-    AutreFrais? fraisSelectionne;
-    if (autreFraisId != null) {
+    // ---- 1. Résolution du groupe (fusion par nom) -------------------------
+    String? cleGroupe = autreFraisGroupeCle;
+    if (cleGroupe == null && autreFraisId != null) {
       for (final f in autresFrais) {
         if (f.id == autreFraisId) {
-          fraisSelectionne = f;
+          cleGroupe = normaliserNomFrais(f.nom);
           break;
         }
       }
     }
 
-    var paiements = getAutresFraisPaiementsForYear();
-    if (autreFraisId != null) {
-      paiements =
-          paiements.where((p) => p.autreFraisId == autreFraisId).toList();
+    AutreFraisGroupe? groupe;
+    if (cleGroupe != null) {
+      for (final g in getAutresFraisGroupes()) {
+        if (g.cle == cleGroupe) {
+          groupe = g;
+          break;
+        }
+      }
     }
 
-    final rows = <List<String>>[];
+    final Set<String> idsGroupe = {
+      if (groupe != null) ...groupe.ids,
+      if (autreFraisId != null) autreFraisId,
+    };
+    final bool modeFusion = cleGroupe != null || autreFraisId != null;
+
+    // ---- 2. Paiements concernés ------------------------------------------
+    var paiements = getAutresFraisPaiementsForYear();
+    if (modeFusion) {
+      final String? cleFinale = cleGroupe;
+      paiements = paiements.where((p) {
+        if (idsGroupe.contains(p.autreFraisId)) return true;
+        if (cleFinale != null &&
+            normaliserNomFrais(p.autreFraisNom) == cleFinale) {
+          return true;
+        }
+        return false;
+      }).toList();
+    }
+
+    final Map<String, Eleve> elevesParId = {};
+    for (final e in currentData.eleves) {
+      elevesParId.putIfAbsent(e.id, () => e);
+    }
+
+    int indexSectionPourTri(String section) {
+      final i = config.sections.indexOf(section);
+      return i < 0 ? (1 << 20) : i;
+    }
+
+    int indexClassePourTri(String section, String classe) {
+      final liste = config.classesBySection[section];
+      if (liste == null) return 1 << 20;
+      final i = liste.indexOf(classeNumeroFromFullClasse(classe));
+      return i < 0 ? (1 << 20) : i;
+    }
+
+    final List<Map<String, dynamic>> entrees = [];
     double total = 0;
     final Map<String, Eleve> elevesDistincts = {};
 
     for (final p in paiements) {
-      Eleve? eleve;
-      for (final e in currentData.eleves) {
-        if (e.id == p.eleveId) {
-          eleve = e;
-          break;
-        }
-      }
+      final Eleve? eleve = elevesParId[p.eleveId];
       final section = eleve?.section ?? '';
       final classe  = eleve?.classe  ?? '';
       if (sectionFilter != null && section != sectionFilter) continue;
       if (classFilter != null && classe != classFilter) continue;
 
+      entrees.add({
+        'p': p,
+        'eleve': eleve,
+        'section': section,
+        'classe': classe,
+      });
+      total += p.montant;
+      if (eleve != null) {
+        elevesDistincts[eleve.id] = eleve;
+      }
+    }
+
+    // En mode fusion, la liste détaillée est rangée par section, puis par
+    // classe, puis par nom. (Seul l'ORDRE des lignes change : aucun total.)
+    if (modeFusion) {
+      entrees.sort((a, b) {
+        final String sa = a['section'] as String;
+        final String sb = b['section'] as String;
+        final String ca = a['classe'] as String;
+        final String cb = b['classe'] as String;
+        int c = indexSectionPourTri(sa).compareTo(indexSectionPourTri(sb));
+        if (c != 0) return c;
+        c = sa.toLowerCase().compareTo(sb.toLowerCase());
+        if (c != 0) return c;
+        c = indexClassePourTri(sa, ca).compareTo(indexClassePourTri(sb, cb));
+        if (c != 0) return c;
+        c = ca.toLowerCase().compareTo(cb.toLowerCase());
+        if (c != 0) return c;
+        final Eleve? ea = a['eleve'] as Eleve?;
+        final Eleve? eb = b['eleve'] as Eleve?;
+        final String na = ea != null
+            ? '${ea.nom} ${ea.postNom} ${ea.prenom}'.toLowerCase()
+            : '~';
+        final String nb = eb != null
+            ? '${eb.nom} ${eb.postNom} ${eb.prenom}'.toLowerCase()
+            : '~';
+        c = na.compareTo(nb);
+        if (c != 0) return c;
+        return (a['p'] as AutreFraisPaiement)
+            .date
+            .compareTo((b['p'] as AutreFraisPaiement).date);
+      });
+    }
+
+    final rows = <List<String>>[];
+    for (final en in entrees) {
+      final AutreFraisPaiement p = en['p'] as AutreFraisPaiement;
+      final Eleve? eleve = en['eleve'] as Eleve?;
+      final String section = en['section'] as String;
+      final String classe = en['classe'] as String;
       rows.add([
         (eleve != null && eleve.id.isNotEmpty) ? eleve.id : 'N/A',
         eleve != null
@@ -5405,22 +5608,262 @@ class FraisScolaires {
         p.montant.toStringAsFixed(0),
         p.dateFormatee,
       ]);
-      total += p.montant;
-
-      if (eleve != null) {
-        elevesDistincts[eleve.id] = eleve;
-      }
     }
 
     final adminDistribution = calculateAutresFraisAdminDistribution(total);
 
+    // ---- 3. Récapitulatifs par section / par classe (mode fusion) ---------
+    final List<pw.Widget> recapWidgets = [];
+    int totalConcernes = 0;
+    int totalPayeurs = 0;
+
+    if (modeFusion) {
+      String cleSC(String s, String c) => '$s\u0001$c';
+
+      final Map<String, String> sectionDeCle = {};
+      final Map<String, String> classeDeCle = {};
+      final Map<String, Set<String>> payeursParCle = {};
+      final Map<String, Set<String>> concernesParCle = {};
+      final Map<String, double> totalParCle = {};
+      final Map<String, Set<double>> montantsParCle = {};
+
+      void assurerCle(String k, String s, String c) {
+        sectionDeCle.putIfAbsent(k, () => s);
+        classeDeCle.putIfAbsent(k, () => c);
+        payeursParCle.putIfAbsent(k, () => <String>{});
+        concernesParCle.putIfAbsent(k, () => <String>{});
+        totalParCle.putIfAbsent(k, () => 0.0);
+        montantsParCle.putIfAbsent(k, () => <double>{});
+      }
+
+      // Paiements effectifs
+      for (final en in entrees) {
+        final AutreFraisPaiement p = en['p'] as AutreFraisPaiement;
+        final String s0 = en['section'] as String;
+        final String c0 = en['classe'] as String;
+        final String s = s0.isEmpty ? '-' : s0;
+        final String c = c0.isEmpty ? '-' : c0;
+        final String k = cleSC(s, c);
+        assurerCle(k, s, c);
+        payeursParCle[k]!.add(p.eleveId);
+        concernesParCle[k]!.add(p.eleveId);
+        totalParCle[k] = (totalParCle[k] ?? 0) + p.montant;
+        montantsParCle[k]!.add(p.montant);
+      }
+
+      // Élèves concernés (même s'ils n'ont pas encore payé)
+      final fraisDuGroupe =
+      autresFrais.where((f) => idsGroupe.contains(f.id)).toList();
+      for (final e in currentData.eleves) {
+        if (sectionFilter != null && e.section != sectionFilter) continue;
+        if (classFilter != null && e.classe != classFilter) continue;
+        AutreFrais? fraisApplicable;
+        for (final f in fraisDuGroupe) {
+          if (autreFraisAppliesToStudent(f, e)) {
+            fraisApplicable = f;
+            break;
+          }
+        }
+        if (fraisApplicable == null) continue;
+        final String k = cleSC(e.section, e.classe);
+        assurerCle(k, e.section, e.classe);
+        concernesParCle[k]!.add(e.id);
+        montantsParCle[k]!
+            .add(getMontantAutreFraisPourEleve(fraisApplicable, e));
+      }
+
+      String montantLabel(Set<double> s) {
+        if (s.isEmpty) return '-';
+        final l = s.toList()..sort();
+        if ((l.last - l.first).abs() < 0.5) return formatMontant(l.first);
+        return '${formatMontant(l.first)} - ${formatMontant(l.last)}';
+      }
+
+      final List<String> cles = sectionDeCle.keys.toList();
+      cles.sort((a, b) {
+        final String sa = sectionDeCle[a]!;
+        final String sb = sectionDeCle[b]!;
+        final String ca = classeDeCle[a]!;
+        final String cb = classeDeCle[b]!;
+        int c = indexSectionPourTri(sa).compareTo(indexSectionPourTri(sb));
+        if (c != 0) return c;
+        c = sa.toLowerCase().compareTo(sb.toLowerCase());
+        if (c != 0) return c;
+        c = indexClassePourTri(sa, ca).compareTo(indexClassePourTri(sb, cb));
+        if (c != 0) return c;
+        return ca.toLowerCase().compareTo(cb.toLowerCase());
+      });
+
+      // --- Tableau par classe ---
+      final rowsClasse = <List<String>>[];
+      int sumConc = 0;
+      int sumPay = 0;
+      double sumTot = 0;
+      for (final k in cles) {
+        final int conc = concernesParCle[k]!.length;
+        final int pay = payeursParCle[k]!.length;
+        final double tot = totalParCle[k] ?? 0;
+        if (conc == 0 && pay == 0) continue;
+        final int reste = conc - pay < 0 ? 0 : conc - pay;
+        sumConc += conc;
+        sumPay += pay;
+        sumTot += tot;
+        rowsClasse.add([
+          sectionDeCle[k]!,
+          classeDeCle[k]!,
+          montantLabel(montantsParCle[k]!),
+          '$conc',
+          '$pay',
+          '$reste',
+          formatMontant(tot),
+        ]);
+      }
+      totalConcernes = sumConc;
+      totalPayeurs = sumPay;
+      final int sumReste = sumConc - sumPay < 0 ? 0 : sumConc - sumPay;
+      rowsClasse.add([
+        'TOTAL',
+        '',
+        '',
+        '$sumConc',
+        '$sumPay',
+        '$sumReste',
+        formatMontant(sumTot),
+      ]);
+
+      // --- Tableau par section ---
+      final List<String> sectionsVues = [];
+      for (final k in cles) {
+        final s = sectionDeCle[k]!;
+        if (!sectionsVues.contains(s)) sectionsVues.add(s);
+      }
+      final rowsSection = <List<String>>[];
+      for (final s in sectionsVues) {
+        int conc = 0;
+        int pay = 0;
+        double tot = 0;
+        final Set<double> montantsSection = {};
+        for (final k in cles) {
+          if (sectionDeCle[k] != s) continue;
+          conc += concernesParCle[k]!.length;
+          pay += payeursParCle[k]!.length;
+          tot += totalParCle[k] ?? 0;
+          montantsSection.addAll(montantsParCle[k]!);
+        }
+        if (conc == 0 && pay == 0) continue;
+        rowsSection.add([
+          s,
+          montantLabel(montantsSection),
+          '$conc',
+          '$pay',
+          '${conc - pay < 0 ? 0 : conc - pay}',
+          formatMontant(tot),
+        ]);
+      }
+      rowsSection.add([
+        'TOTAL',
+        '',
+        '$sumConc',
+        '$sumPay',
+        '$sumReste',
+        formatMontant(sumTot),
+      ]);
+
+      recapWidgets.addAll([
+        pw.Text(
+          "1. RÉCAPITULATIF PAR SECTION",
+          style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+        ),
+        pw.SizedBox(height: 4),
+        pw.Text(
+          "Les montants peuvent différer d'une section à l'autre : ils sont "
+              "rassemblés ici sous un seul et même type de frais.",
+          style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+        ),
+        pw.SizedBox(height: 8),
+        pw.TableHelper.fromTextArray(
+          headers: const [
+            'Section',
+            'Montant unitaire (FC)',
+            'Élèves concernés',
+            'Ont payé',
+            'Pas encore payé',
+            'Total collecté (FC)',
+          ],
+          data: rowsSection,
+          columnWidths: _buildColumnWidths([2.2, 1.6, 1.2, 1.0, 1.3, 1.6]),
+          headerStyle: pw.TextStyle(
+            fontSize: 9,
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.white,
+          ),
+          headerDecoration: const pw.BoxDecoration(color: PdfColors.indigo800),
+          headerAlignment: pw.Alignment.center,
+          cellStyle: const pw.TextStyle(fontSize: 9),
+          cellAlignment: pw.Alignment.center,
+          cellAlignments: {
+            0: pw.Alignment.centerLeft,
+            5: pw.Alignment.centerRight,
+          },
+          cellPadding:
+          const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+          oddRowDecoration: const pw.BoxDecoration(color: PdfColors.indigo50),
+        ),
+        pw.SizedBox(height: 18),
+        pw.Text(
+          "2. RÉCAPITULATIF PAR CLASSE",
+          style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+        ),
+        pw.SizedBox(height: 4),
+        pw.Text(
+          "Pour chaque classe : le montant à payer, le nombre d'élèves "
+              "concernés, ceux qui ont déjà payé, ceux qui n'ont pas encore "
+              "payé, et le total collecté.",
+          style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+        ),
+        pw.SizedBox(height: 8),
+        pw.TableHelper.fromTextArray(
+          headers: const [
+            'Section',
+            'Classe',
+            'Montant unitaire (FC)',
+            'Élèves concernés',
+            'Ont payé',
+            'Pas encore payé',
+            'Total collecté (FC)',
+          ],
+          data: rowsClasse,
+          columnWidths:
+          _buildColumnWidths([1.8, 1.4, 1.6, 1.2, 1.0, 1.3, 1.6]),
+          headerStyle: pw.TextStyle(
+            fontSize: 9,
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.white,
+          ),
+          headerDecoration: const pw.BoxDecoration(color: PdfColors.indigo),
+          headerAlignment: pw.Alignment.center,
+          cellStyle: const pw.TextStyle(fontSize: 9),
+          cellAlignment: pw.Alignment.center,
+          cellAlignments: {
+            0: pw.Alignment.centerLeft,
+            1: pw.Alignment.centerLeft,
+            6: pw.Alignment.centerRight,
+          },
+          cellPadding:
+          const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+          oddRowDecoration: const pw.BoxDecoration(color: PdfColors.indigo50),
+        ),
+        pw.SizedBox(height: 24),
+      ]);
+    }
+
+    // ---- 4. Titre ---------------------------------------------------------
     String title = "RAPPORT — AUTRES FRAIS DE PAIEMENT";
-    if (fraisSelectionne != null) {
-      title += " : ${fraisSelectionne.nom}";
-    } else if (autreFraisId != null) {
-      title += paiements.isNotEmpty
-          ? " : ${paiements.first.autreFraisNom}"
-          : "";
+    if (modeFusion) {
+      final String nomType = groupe != null
+          ? groupe.nom
+          : (paiements.isNotEmpty ? paiements.first.autreFraisNom : '');
+      if (nomType.isNotEmpty) title += " : $nomType";
     } else {
       title += " (TOUS TYPES CONFONDUS)";
     }
@@ -5436,6 +5879,8 @@ class FraisScolaires {
     _buildColumnWidths([0.6, 2.1, 1.0, 1.1, 1.5, 1.0, 1.3]);
     final double cellFontSize = _tableCellFontSize(headers.length);
     final double headerFontSize = _tableHeaderFontSize(headers.length);
+
+    final AutreFraisGroupe? grp = groupe;
 
     final pdf = pw.Document();
     pdf.addPage(
@@ -5471,6 +5916,39 @@ class FraisScolaires {
                   "Nombre de paiements : ${rows.length}",
                   style: const pw.TextStyle(fontSize: 11),
                 ),
+                if (modeFusion) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    "Élèves concernés : $totalConcernes  |  "
+                        "Ont payé : $totalPayeurs  |  "
+                        "Pas encore payé : "
+                        "${totalConcernes - totalPayeurs < 0 ? 0 : totalConcernes - totalPayeurs}",
+                    style: const pw.TextStyle(fontSize: 11),
+                  ),
+                ],
+                if (grp != null) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    grp.montantMin == grp.montantMax
+                        ? "Montant du frais : ${formatMontant(grp.montantMin)} FC"
+                        : "Montants du frais selon la section/classe : de "
+                        "${formatMontant(grp.montantMin)} FC à "
+                        "${formatMontant(grp.montantMax)} FC",
+                    style: const pw.TextStyle(fontSize: 11),
+                  ),
+                ],
+                if (grp != null && grp.ids.length > 1) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    "Ce rapport fusionne ${grp.ids.length} configurations "
+                        "portant le même nom en un seul type de frais.",
+                    style: pw.TextStyle(
+                      fontSize: 10,
+                      fontStyle: pw.FontStyle.italic,
+                      color: PdfColors.grey700,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -5480,8 +5958,11 @@ class FraisScolaires {
             label: "ont payé au moins un frais de ce rapport",
           ),
           pw.SizedBox(height: 16),
+          ...recapWidgets,
           pw.Text(
-            "DÉTAIL DES PAIEMENTS",
+            modeFusion
+                ? "3. DÉTAIL DES PAIEMENTS (par section, puis par classe)"
+                : "DÉTAIL DES PAIEMENTS",
             style:
             pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
           ),

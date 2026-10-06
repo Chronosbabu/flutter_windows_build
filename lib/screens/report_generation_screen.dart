@@ -17,8 +17,7 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   // "principal" = frais mensuel principal (comportement inchangé, via
   //               fs.generatePdf).
   // "autres"    = autres frais de paiement / frais additionnels-éphémères
-  //               (nouveau, via fs.generateAutresFraisPdf — déjà présent
-  //               dans frais_scolaires.dart, avec bloc de signatures
+  //               (via fs.generateAutresFraisPdf — avec bloc de signatures
   //               identique au rapport principal).
   // Les deux catégories restent dans le même écran de génération, comme
   // demandé, et partagent le même bloc "Signataires".
@@ -32,36 +31,26 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   // --- Spécifique au rapport "Frais Principal" ---
   String reportType = "annual"; // daily | monthly | annual
 
-  // --- Spécifique au rapport "Autres Frais de Paiement" ---
+  // ==========================================================================
+  // ⚡ MODIFIÉ — Spécifique au rapport "Autres Frais de Paiement"
+  // On ne choisit plus un frais individuel (par id) mais un TYPE de frais
+  // (clé de groupe = nom normalisé). Tous les frais portant le même nom
+  // (ex : "Frais de l'État" ajouté une fois par classe/section avec des
+  // montants différents) sont ainsi fusionnés EN UN SEUL TYPE, uniquement
+  // pour la génération du rapport. Aucune donnée n'est modifiée.
   // null = tous les types de frais additionnels confondus.
-  String? selectedAutreFraisId;
+  // ==========================================================================
+  String? selectedAutreFraisGroupeCle;
 
   // ==========================================================================
-  // ⚡ NOUVEAU — INCLURE (OU NON) LA PARTIE "DÉPENSES" DANS LE PDF.
-  //
-  // Ce bouton ne concerne que le rapport "Frais Principal", car c'est le
-  // seul qui appelle `_buildDepensesReportSections` dans
-  // `frais_scolaires.dart` (le rapport "Autres Frais" n'a jamais eu de
-  // section Dépenses). Quand `includeDepenses` est à false, `fs.generatePdf`
-  // saute complètement cette partie (journalières / mensuelles / annuelles)
-  // et passe directement au bloc "Signataires" — rien concernant les
-  // dépenses n'apparaît nulle part dans le document.
+  // INCLURE (OU NON) LA PARTIE "DÉPENSES" DANS LE PDF.
+  // Ne concerne que le rapport "Frais Principal".
   // ==========================================================================
   bool includeDepenses = true;
 
   // ==========================================================================
   // VILLE POUR LA MENTION "Fait à ..., le ..." DU BLOC DE SIGNATURES.
-  //
-  // `frais_scolaires.dart` accepte déjà un paramètre `city` sur
-  // `generatePdf` et `generateAutresFraisPdf`, et retombe sur
-  // "Lubumbashi" par défaut si rien n'est fourni (voir
-  // `_buildSignatureSection`). Ici, on se contente d'exposer ce champ à
-  // l'utilisateur, pré-rempli avec la dernière ville utilisée
-  // (`fs.lastReportCity`) exactement comme les filtres Section/Classe
-  // le sont déjà ailleurs dans l'application — pratique courante des
-  // rapports financiers scolaires en RDC, où la mention "Fait à
-  // <Ville>, le <date>" figure systématiquement au bas des documents
-  // officiels, juste avant les signatures.
+  // Pré-remplie avec la dernière ville utilisée (fs.lastReportCity).
   // ==========================================================================
   late final TextEditingController _cityController;
 
@@ -82,10 +71,33 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     super.dispose();
   }
 
+  // Libellé affiché dans la liste déroulante pour un type de frais fusionné.
+  String _libelleGroupe(AutreFraisGroupe g) {
+    final String montant = g.montantMin == g.montantMax
+        ? "${formatMontant(g.montantMin)} FC"
+        : "${formatMontant(g.montantMin)} à ${formatMontant(g.montantMax)} FC";
+    final String fusion = g.nombreDeFraisFusionnes > 1
+        ? " • ${g.nombreDeFraisFusionnes} configurations fusionnées"
+        : "";
+    return "${g.nom} — $montant$fusion";
+  }
+
   @override
   Widget build(BuildContext context) {
     final signataires = fs.getSignataires();
-    final autresFraisList = fs.getAutresFrais();
+
+    // ⚡ MODIFIÉ — liste des types de frais fusionnés par nom.
+    final List<AutreFraisGroupe> groupesAutresFrais =
+    fs.getAutresFraisGroupes();
+
+    // Sécurité : si la clé sélectionnée n'existe plus (frais supprimé),
+    // on revient sur "Tous les types confondus" pour éviter une erreur
+    // d'affichage de la liste déroulante.
+    if (selectedAutreFraisGroupeCle != null &&
+        !groupesAutresFrais
+            .any((g) => g.cle == selectedAutreFraisGroupeCle)) {
+      selectedAutreFraisGroupeCle = null;
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -149,51 +161,80 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
               ),
             )
           else
-          // Sélection du type de frais additionnel (ou tous types
-          // confondus), pour le rapport "Autres Frais de Paiement".
+          // ⚡ MODIFIÉ — Sélection du TYPE de frais additionnel. Les frais
+          // portant le même nom sont automatiquement fusionnés en un seul
+          // choix (même s'ils ont des montants différents selon la
+          // section/classe). Le rapport généré rassemble alors tout sous
+          // un seul type de frais, filtrable par section et par classe.
             _sectionCard(
               title: "2. Type de frais additionnel",
-              subtitle: "Choisissez un frais précis (ex: Frais de l'État) "
-                  "ou tous les types confondus.",
-              child: autresFraisList.isEmpty
+              subtitle: "Choisissez un type de frais (ex: Frais de l'État) "
+                  "ou tous les types confondus. Les frais portant le même "
+                  "nom sont automatiquement fusionnés en un seul type "
+                  "dans le rapport.",
+              child: groupesAutresFrais.isEmpty
                   ? const Text(
                 "Aucun frais additionnel défini. Allez dans Paramètres "
                     "> \"Autres Frais de Paiement\" pour en ajouter.",
                 style: TextStyle(color: Colors.red),
               )
-                  : DropdownButtonFormField<String?>(
-                value: selectedAutreFraisId,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  contentPadding: EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 8),
-                ),
-                hint: const Text("Tous les types confondus"),
-                items: [
-                  const DropdownMenuItem(
-                    value: null,
-                    child: Text("Tous les types confondus"),
-                  ),
-                  ...autresFraisList.map(
-                        (f) => DropdownMenuItem(
-                      value: f.id,
-                      child: Text(
-                          "${f.nom} — ${f.montant.toStringAsFixed(0)} FC"),
+                  : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DropdownButtonFormField<String?>(
+                    value: selectedAutreFraisGroupeCle,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
                     ),
+                    hint: const Text("Tous les types confondus"),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text("Tous les types confondus"),
+                      ),
+                      ...groupesAutresFrais.map(
+                            (g) => DropdownMenuItem<String?>(
+                          value: g.cle,
+                          child: Text(
+                            _libelleGroupe(g),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    ],
+                    onChanged: (val) => setState(
+                            () => selectedAutreFraisGroupeCle = val),
                   ),
+                  if (selectedAutreFraisGroupeCle != null) ...[
+                    const SizedBox(height: 8),
+                    Builder(builder: (_) {
+                      final g = groupesAutresFrais.firstWhere(
+                              (x) => x.cle == selectedAutreFraisGroupeCle);
+                      return Text(
+                        g.nombreDeFraisFusionnes > 1
+                            ? "Ce rapport fusionnera "
+                            "${g.nombreDeFraisFusionnes} configurations "
+                            "portant le nom \"${g.nom}\" en un seul type "
+                            "de frais. Les sections/classes pour "
+                            "lesquelles ce frais n'a pas été défini "
+                            "n'apparaîtront simplement pas."
+                            : "Un seul frais porte le nom \"${g.nom}\".",
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.indigo),
+                      );
+                    }),
+                  ],
                 ],
-                onChanged: (val) =>
-                    setState(() => selectedAutreFraisId = val),
               ),
             ),
           const SizedBox(height: 16),
 
           // ====================================================================
-          // ⚡ NOUVEAU — "2 bis." Inclure ou non les dépenses dans le PDF.
-          // Uniquement pertinent pour le rapport "Frais Principal", car le
-          // rapport "Autres Frais" ne contient de toute façon jamais de
-          // section Dépenses.
+          // "2 bis." Inclure ou non les dépenses dans le PDF.
+          // Uniquement pour le rapport "Frais Principal".
           // ====================================================================
           if (reportCategory == "principal") ...[
             _sectionCard(
@@ -223,10 +264,6 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
 
           // ====================================================================
           // Filtres Section / Classe — communs aux deux catégories.
-          // La liste des classes proposées est limitée à la section
-          // choisie (au lieu de lister TOUTES les classes de l'école
-          // sans distinction), pour éviter de sélectionner une
-          // combinaison Section/Classe incohérente.
           // ====================================================================
           _sectionCard(
             title: "3. Filtres (optionnel)",
@@ -281,10 +318,6 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
 
           // ====================================================================
           // Ville pour la mention "Fait à ..., le ..." des signatures.
-          // Pré-remplie avec la dernière ville utilisée
-          // (fs.lastReportCity), et sauvegardée automatiquement à chaque
-          // génération de rapport (voir _generateReport) pour ne plus
-          // avoir à la ressaisir la prochaine fois.
           // ====================================================================
           _sectionCard(
             title: "4. Ville (pour la mention \"Fait à ..., le ...\")",
@@ -307,10 +340,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
           const SizedBox(height: 16),
 
           // ====================================================================
-          // Signataires — inchangé, mais désormais explicitement partagé
-          // entre le rapport "Frais Principal" et "Autres Frais de
-          // Paiement" (les deux méthodes PDF utilisent le même
-          // _buildSignatureSection côté fs).
+          // Signataires — partagés entre le rapport "Frais Principal" et
+          // "Autres Frais de Paiement".
           // ====================================================================
           _sectionCard(
             title: "5. Signataires (optionnel)",
@@ -408,9 +439,7 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
 
   // ==========================================================================
   // Classes à proposer dans le filtre "Classe", limitées à la section
-  // choisie s'il y en a une. Fonctionne pour les deux catégories de
-  // rapport puisqu'elles s'appuient toutes deux sur les élèves de
-  // `currentData`.
+  // choisie s'il y en a une.
   // ==========================================================================
   List<String> _classesForCurrentSectionFilter() {
     final classes = fs.currentData.eleves
@@ -585,26 +614,13 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   }
 
   // ==========================================================================
-  // Aiguille vers la bonne méthode de génération PDF selon la catégorie
-  // choisie :
-  //   - "principal" -> fs.generatePdf (le paramètre `city` y ajoute déjà,
-  //     pour le rapport journalier, la colonne "Mois Concerné(s)" par
-  //     élève, et pour le rapport annuel, le récapitulatif mensuel ; le
-  //     paramètre `includeDepenses` contrôle désormais si toute la partie
-  //     "Dépenses" apparaît ou non dans le PDF)
-  //   - "autres"    -> fs.generateAutresFraisPdf (filtre par type de
-  //     frais + section + classe, avec le même bloc de signatures que le
-  //     rapport principal — ce rapport n'a de toute façon jamais eu de
-  //     section Dépenses, donc `includeDepenses` ne le concerne pas)
-  //
-  // Dans les deux cas, la ville saisie est :
-  //   1. Sauvegardée via fs.setLastReportCity, pour être pré-remplie
-  //      automatiquement la prochaine fois (même principe que les
-  //      filtres Section/Classe mémorisés ailleurs dans l'application).
-  //   2. Transmise telle quelle au paramètre `city`, utilisé par
-  //      `_buildSignatureSection` pour composer "Fait à <Ville>, le
-  //      ...". Un champ laissé vide retombe automatiquement sur
-  //      "Lubumbashi" côté frais_scolaires.dart.
+  // Aiguille vers la bonne méthode de génération PDF selon la catégorie :
+  //   - "principal" -> fs.generatePdf
+  //   - "autres"    -> fs.generateAutresFraisPdf, avec la CLÉ DU GROUPE
+  //     (autreFraisGroupeCle) : tous les frais de même nom sont fusionnés
+  //     en un seul type, filtrables par section et par classe.
+  // La ville saisie est sauvegardée (fs.setLastReportCity) puis transmise
+  // au paramètre `city` ; un champ vide retombe sur "Lubumbashi".
   // ==========================================================================
   Future<void> _generateReport() async {
     setState(() => _generating = true);
@@ -630,7 +646,7 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
           "Rapport_AutresFrais_${DateTime.now().toString().split(' ')[0]}";
       result = await fs.generateAutresFraisPdf(
         filename: filename,
-        autreFraisId: selectedAutreFraisId,
+        autreFraisGroupeCle: selectedAutreFraisGroupeCle,
         sectionFilter: selectedSection,
         classFilter: selectedClass,
         city: city,
