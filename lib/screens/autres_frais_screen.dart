@@ -120,15 +120,11 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   // des reçus réimprimés plus tard). La SEULE impression possible est
   // désormais automatique, immédiatement après le paiement.
   //
-  // ⚡ CE COMPORTEMENT N'A PAS CHANGÉ dans cette version : la génération de
-  // reçu pour les "Autres Frais" continue de fonctionner exactement comme
-  // pour les frais principaux (anti-doublon via `printedReceiptKeys`, mise
-  // en file d'attente via `receiptQueue` si aucune imprimante n'est
-  // disponible, impression automatique différée via `flushReceiptQueue`).
-  // Le montant réellement imprimé/enregistré est désormais toujours celui
-  // résolu pour CET élève précis (voir `getMontantAutreFraisPourEleve`),
-  // qui peut varier selon sa section/classe si des exceptions ont été
-  // configurées pour ce frais.
+  // ⚡ NOUVEAU — TRANCHES : quand le frais fonctionne par tranches pour la
+  // classe/section de l'élève, chaque paiement règle la PROCHAINE tranche
+  // non payée de cet élève, et le reçu imprimé porte le nom de la tranche
+  // (ex. "Frais de l'État - Deuxième tranche (2/3)") avec le montant de la
+  // tranche. Chaque tranche a son propre reçu anti-doublon.
   // ==========================================================================
 
   Future<void> _payerUnSeul(Eleve eleve) async {
@@ -136,25 +132,42 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     if (widget.fraisScolaires.hasPaidAutreFrais(eleve, selectedFrais!)) return;
     setState(() => _processing = true);
     final frais = selectedFrais!;
-    await widget.fraisScolaires.payAutreFrais(frais: frais, eleve: eleve);
-    final printed = await widget.fraisScolaires.printOrQueueAutreFraisReceipt(
-      eleve: eleve,
-      frais: frais,
-    );
-    if (mounted) {
-      setState(() {
-        selectedStudentIds.remove(eleve.id);
-        _processing = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            printed
-                ? "✅ ${frais.nom} enregistré et reçu imprimé pour ${eleve.nom} ${eleve.prenom}"
-                : "✅ ${frais.nom} enregistré pour ${eleve.nom} ${eleve.prenom} — reçu en attente d'impression",
-          ),
-        ),
+    try {
+      final paiement =
+      await widget.fraisScolaires.payAutreFrais(frais: frais, eleve: eleve);
+      final printed = await widget.fraisScolaires.printOrQueueAutreFraisReceipt(
+        eleve: eleve,
+        frais: frais,
+        paiement: paiement,
       );
+      final String libelleTranche = paiement.trancheLibelle.isEmpty
+          ? ''
+          : ' (${paiement.trancheLibelle})';
+      if (mounted) {
+        setState(() {
+          selectedStudentIds.remove(eleve.id);
+          _processing = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              printed
+                  ? "✅ ${frais.nom}$libelleTranche enregistré et reçu imprimé pour ${eleve.nom} ${eleve.prenom}"
+                  : "✅ ${frais.nom}$libelleTranche enregistré pour ${eleve.nom} ${eleve.prenom} — reçu en attente d'impression",
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _processing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("❌ Paiement impossible : $e"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -171,13 +184,20 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     int printedCount = 0;
     for (final eleve in students) {
       if (widget.fraisScolaires.hasPaidAutreFrais(eleve, frais)) continue;
-      await widget.fraisScolaires.payAutreFrais(frais: frais, eleve: eleve);
-      success++;
-      final printed = await widget.fraisScolaires.printOrQueueAutreFraisReceipt(
-        eleve: eleve,
-        frais: frais,
-      );
-      if (printed) printedCount++;
+      try {
+        final paiement = await widget.fraisScolaires
+            .payAutreFrais(frais: frais, eleve: eleve);
+        success++;
+        final printed =
+        await widget.fraisScolaires.printOrQueueAutreFraisReceipt(
+          eleve: eleve,
+          frais: frais,
+          paiement: paiement,
+        );
+        if (printed) printedCount++;
+      } catch (_) {
+        // Élève déjà soldé entre-temps : on passe au suivant.
+      }
     }
 
     if (mounted) {
@@ -198,17 +218,28 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
 
   void _confirmPaiementUnique(Eleve eleve) {
     if (selectedFrais == null) return;
-    // ⚡ NOUVEAU — montant réellement dû par CET élève (peut varier selon
-    // sa section/classe, voir FraisScolaires.getMontantAutreFraisPourEleve),
-    // affiché ici au lieu du montant unique `selectedFrais!.montant`.
+    // ⚡ NOUVEAU — montant réellement dû par CET élève maintenant : montant
+    // de la prochaine tranche si le frais fonctionne par tranches, sinon
+    // montant complet (qui peut varier selon sa section/classe, voir
+    // FraisScolaires.getMontantAutreFraisPourEleve).
+    final prochaine = widget.fraisScolaires
+        .getProchaineTrancheAutreFrais(selectedFrais!, eleve);
     final double montant = widget.fraisScolaires
-        .getMontantAutreFraisPourEleve(selectedFrais!, eleve);
+        .getMontantProchainPaiementAutreFrais(selectedFrais!, eleve);
+    final tranches =
+    widget.fraisScolaires.getTranchesPourEleve(selectedFrais!, eleve);
+    String libelleTranche = '';
+    if (prochaine != null) {
+      final idx = tranches.indexWhere((t) => t.id == prochaine.id);
+      libelleTranche =
+      "${prochaine.nom} (${idx + 1}/${tranches.length}) — ";
+    }
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(selectedFrais!.nom),
         content: Text(
-          "Confirmer le paiement de "
+          "Confirmer le paiement de $libelleTranche"
               "${montant.toStringAsFixed(0)} FC pour "
               "${eleve.nom} ${eleve.prenom} (${eleve.classe}) ?",
         ),
@@ -229,8 +260,8 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   }
 
   // ==========================================================================
-  // TOTAUX PAR CLASSE ET PAR OPTION POUR LE FRAIS SÉLECTIONNÉ (inchangé —
-  // n'a rien à voir avec l'impression, purement informatif).
+  // TOTAUX PAR CLASSE, PAR OPTION ET PAR TRANCHE POUR LE FRAIS SÉLECTIONNÉ
+  // (purement informatif, n'a rien à voir avec l'impression).
   // ==========================================================================
   Map<String, double> _totalsByClasseForSelected() {
     final totals = <String, double>{};
@@ -272,6 +303,22 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     return totals;
   }
 
+  // ⚡ NOUVEAU — total collecté par tranche pour le frais sélectionné.
+  // Les paiements faits sans tranche apparaissent sous "Paiement unique".
+  Map<String, double> _totalsByTrancheForSelected() {
+    final totals = <String, double>{};
+    if (selectedFrais == null) return totals;
+    final paiements = widget.fraisScolaires
+        .getAutresFraisPaiementsForYear()
+        .where((p) => p.autreFraisId == selectedFrais!.id);
+    for (final p in paiements) {
+      final label =
+      p.trancheNom.trim().isEmpty ? "Paiement unique" : p.trancheNom.trim();
+      totals[label] = (totals[label] ?? 0) + p.montant;
+    }
+    return totals;
+  }
+
   List<MapEntry<String, double>> _sortedEntries(Map<String, double> map) {
     final entries = map.entries.toList();
     entries.sort((a, b) => b.value.compareTo(a.value));
@@ -283,8 +330,11 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     final frais = selectedFrais!;
     final byClasse = _sortedEntries(_totalsByClasseForSelected());
     final byOption = _sortedEntries(_totalsByOptionForSelected());
+    final byTranche = _sortedEntries(_totalsByTrancheForSelected());
     final totalGeneral = byClasse.fold<double>(
         0.0, (sum, e) => sum + e.value);
+    final bool afficherTranches =
+    byTranche.any((e) => e.key != "Paiement unique");
 
     showDialog(
       context: context,
@@ -360,6 +410,33 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                       ),
                     ),
                   ),
+                if (afficherTranches) ...[
+                  const SizedBox(height: 18),
+                  const Text(
+                    "Par tranche",
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.indigo),
+                  ),
+                  const SizedBox(height: 6),
+                  ...byTranche.map(
+                        (e) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(child: Text(e.key)),
+                          Text(
+                            "${e.value.toStringAsFixed(0)} FC",
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -371,6 +448,464 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — CONFIGURATION DES TRANCHES DIRECTEMENT DEPUIS CET ÉCRAN
+  // ==========================================================================
+  // Demande de la direction : les "Autres Frais" comme le Frais de l'État se
+  // paient par tranches (Première, Deuxième, Troisième…). Plus besoin
+  // d'aller dans les Paramètres : on choisit un frais déjà configuré (pour
+  // telle section ou telle classe dans les Paramètres), on clique sur
+  // "Tranches", et on ajoute les tranches pour la cible voulue :
+  //   - toute l'école (seulement si le frais est défini pour toutes les
+  //     classes),
+  //   - une section,
+  //   - une classe précise.
+  //
+  // Pour un élève, on applique les tranches de la cible la plus précise qui
+  // en possède (classe, puis section, puis toute l'école). Les élèves dont
+  // la classe a des tranches paient donc tranche par tranche (la prochaine
+  // non payée), et non plus en une seule fois. Le reçu et le rapport PDF
+  // reprennent le nom de la tranche.
+  //
+  // ⚠️ Les tranches n'ont AUCUN effet sur les frais principaux : tout passe
+  // par les méthodes dédiées de FraisScolaires (`getTranchesPourCle`,
+  // `addTranchePourAutreFrais`, `updateTranchePourAutreFrais`,
+  // `deleteTranchePourAutreFrais`, …).
+  // ==========================================================================
+  void _showTranchesDialog() {
+    if (selectedFrais == null) return;
+    final frais = selectedFrais!;
+    final fs = widget.fraisScolaires;
+
+    // Cible de départ : celle du frais (section/classe définie dans les
+    // Paramètres), ou le filtre actif de l'écran si le frais est global.
+    String? cibleSection =
+    frais.scope == 'all' ? filterSection : frais.section;
+    String? cibleClasse;
+    if (frais.scope == 'classe') {
+      cibleClasse = frais.classe;
+    } else if (cibleSection != null &&
+        filterClasse != null &&
+        cibleSection == filterSection) {
+      cibleClasse = fs.classeNumeroFromFullClasse(filterClasse!);
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final List<String> sectionsDispo = frais.scope == 'all'
+              ? List<String>.from(fs.config.sections)
+              : <String>[if (frais.section != null) frais.section!];
+
+          if (cibleSection != null && !sectionsDispo.contains(cibleSection)) {
+            cibleSection = null;
+            cibleClasse = null;
+          }
+
+          List<String> classesDispo = <String>[];
+          if (cibleSection != null) {
+            if (frais.scope == 'classe') {
+              classesDispo = <String>[if (frais.classe != null) frais.classe!];
+            } else {
+              classesDispo = fs.getClassesForSection(cibleSection!);
+            }
+          }
+          if (cibleClasse != null && !classesDispo.contains(cibleClasse)) {
+            cibleClasse = null;
+          }
+
+          final bool sectionVerrouillee = frais.scope != 'all';
+          final bool classeVerrouillee = frais.scope == 'classe';
+
+          final String cle = fs.cleTranchePourCible(
+            section: cibleSection,
+            classeNumero: cibleClasse,
+          );
+          final List<AutreFraisTranche> tranches =
+          fs.getTranchesPourCle(frais, cle);
+          final double montantTotalFrais = fs.getMontantAutreFraisPourCible(
+            frais,
+            section: cibleSection,
+            classeNumero: cibleClasse,
+          );
+          final double sommeTranches =
+          tranches.fold(0.0, (sum, t) => sum + t.montant);
+          final double resteARepartir = montantTotalFrais - sommeTranches;
+
+          final String cibleLabel = cibleClasse != null
+              ? "la classe $cibleClasse ($cibleSection)"
+              : (cibleSection != null
+              ? "la section $cibleSection"
+              : "toute l'école");
+
+          Future<void> rafraichir() async {
+            setDialogState(() {});
+            if (mounted) setState(() {});
+          }
+
+          Future<void> ajouterOuModifier({AutreFraisTranche? existante}) async {
+            final bool? ok = await _showEditTrancheDialog(
+              ctx,
+              frais: frais,
+              cle: cle,
+              tranche: existante,
+              nomSuggere: fs.nomTrancheSuggere(tranches.length + 1),
+              montantSuggere: resteARepartir > 0 ? resteARepartir : 0,
+            );
+            if (ok == true) await rafraichir();
+          }
+
+          Future<void> supprimer(AutreFraisTranche t) async {
+            final bool? confirme = await showDialog<bool>(
+              context: ctx,
+              builder: (ctx2) => AlertDialog(
+                title: const Text("Supprimer cette tranche ?"),
+                content: Text(
+                  "Voulez-vous vraiment supprimer \"${t.nom}\" "
+                      "(${t.montant.toStringAsFixed(0)} FC) pour $cibleLabel ?",
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx2, false),
+                    child: const Text("Annuler"),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white),
+                    onPressed: () => Navigator.pop(ctx2, true),
+                    child: const Text("Supprimer"),
+                  ),
+                ],
+              ),
+            );
+            if (confirme != true) return;
+            final bool supprimee = await fs.deleteTranchePourAutreFrais(
+              autreFraisId: frais.id,
+              cle: cle,
+              trancheId: t.id,
+            );
+            if (!supprimee && mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                      "Impossible : des paiements ont déjà été enregistrés "
+                          "pour cette tranche."),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+            await rafraichir();
+          }
+
+          // Message de cohérence entre le montant du frais et les tranches.
+          Widget messageCoherence() {
+            if (tranches.isEmpty) {
+              return const Text(
+                "Aucune tranche pour cette cible : les élèves concernés "
+                    "paient ce frais en une seule fois (sauf si une tranche "
+                    "existe pour une cible plus large).",
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              );
+            }
+            if (resteARepartir.abs() < 0.5) {
+              return const Text(
+                "✅ La somme des tranches correspond exactement au montant "
+                    "du frais.",
+                style: TextStyle(fontSize: 11, color: Colors.green),
+              );
+            }
+            if (resteARepartir > 0) {
+              return Text(
+                "⚠️ Il reste ${resteARepartir.toStringAsFixed(0)} FC à "
+                    "répartir pour atteindre le montant du frais.",
+                style: const TextStyle(fontSize: 11, color: Colors.orange),
+              );
+            }
+            return Text(
+              "⚠️ Les tranches dépassent le montant du frais de "
+                  "${(-resteARepartir).toStringAsFixed(0)} FC.",
+              style: const TextStyle(fontSize: 11, color: Colors.orange),
+            );
+          }
+
+          return AlertDialog(
+            title: Text("Tranches — ${frais.nom}"),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Choisissez à qui s'appliquent les tranches :",
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.indigo),
+                    ),
+                    const SizedBox(height: 6),
+                    DropdownButton<String>(
+                      isExpanded: true,
+                      value: cibleSection,
+                      hint: const Text("Toute l'école"),
+                      items: [
+                        if (!sectionVerrouillee)
+                          const DropdownMenuItem<String>(
+                              value: null, child: Text("Toute l'école")),
+                        ...sectionsDispo.map((s) =>
+                            DropdownMenuItem(value: s, child: Text(s))),
+                      ],
+                      onChanged: sectionVerrouillee
+                          ? null
+                          : (v) => setDialogState(() {
+                        cibleSection = v;
+                        cibleClasse = null;
+                      }),
+                    ),
+                    const SizedBox(height: 4),
+                    DropdownButton<String>(
+                      isExpanded: true,
+                      value: cibleClasse,
+                      hint: Text(cibleSection == null
+                          ? "Choisissez d'abord une section"
+                          : "Toute la section"),
+                      items: [
+                        if (!classeVerrouillee)
+                          const DropdownMenuItem<String>(
+                              value: null, child: Text("Toute la section")),
+                        ...classesDispo.map((c) =>
+                            DropdownMenuItem(value: c, child: Text(c))),
+                      ],
+                      onChanged: (cibleSection == null || classeVerrouillee)
+                          ? null
+                          : (v) => setDialogState(() => cibleClasse = v),
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(20),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "Cible : $cibleLabel",
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.indigo),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            "Montant du frais : "
+                                "${montantTotalFrais.toStringAsFixed(0)} FC  |  "
+                                "Somme des tranches : "
+                                "${sommeTranches.toStringAsFixed(0)} FC",
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    messageCoherence(),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          "Tranches",
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.indigo),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => ajouterOuModifier(),
+                          icon: const Icon(Icons.add, size: 16),
+                          label: const Text("Ajouter une tranche",
+                              style: TextStyle(fontSize: 12)),
+                        ),
+                      ],
+                    ),
+                    if (tranches.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 6),
+                        child: Text(
+                          "Aucune tranche ajoutée pour cette cible.",
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      )
+                    else
+                      ...List.generate(tranches.length, (i) {
+                        final t = tranches[i];
+                        final int nbPaiements =
+                        fs.compterPaiementsPourTranche(t.id);
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 3),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      "${i + 1}. ${t.nom}",
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w500),
+                                    ),
+                                    Text(
+                                      "${t.montant.toStringAsFixed(0)} FC"
+                                          "${nbPaiements > 0 ? '  •  $nbPaiements paiement(s)' : ''}",
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.indigo,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.edit,
+                                    size: 18, color: Colors.indigo),
+                                tooltip: "Modifier",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 32, minHeight: 32),
+                                onPressed: () =>
+                                    ajouterOuModifier(existante: t),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline,
+                                    size: 18, color: Colors.red),
+                                tooltip: "Supprimer",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 32, minHeight: 32),
+                                onPressed: () => supprimer(t),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                    const SizedBox(height: 12),
+                    const Text(
+                      "Règle : pour un élève, on applique les tranches de la "
+                          "cible la plus précise (classe, puis section, puis "
+                          "toute l'école). Il paie les tranches dans l'ordre. "
+                          "Le reçu et le rapport affichent la tranche payée.",
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("Fermer"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // Fenêtre d'ajout / modification d'une tranche. Retourne true si une
+  // tranche a bien été enregistrée.
+  Future<bool?> _showEditTrancheDialog(
+      BuildContext ctx, {
+        required AutreFrais frais,
+        required String cle,
+        AutreFraisTranche? tranche,
+        required String nomSuggere,
+        required double montantSuggere,
+      }) {
+    final nomCtrl =
+    TextEditingController(text: tranche != null ? tranche.nom : nomSuggere);
+    final montantCtrl = TextEditingController(
+      text: tranche != null
+          ? tranche.montant.toStringAsFixed(0)
+          : (montantSuggere > 0 ? montantSuggere.toStringAsFixed(0) : ''),
+    );
+    final bool isEditing = tranche != null;
+
+    return showDialog<bool>(
+        context: ctx,
+        builder: (ctx2) => AlertDialog(
+            title: Text(isEditing ? "Modifier la tranche" : "Nouvelle tranche"),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nomCtrl,
+                  decoration: const InputDecoration(
+                    labelText: "Nom de la tranche",
+                    hintText: "Ex: Première tranche",
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: montantCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: "Montant de la tranche (FC)",
+                    hintText: "Ex: 5000",
+                  ),
+                ),
+              ],
+            ),
+            actions: [           TextButton(
+              onPressed: () => Navigator.pop(ctx2, false),
+              child: const Text("Annuler"),
+            ),
+              ElevatedButton(
+                onPressed: () async {
+                  final nom = nomCtrl.text.trim();
+                  final montant = double.tryParse(
+                      montantCtrl.text.trim().replaceAll(' ', '').replaceAll(',', '.'));
+                  if (nom.isEmpty || montant == null || montant <= 0) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                            "Veuillez entrer un nom et un montant valides"),
+                      ),
+                    );
+                    return;
+                  }
+                  if (isEditing) {
+                    await widget.fraisScolaires.updateTranchePourAutreFrais(
+                      autreFraisId: frais.id,
+                      cle: cle,
+                      trancheId: tranche!.id,
+                      nom: nom,
+                      montant: montant,
+                    );
+                  } else {
+                    await widget.fraisScolaires.addTranchePourAutreFrais(
+                      autreFraisId: frais.id,
+                      cle: cle,
+                      nom: nom,
+                      montant: montant,
+                    );
+                  }
+                  if (ctx2.mounted) Navigator.pop(ctx2, true);
+                },
+                child: const Text("Enregistrer"),
+              ),
+            ],
+        ),
     );
   }
 
@@ -389,7 +924,9 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
   // Sans filtre, elle couvre TOUJOURS l'argent collecté pour ce frais dans
   // TOUTE l'école (comportement historique inchangé) — un seul frais, une
   // seule liste d'administrations, une seule répartition globale, quel que
-  // soit le nombre de montants différents définis par section/classe.
+  // soit le nombre de montants différents définis par section/classe (et
+  // quel que soit le nombre de tranches : le total collecté additionne tous
+  // les paiements de tranches).
   //
   // ⚠️⚠️⚠️ SÉPARATION TOTALE ET DÉFINITIVE AVEC LES FRAIS PRINCIPAUX ⚠️⚠️⚠️
   // Tout ce bloc utilise EXCLUSIVEMENT les méthodes dédiées côté
@@ -727,8 +1264,15 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           // demande de la direction) ; le bouton des totaux reste.
           IconButton(
             icon: const Icon(Icons.bar_chart),
-            tooltip: "Totaux par classe et par option",
+            tooltip: "Totaux par classe, option et tranche",
             onPressed: selectedFrais == null ? null : _showTotalsDialog,
+          ),
+          // ⚡ NOUVEAU — configuration des tranches du frais sélectionné
+          // (par section ou par classe), directement depuis cet écran.
+          IconButton(
+            icon: const Icon(Icons.splitscreen),
+            tooltip: "Tranches du frais",
+            onPressed: selectedFrais == null ? null : _showTranchesDialog,
           ),
           // ⚡ NOUVEAU — accès rapide, depuis l'AppBar, à la gestion des
           // administrations (ajout/modification/suppression) et à la
@@ -760,11 +1304,14 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                   items: fraisList.map((f) {
                     final hasExceptions = f.montantsParSection.isNotEmpty ||
                         f.montantsParClasse.isNotEmpty;
+                    final hasTranches = f.tranchesParCle.values
+                        .any((liste) => liste.isNotEmpty);
                     return DropdownMenuItem(
                       value: f,
                       child: Text(
                           "${f.nom} — ${f.montant.toStringAsFixed(0)} FC (${_scopeLabel(f)})"
-                              "${hasExceptions ? ' • montants variables' : ''}"),
+                              "${hasExceptions ? ' • montants variables' : ''}"
+                              "${hasTranches ? ' • par tranches' : ''}"),
                     );
                   }).toList(),
                   onChanged: (value) {
@@ -837,11 +1384,11 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
               ],
             ),
           ),
-          // ⚡ NOUVEAU — dès qu'un frais est sélectionné, le bouton de
-          // répartition par administration apparaît EN HAUT de la liste
-          // des élèves, juste à côté du bouton "Voir les totaux" déjà
-          // existant (regroupés dans un Wrap pour rester lisibles même
-          // sur un écran étroit).
+          // ⚡ NOUVEAU — dès qu'un frais est sélectionné, les boutons
+          // "Tranches" et de répartition par administration apparaissent
+          // EN HAUT de la liste des élèves, juste à côté du bouton "Voir
+          // les totaux" déjà existant (regroupés dans un Wrap pour rester
+          // lisibles même sur un écran étroit).
           if (selectedFrais != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -865,6 +1412,12 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                             style: TextStyle(fontSize: 12)),
                       ),
                       TextButton.icon(
+                        onPressed: _showTranchesDialog,
+                        icon: const Icon(Icons.splitscreen, size: 18),
+                        label: const Text("Tranches",
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                      TextButton.icon(
                         onPressed: _showAdminRepartitionDialog,
                         icon: const Icon(Icons.account_balance, size: 18),
                         label: const Text(
@@ -882,18 +1435,45 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                 itemCount: _eligibleFiltered.length,
                 itemBuilder: (context, index) {
                   final eleve = _eligibleFiltered[index];
-                  final dejaPaye = widget.fraisScolaires
-                      .hasPaidAutreFrais(eleve, selectedFrais!);
+                  final fs = widget.fraisScolaires;
+                  final dejaPaye =
+                  fs.hasPaidAutreFrais(eleve, selectedFrais!);
+                  final partiel = fs.hasPaidPartiellementAutreFrais(
+                      eleve, selectedFrais!);
                   final isSelected = selectedStudentIds.contains(eleve.id);
                   // ⚡ NOUVEAU — montant réellement dû par CET élève
                   // (dépend de ses éventuelles exceptions par
                   // section/classe pour ce frais).
-                  final double montantEleve = widget.fraisScolaires
+                  final double montantEleve = fs
                       .getMontantAutreFraisPourEleve(selectedFrais!, eleve);
+                  // ⚡ NOUVEAU — informations de tranches pour CET élève.
+                  final tranchesEleve =
+                  fs.getTranchesPourEleve(selectedFrais!, eleve);
+                  final prochaine = fs.getProchaineTrancheAutreFrais(
+                      selectedFrais!, eleve);
+                  final int nbPayees = fs.getNombreTranchesPayeesAutreFrais(
+                      eleve, selectedFrais!);
+                  final double montantProchain = fs
+                      .getMontantProchainPaiementAutreFrais(
+                      selectedFrais!, eleve);
+
+                  String ligneTranches = '';
+                  if (tranchesEleve.isNotEmpty) {
+                    ligneTranches =
+                    'Tranches : $nbPayees/${tranchesEleve.length} payée(s)';
+                    if (prochaine != null) {
+                      ligneTranches +=
+                      ' — prochaine : ${prochaine.nom} '
+                          '(${montantProchain.toStringAsFixed(0)} FC)';
+                    }
+                  }
+
                   return Card(
                     margin:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                    color: dejaPaye ? Colors.green.withAlpha(20) : null,
+                    color: dejaPaye
+                        ? Colors.green.withAlpha(20)
+                        : (partiel ? Colors.orange.withAlpha(25) : null),
                     child: ListTile(
                       leading: dejaPaye
                           ? const Icon(Icons.check_circle,
@@ -904,13 +1484,31 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                       ),
                       title: Text(
                           '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'),
-                      subtitle: Text(
-                        'ID: ${eleve.id} | Classe: ${eleve.classe} (${eleve.section}) | '
-                            'Montant: ${montantEleve.toStringAsFixed(0)} FC',
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'ID: ${eleve.id} | Classe: ${eleve.classe} (${eleve.section}) | '
+                                'Montant: ${montantEleve.toStringAsFixed(0)} FC',
+                          ),
+                          if (ligneTranches.isNotEmpty)
+                            Text(
+                              ligneTranches,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: dejaPaye
+                                    ? Colors.green
+                                    : Colors.indigo,
+                              ),
+                            ),
+                        ],
                       ),
                       // ⚡ CORRIGÉ — le bouton de réimpression manuelle a
-                      // été retiré ; un élève déjà payé n'affiche plus
-                      // qu'un simple statut "Payé".
+                      // été retiré ; un élève entièrement payé n'affiche
+                      // plus qu'un simple statut "Payé". ⚡ NOUVEAU — un
+                      // élève qui n'a payé qu'une partie des tranches
+                      // garde le bouton de paiement (prochaine tranche).
                       trailing: dejaPaye
                           ? const Text(
                         "Payé",
@@ -921,6 +1519,9 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                           : IconButton(
                         icon: const Icon(Icons.payment,
                             color: Colors.indigo),
+                        tooltip: prochaine != null
+                            ? "Payer : ${prochaine.nom}"
+                            : "Payer",
                         onPressed: _processing
                             ? null
                             : () => _confirmPaiementUnique(eleve),
@@ -979,7 +1580,9 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
             SizedBox(height: 8),
             Text(
               "Allez dans Paramètres > \"Autres Frais de Paiement\" pour en "
-                  "ajouter (ex: Frais de l'État, Frais d'Aide...).",
+                  "ajouter (ex: Frais de l'État, Frais d'Aide...). Les "
+                  "tranches se configurent ensuite directement ici, avec "
+                  "le bouton \"Tranches\".",
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),

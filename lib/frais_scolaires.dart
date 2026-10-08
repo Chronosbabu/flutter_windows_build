@@ -233,6 +233,37 @@ class AutreFraisGroupe {
   int get nombreDeFraisFusionnes => ids.length;
 }
 
+// ============================================================================
+// ⚡ NOUVEAU — TRANCHE D'UN "AUTRE FRAIS" (ex : Première tranche du Frais de
+// l'État). Une tranche a un nom et un montant. Les tranches d'un frais sont
+// stockées dans AutreFrais.tranchesParCle, par cible (toute l'école, une
+// section ou une classe).
+// ============================================================================
+class AutreFraisTranche {
+  String id;
+  String nom;
+  double montant;
+
+  AutreFraisTranche({
+    required this.id,
+    required this.nom,
+    required this.montant,
+  });
+
+  factory AutreFraisTranche.fromJson(Map<String, dynamic> json) =>
+      AutreFraisTranche(
+        id: json['id'] as String? ?? '',
+        nom: json['nom'] as String? ?? '',
+        montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+      );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'nom': nom,
+    'montant': montant,
+  };
+}
+
 class AutreFrais {
   String id;
   String nom;
@@ -243,6 +274,13 @@ class AutreFrais {
   DateTime dateCreation;
   Map<String, double> montantsParSection;
   Map<String, double> montantsParClasse;
+  // ⚡ NOUVEAU — tranches par cible :
+  //   'ALL'                  -> toute l'école
+  //   'S:<section>'          -> une section
+  //   'C:<section>|<classe>' -> une classe (numéro de classe, sans sous-classe)
+  // Si aucune tranche n'est définie pour un élève, le frais se paie en une
+  // seule fois comme avant.
+  Map<String, List<AutreFraisTranche>> tranchesParCle;
 
   AutreFrais({
     required this.id,
@@ -254,9 +292,11 @@ class AutreFrais {
     DateTime? dateCreation,
     Map<String, double>? montantsParSection,
     Map<String, double>? montantsParClasse,
+    Map<String, List<AutreFraisTranche>>? tranchesParCle,
   })  : dateCreation = dateCreation ?? DateTime.now(),
         montantsParSection = montantsParSection ?? {},
-        montantsParClasse = montantsParClasse ?? {};
+        montantsParClasse = montantsParClasse ?? {},
+        tranchesParCle = tranchesParCle ?? {};
 
   factory AutreFrais.fromJson(Map<String, dynamic> json) => AutreFrais(
     id: json['id'] as String? ?? '',
@@ -278,6 +318,17 @@ class AutreFrais {
           (key, value) => MapEntry(key, (value as num).toDouble()),
     ) ??
         {},
+    tranchesParCle:
+    (json['tranchesParCle'] as Map<String, dynamic>?)?.map(
+          (key, value) => MapEntry(
+        key,
+        (value as List<dynamic>)
+            .map((e) =>
+            AutreFraisTranche.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      ),
+    ) ??
+        {},
   );
 
   Map<String, dynamic> toJson() => {
@@ -290,6 +341,9 @@ class AutreFrais {
     'dateCreation': dateCreation.toIso8601String(),
     'montantsParSection': montantsParSection,
     'montantsParClasse': montantsParClasse,
+    'tranchesParCle': tranchesParCle.map(
+          (key, value) => MapEntry(key, value.map((t) => t.toJson()).toList()),
+    ),
   };
 }
 
@@ -301,6 +355,12 @@ class AutreFraisPaiement {
   double montant;
   DateTime date;
   String enregistrePar;
+  // ⚡ NOUVEAU — informations de tranche (vides si le frais a été payé en une
+  // seule fois, sans tranche).
+  String trancheId;
+  String trancheNom;
+  int trancheNumero;
+  int trancheTotal;
 
   AutreFraisPaiement({
     required this.id,
@@ -310,6 +370,10 @@ class AutreFraisPaiement {
     required this.montant,
     required this.date,
     this.enregistrePar = 'Direction',
+    this.trancheId = '',
+    this.trancheNom = '',
+    this.trancheNumero = 0,
+    this.trancheTotal = 0,
   });
 
   factory AutreFraisPaiement.fromJson(Map<String, dynamic> json) =>
@@ -322,6 +386,10 @@ class AutreFraisPaiement {
         date: DateTime.tryParse(json['date'] as String? ?? '') ??
             DateTime.now(),
         enregistrePar: json['enregistrePar'] as String? ?? 'Direction',
+        trancheId: json['trancheId'] as String? ?? '',
+        trancheNom: json['trancheNom'] as String? ?? '',
+        trancheNumero: (json['trancheNumero'] as num?)?.toInt() ?? 0,
+        trancheTotal: (json['trancheTotal'] as num?)?.toInt() ?? 0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -332,12 +400,26 @@ class AutreFraisPaiement {
     'montant': montant,
     'date': date.toIso8601String(),
     'enregistrePar': enregistrePar,
+    'trancheId': trancheId,
+    'trancheNom': trancheNom,
+    'trancheNumero': trancheNumero,
+    'trancheTotal': trancheTotal,
   };
 
   String get dateFormatee {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${two(date.day)}/${two(date.month)}/${date.year} à '
         '${two(date.hour)}:${two(date.minute)}';
+  }
+
+  // ⚡ NOUVEAU — libellé court de la tranche, ex : "Deuxième tranche (2/3)".
+  // Vide si le paiement n'est pas lié à une tranche.
+  String get trancheLibelle {
+    if (trancheNom.trim().isEmpty) return '';
+    if (trancheNumero > 0 && trancheTotal > 0) {
+      return '${trancheNom.trim()} ($trancheNumero/$trancheTotal)';
+    }
+    return trancheNom.trim();
   }
 }
 
@@ -1218,17 +1300,38 @@ class FraisScolaires {
     return ok;
   }
 
+  // ==========================================================================
+  // ⚡ MODIFIÉ — REÇU D'UN "AUTRE FRAIS" AVEC PRISE EN COMPTE DES TRANCHES
+  // ==========================================================================
+  // Si le paiement concerne une tranche, le titre imprimé sur le reçu devient
+  // par exemple "Frais de l'État - Deuxième tranche (2/3)" et le montant
+  // imprimé est celui de la tranche payée. La clé anti-doublon contient
+  // aussi l'id de la tranche : chaque tranche a son propre reçu, et un reçu
+  // déjà imprimé n'est jamais réimprimé automatiquement.
+  // Sans paiement de tranche (frais sans tranche), le comportement est
+  // strictement identique à avant.
+  // ==========================================================================
   Future<bool> printOrQueueAutreFraisReceipt({
     required Eleve eleve,
     required AutreFrais frais,
+    AutreFraisPaiement? paiement,
   }) async {
-    final key = 'autre_frais|${eleve.id}|${frais.id}';
+    final bool avecTranche =
+        paiement != null && paiement.trancheId.trim().isNotEmpty;
+    final key = avecTranche
+        ? 'autre_frais|${eleve.id}|${frais.id}|${paiement.trancheId}'
+        : 'autre_frais|${eleve.id}|${frais.id}';
     if (isReceiptPrinted(key)) return false;
 
-    final double montant = getMontantAutreFraisPourEleve(frais, eleve);
+    final double montant =
+        paiement?.montant ?? getMontantAutreFraisPourEleve(frais, eleve);
+
+    final String titre = avecTranche
+        ? '${frais.nom} - ${paiement.trancheLibelle}'
+        : frais.nom;
 
     final data = <String, dynamic>{
-      'titreFrais': frais.nom,
+      'titreFrais': titre,
       'studentName': '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
       'classe': eleve.classe,
       'section': eleve.section,
@@ -1660,12 +1763,18 @@ class FraisScolaires {
         }
       }
       if (eleve != null && frais != null) {
-        await payAutreFrais(
-          frais: frais,
-          eleve: eleve,
-          enregistrePar: (p['enregistrePar'] ?? 'Agent').toString(),
-        );
-        count++;
+        // ⚡ NOUVEAU — si le frais fonctionne par tranches, le paiement en
+        // attente règle la prochaine tranche non payée ; si toutes les
+        // tranches sont déjà payées, ce paiement en attente est ignoré
+        // (aucune erreur, aucun doublon).
+        try {
+          await payAutreFrais(
+            frais: frais,
+            eleve: eleve,
+            enregistrePar: (p['enregistrePar'] ?? 'Agent').toString(),
+          );
+          count++;
+        } catch (_) {}
       }
     }
     localPendingAutresFraisPayments.removeWhere((p) => ids.contains(p['id']));
@@ -1792,6 +1901,16 @@ class FraisScolaires {
         final montant = frais.montantsParClasse.remove(oldKey)!;
         frais.montantsParClasse[newKey] = montant;
       }
+      // ⚡ NOUVEAU — les tranches définies pour cette classe suivent la
+      // classe quand elle est renommée.
+      final String oldTrancheKey = 'C:$oldKey';
+      final String newTrancheKey = 'C:$newKey';
+      if (frais.tranchesParCle.containsKey(oldTrancheKey)) {
+        final tranches = frais.tranchesParCle.remove(oldTrancheKey)!;
+        if (!frais.tranchesParCle.containsKey(newTrancheKey)) {
+          frais.tranchesParCle[newTrancheKey] = tranches;
+        }
+      }
     }
 
     if (lastSelectedClassFilter == oldNumero) {
@@ -1850,6 +1969,9 @@ class FraisScolaires {
         frais.classe = null;
       }
       frais.montantsParClasse.remove(key);
+      // ⚡ NOUVEAU — les tranches propres à cette classe disparaissent avec
+      // elle (les paiements déjà enregistrés restent intacts).
+      frais.tranchesParCle.remove('C:$key');
     }
 
     if (lastSelectedClassFilter == numero) {
@@ -3099,26 +3221,299 @@ class FraisScolaires {
     return frais.montant;
   }
 
-  bool hasPaidAutreFrais(Eleve eleve, AutreFrais frais, [String? year]) {
-    final y = year ?? currentYear;
-    return (autresFraisPaiementsByYear[y] ?? []).any(
-            (p) => p.autreFraisId == frais.id && p.eleveId == eleve.id);
+  // ==========================================================================
+  // ⚡ NOUVEAU — TRANCHES DES "AUTRES FRAIS"
+  // ==========================================================================
+  // Les tranches se configurent directement depuis l'écran de paiement des
+  // Autres Frais (plus besoin des Paramètres). Une tranche est rattachée à
+  // une CIBLE :
+  //   - toute l'école        -> clé 'ALL'
+  //   - une section          -> clé 'S:<section>'
+  //   - une classe           -> clé 'C:<section>|<classe>'
+  //
+  // Pour un élève donné, on retient les tranches de la cible la plus précise
+  // qui en possède : classe, puis section, puis toute l'école. Si aucune
+  // cible n'a de tranche, le frais se paie en une seule fois (comme avant).
+  //
+  // Un élève paie les tranches dans l'ordre (la prochaine non payée). Chaque
+  // paiement garde l'id, le nom, le numéro de la tranche : ils sont repris
+  // sur le reçu et dans le rapport PDF.
+  // ==========================================================================
+  static const String kTrancheCleTous = 'ALL';
+
+  String cleTrancheSection(String section) => 'S:$section';
+
+  String cleTrancheClasse(String section, String classeNumero) =>
+      'C:${_classeKey(section, classeNumero)}';
+
+  String cleTranchePourCible({String? section, String? classeNumero}) {
+    if (section != null && classeNumero != null) {
+      return cleTrancheClasse(section, classeNumero);
+    }
+    if (section != null) return cleTrancheSection(section);
+    return kTrancheCleTous;
   }
 
+  String nomTrancheSuggere(int numero) {
+    switch (numero) {
+      case 1:
+        return 'Première tranche';
+      case 2:
+        return 'Deuxième tranche';
+      case 3:
+        return 'Troisième tranche';
+      default:
+        return '${numero}ème tranche';
+    }
+  }
+
+  AutreFrais? _trouverAutreFrais(String autreFraisId) {
+    for (final f in autresFrais) {
+      if (f.id == autreFraisId) return f;
+    }
+    return null;
+  }
+
+  List<AutreFraisTranche> getTranchesPourCle(AutreFrais frais, String cle) =>
+      List<AutreFraisTranche>.from(
+          frais.tranchesParCle[cle] ?? const <AutreFraisTranche>[]);
+
+  List<AutreFraisTranche> getTranchesPourEleve(AutreFrais frais, Eleve eleve) {
+    final numero = classeNumeroFromFullClasse(eleve.classe);
+    final cles = <String>[
+      cleTrancheClasse(eleve.section, numero),
+      cleTrancheSection(eleve.section),
+      kTrancheCleTous,
+    ];
+    for (final cle in cles) {
+      final liste = frais.tranchesParCle[cle];
+      if (liste != null && liste.isNotEmpty) {
+        return List<AutreFraisTranche>.from(liste);
+      }
+    }
+    return <AutreFraisTranche>[];
+  }
+
+  bool autreFraisAUneTranchePourEleve(AutreFrais frais, Eleve eleve) =>
+      getTranchesPourEleve(frais, eleve).isNotEmpty;
+
+  double getMontantAutreFraisPourCible(
+      AutreFrais frais, {
+        String? section,
+        String? classeNumero,
+      }) {
+    if (section != null && classeNumero != null) {
+      final key = _classeKey(section, classeNumero);
+      if (frais.montantsParClasse.containsKey(key)) {
+        return frais.montantsParClasse[key]!;
+      }
+    }
+    if (section != null && frais.montantsParSection.containsKey(section)) {
+      return frais.montantsParSection[section]!;
+    }
+    return frais.montant;
+  }
+
+  Future<AutreFraisTranche?> addTranchePourAutreFrais({
+    required String autreFraisId,
+    required String cle,
+    required String nom,
+    required double montant,
+  }) async {
+    final frais = _trouverAutreFrais(autreFraisId);
+    if (frais == null) return null;
+    final tranche = AutreFraisTranche(
+      id: 'TR${DateTime.now().microsecondsSinceEpoch}',
+      nom: nom.trim(),
+      montant: montant,
+    );
+    frais.tranchesParCle.putIfAbsent(cle, () => []).add(tranche);
+    await saveData();
+    return tranche;
+  }
+
+  Future<bool> updateTranchePourAutreFrais({
+    required String autreFraisId,
+    required String cle,
+    required String trancheId,
+    required String nom,
+    required double montant,
+  }) async {
+    final frais = _trouverAutreFrais(autreFraisId);
+    if (frais == null) return false;
+    final liste = frais.tranchesParCle[cle];
+    if (liste == null) return false;
+    for (final t in liste) {
+      if (t.id == trancheId) {
+        t.nom = nom.trim();
+        t.montant = montant;
+        await saveData();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  int compterPaiementsPourTranche(String trancheId) {
+    int count = 0;
+    for (final liste in autresFraisPaiementsByYear.values) {
+      for (final p in liste) {
+        if (p.trancheId == trancheId) count++;
+      }
+    }
+    return count;
+  }
+
+  // Une tranche qui a déjà reçu au moins un paiement ne peut pas être
+  // supprimée (retourne false) : sinon les rapports et les reçus déjà émis
+  // ne correspondraient plus à la configuration.
+  Future<bool> deleteTranchePourAutreFrais({
+    required String autreFraisId,
+    required String cle,
+    required String trancheId,
+  }) async {
+    if (compterPaiementsPourTranche(trancheId) > 0) return false;
+    final frais = _trouverAutreFrais(autreFraisId);
+    if (frais == null) return false;
+    final liste = frais.tranchesParCle[cle];
+    if (liste == null) return false;
+    liste.removeWhere((t) => t.id == trancheId);
+    if (liste.isEmpty) frais.tranchesParCle.remove(cle);
+    await saveData();
+    return true;
+  }
+
+  List<AutreFraisPaiement> getPaiementsEleveAutreFrais(
+      Eleve eleve, AutreFrais frais, [String? year]) {
+    final y = year ?? currentYear;
+    return (autresFraisPaiementsByYear[y] ?? [])
+        .where((p) => p.autreFraisId == frais.id && p.eleveId == eleve.id)
+        .toList();
+  }
+
+  bool hasPaidTrancheAutreFrais(
+      Eleve eleve, AutreFrais frais, AutreFraisTranche tranche,
+      [String? year]) {
+    return getPaiementsEleveAutreFrais(eleve, frais, year)
+        .any((p) => p.trancheId == tranche.id);
+  }
+
+  // Retourne la prochaine tranche non payée de l'élève (ou null s'il n'y a
+  // pas de tranche pour lui, ou si toutes sont déjà payées).
+  AutreFraisTranche? getProchaineTrancheAutreFrais(
+      AutreFrais frais, Eleve eleve,
+      [String? year]) {
+    final tranches = getTranchesPourEleve(frais, eleve);
+    if (tranches.isEmpty) return null;
+    final paiements = getPaiementsEleveAutreFrais(eleve, frais, year);
+    for (final t in tranches) {
+      if (!paiements.any((p) => p.trancheId == t.id)) return t;
+    }
+    return null;
+  }
+
+  int getNombreTranchesPayeesAutreFrais(Eleve eleve, AutreFrais frais,
+      [String? year]) {
+    final tranches = getTranchesPourEleve(frais, eleve);
+    if (tranches.isEmpty) return 0;
+    final paiements = getPaiementsEleveAutreFrais(eleve, frais, year);
+    int count = 0;
+    for (final t in tranches) {
+      if (paiements.any((p) => p.trancheId == t.id)) count++;
+    }
+    return count;
+  }
+
+  // Montant réellement à payer maintenant par l'élève (prochaine tranche,
+  // ou montant complet si le frais n'a pas de tranche).
+  double getMontantProchainPaiementAutreFrais(AutreFrais frais, Eleve eleve) {
+    final prochaine = getProchaineTrancheAutreFrais(frais, eleve);
+    if (prochaine != null) return prochaine.montant;
+    return getMontantAutreFraisPourEleve(frais, eleve);
+  }
+
+  // Reste à payer sur ce frais (somme des tranches non payées, ou montant
+  // complet si aucun paiement et pas de tranche, 0 si tout est payé).
+  double getResteAPayerAutreFrais(AutreFrais frais, Eleve eleve) {
+    if (hasPaidAutreFrais(eleve, frais)) return 0;
+    final tranches = getTranchesPourEleve(frais, eleve);
+    if (tranches.isEmpty) return getMontantAutreFraisPourEleve(frais, eleve);
+    final paiements = getPaiementsEleveAutreFrais(eleve, frais);
+    double reste = 0;
+    for (final t in tranches) {
+      if (!paiements.any((p) => p.trancheId == t.id)) reste += t.montant;
+    }
+    return reste;
+  }
+
+  // ⚡ MODIFIÉ — "payé" signifie maintenant "entièrement payé" :
+  //   - sans tranche : au moins un paiement existe (comportement d'avant) ;
+  //   - avec tranches : TOUTES les tranches de l'élève sont payées.
+  // Un ancien paiement sans tranche (fait avant la configuration des
+  // tranches) compte comme "tout payé".
+  bool hasPaidAutreFrais(Eleve eleve, AutreFrais frais, [String? year]) {
+    final paiements = getPaiementsEleveAutreFrais(eleve, frais, year);
+    if (paiements.isEmpty) return false;
+    if (paiements.any((p) => p.trancheId.isEmpty)) return true;
+    final tranches = getTranchesPourEleve(frais, eleve);
+    if (tranches.isEmpty) return true;
+    return tranches.every((t) => paiements.any((p) => p.trancheId == t.id));
+  }
+
+  // Au moins un paiement, mais pas encore tout payé (cas des tranches).
+  bool hasPaidPartiellementAutreFrais(Eleve eleve, AutreFrais frais,
+      [String? year]) {
+    final paiements = getPaiementsEleveAutreFrais(eleve, frais, year);
+    if (paiements.isEmpty) return false;
+    return !hasPaidAutreFrais(eleve, frais, year);
+  }
+
+  // ⚡ MODIFIÉ — paiement d'un autre frais. Si le frais a des tranches pour
+  // cet élève, on paie la tranche demandée (`tranche`) ou, par défaut, la
+  // prochaine tranche non payée. Une exception est levée si toutes les
+  // tranches sont déjà payées ou si la tranche demandée l'est déjà.
   Future<AutreFraisPaiement> payAutreFrais({
     required AutreFrais frais,
     required Eleve eleve,
     String enregistrePar = 'Direction',
+    AutreFraisTranche? tranche,
   }) async {
-    final double montant = getMontantAutreFraisPourEleve(frais, eleve);
+    final tranches = getTranchesPourEleve(frais, eleve);
+    AutreFraisTranche? aPayer = tranche;
+    if (aPayer == null && tranches.isNotEmpty) {
+      aPayer = getProchaineTrancheAutreFrais(frais, eleve);
+      if (aPayer == null) {
+        throw Exception('Toutes les tranches de "${frais.nom}" sont déjà '
+            'payées pour cet élève.');
+      }
+    }
+    if (aPayer != null && hasPaidTrancheAutreFrais(eleve, frais, aPayer)) {
+      throw Exception('La tranche "${aPayer.nom}" est déjà payée pour cet '
+          'élève.');
+    }
+
+    final double montant = aPayer != null
+        ? aPayer.montant
+        : getMontantAutreFraisPourEleve(frais, eleve);
+
+    int numeroTranche = 0;
+    if (aPayer != null) {
+      final idx = tranches.indexWhere((t) => t.id == aPayer!.id);
+      numeroTranche = idx >= 0 ? idx + 1 : 0;
+    }
+
     final paiement = AutreFraisPaiement(
-      id: 'AFP${DateTime.now().millisecondsSinceEpoch}',
+      id: 'AFP${DateTime.now().microsecondsSinceEpoch}',
       autreFraisId: frais.id,
       autreFraisNom: frais.nom,
       eleveId: eleve.id,
       montant: montant,
       date: DateTime.now(),
       enregistrePar: enregistrePar,
+      trancheId: aPayer?.id ?? '',
+      trancheNom: aPayer?.nom ?? '',
+      trancheNumero: numeroTranche,
+      trancheTotal: aPayer != null ? tranches.length : 0,
     );
     autresFraisPaiementsByYear
         .putIfAbsent(currentYear, () => [])
@@ -5445,6 +5840,7 @@ class FraisScolaires {
 
   // ==========================================================================
   // ⚡ MODIFIÉ — RAPPORT "AUTRES FRAIS DE PAIEMENT" AVEC FUSION PAR NOM
+  // ET PRISE EN COMPTE DES TRANCHES
   // ==========================================================================
   // Quand un type de frais est choisi (autreFraisGroupeCle, ou à défaut
   // autreFraisId), TOUS les frais portant le même nom (même s'ils ont été
@@ -5455,20 +5851,24 @@ class FraisScolaires {
   //
   // Organisation du rapport fusionné (pour que le lecteur ne se perde pas) :
   //   1. En-tête + cadre de synthèse (total, nombre de paiements, élèves
-  //      concernés / ayant payé / restant à payer)
+  //      concernés / ayant tout payé / paiement partiel / restant à payer)
   //   2. Récapitulatif PAR SECTION
-  //   3. Récapitulatif PAR CLASSE (montant unitaire, concernés, payés,
-  //      restants, total)
-  //   4. Détail des paiements, rangé par section puis par classe puis par nom
-  //   5. Répartition par administration (inchangée)
-  //   6. Signataires (inchangés)
+  //   3. Récapitulatif PAR CLASSE (montant unitaire, concernés, soldés,
+  //      partiels, restants, total)
+  //   4. ⚡ NOUVEAU — Récapitulatif PAR TRANCHE (si des tranches existent) :
+  //      pour chaque section/classe, combien d'élèves ont payé chaque
+  //      tranche et combien a été collecté
+  //   5. Détail des paiements (avec la colonne « Tranche »), rangé par
+  //      section puis par classe puis par nom
+  //   6. Répartition par administration (inchangée)
+  //   7. Signataires (inchangés)
   //
   // Les filtres Section / Classe restent utilisables : ils limitent tous les
   // tableaux ci-dessus à la section/classe choisie. Les sections/classes où
   // ce frais n'a pas été défini n'apparaissent simplement pas.
   //
   // Sans type choisi ("Tous types confondus"), le comportement d'origine est
-  // conservé tel quel.
+  // conservé (avec la colonne « Tranche » en plus dans le détail).
   // ==========================================================================
   Future<Map<String, dynamic>> generateAutresFraisPdf({
     required String filename,
@@ -5559,6 +5959,9 @@ class FraisScolaires {
       }
     }
 
+    final bool aDesTranches =
+    entrees.any((en) => (en['p'] as AutreFraisPaiement).trancheId.isNotEmpty);
+
     // En mode fusion, la liste détaillée est rangée par section, puis par
     // classe, puis par nom. (Seul l'ORDRE des lignes change : aucun total.)
     if (modeFusion) {
@@ -5585,9 +5988,11 @@ class FraisScolaires {
             : '~';
         c = na.compareTo(nb);
         if (c != 0) return c;
-        return (a['p'] as AutreFraisPaiement)
-            .date
-            .compareTo((b['p'] as AutreFraisPaiement).date);
+        final AutreFraisPaiement pa = a['p'] as AutreFraisPaiement;
+        final AutreFraisPaiement pb = b['p'] as AutreFraisPaiement;
+        c = pa.trancheNumero.compareTo(pb.trancheNumero);
+        if (c != 0) return c;
+        return pa.date.compareTo(pb.date);
       });
     }
 
@@ -5605,6 +6010,7 @@ class FraisScolaires {
         section.isEmpty ? '-' : section,
         classe.isEmpty ? '-' : classe,
         p.autreFraisNom,
+        p.trancheLibelle.isEmpty ? '-' : p.trancheLibelle,
         p.montant.toStringAsFixed(0),
         p.dateFormatee,
       ]);
@@ -5612,10 +6018,11 @@ class FraisScolaires {
 
     final adminDistribution = calculateAutresFraisAdminDistribution(total);
 
-    // ---- 3. Récapitulatifs par section / par classe (mode fusion) ---------
+    // ---- 3. Récapitulatifs par section / par classe / par tranche ---------
     final List<pw.Widget> recapWidgets = [];
     int totalConcernes = 0;
-    int totalPayeurs = 0;
+    int totalSoldes = 0;
+    int totalPartiels = 0;
 
     if (modeFusion) {
       String cleSC(String s, String c) => '$s\u0001$c';
@@ -5624,6 +6031,8 @@ class FraisScolaires {
       final Map<String, String> classeDeCle = {};
       final Map<String, Set<String>> payeursParCle = {};
       final Map<String, Set<String>> concernesParCle = {};
+      final Map<String, Set<String>> soldesParCle = {};
+      final Map<String, Set<String>> partielsParCle = {};
       final Map<String, double> totalParCle = {};
       final Map<String, Set<double>> montantsParCle = {};
 
@@ -5632,6 +6041,8 @@ class FraisScolaires {
         classeDeCle.putIfAbsent(k, () => c);
         payeursParCle.putIfAbsent(k, () => <String>{});
         concernesParCle.putIfAbsent(k, () => <String>{});
+        soldesParCle.putIfAbsent(k, () => <String>{});
+        partielsParCle.putIfAbsent(k, () => <String>{});
         totalParCle.putIfAbsent(k, () => 0.0);
         montantsParCle.putIfAbsent(k, () => <double>{});
       }
@@ -5651,9 +6062,12 @@ class FraisScolaires {
         montantsParCle[k]!.add(p.montant);
       }
 
-      // Élèves concernés (même s'ils n'ont pas encore payé)
+      // Élèves concernés (même s'ils n'ont pas encore payé) + statut de
+      // paiement : soldé (tout payé), partiel (certaines tranches payées),
+      // ou pas encore payé.
       final fraisDuGroupe =
       autresFrais.where((f) => idsGroupe.contains(f.id)).toList();
+      final Set<String> elevesExamines = {};
       for (final e in currentData.eleves) {
         if (sectionFilter != null && e.section != sectionFilter) continue;
         if (classFilter != null && e.classe != classFilter) continue;
@@ -5670,6 +6084,37 @@ class FraisScolaires {
         concernesParCle[k]!.add(e.id);
         montantsParCle[k]!
             .add(getMontantAutreFraisPourEleve(fraisApplicable, e));
+
+        elevesExamines.add(e.id);
+        final paiementsEleve =
+        paiements.where((p) => p.eleveId == e.id).toList();
+        if (paiementsEleve.isNotEmpty) {
+          final tranches = getTranchesPourEleve(fraisApplicable, e);
+          final bool ancienPaiementComplet =
+          paiementsEleve.any((p) => p.trancheId.isEmpty);
+          final Set<String> idsPayes =
+          paiementsEleve.map((p) => p.trancheId).toSet();
+          final bool solde = ancienPaiementComplet ||
+              tranches.isEmpty ||
+              tranches.every((t) => idsPayes.contains(t.id));
+          if (solde) {
+            soldesParCle[k]!.add(e.id);
+          } else {
+            partielsParCle[k]!.add(e.id);
+          }
+        }
+      }
+
+      // Payeurs dont l'élève n'a pas pu être évalué ci-dessus (élève
+      // introuvable ou frais plus applicable) : comptés comme soldés pour
+      // ne pas les perdre du récapitulatif.
+      for (final en in entrees) {
+        final AutreFraisPaiement p = en['p'] as AutreFraisPaiement;
+        if (elevesExamines.contains(p.eleveId)) continue;
+        final String s0 = en['section'] as String;
+        final String c0 = en['classe'] as String;
+        final String k = cleSC(s0.isEmpty ? '-' : s0, c0.isEmpty ? '-' : c0);
+        soldesParCle[k]?.add(p.eleveId);
       }
 
       String montantLabel(Set<double> s) {
@@ -5697,36 +6142,43 @@ class FraisScolaires {
       // --- Tableau par classe ---
       final rowsClasse = <List<String>>[];
       int sumConc = 0;
-      int sumPay = 0;
+      int sumSolde = 0;
+      int sumPartiel = 0;
       double sumTot = 0;
       for (final k in cles) {
         final int conc = concernesParCle[k]!.length;
-        final int pay = payeursParCle[k]!.length;
+        final int sold = soldesParCle[k]!.length;
+        final int part = partielsParCle[k]!.length;
         final double tot = totalParCle[k] ?? 0;
-        if (conc == 0 && pay == 0) continue;
-        final int reste = conc - pay < 0 ? 0 : conc - pay;
+        if (conc == 0 && sold == 0 && part == 0) continue;
+        final int reste = conc - sold - part < 0 ? 0 : conc - sold - part;
         sumConc += conc;
-        sumPay += pay;
+        sumSolde += sold;
+        sumPartiel += part;
         sumTot += tot;
         rowsClasse.add([
           sectionDeCle[k]!,
           classeDeCle[k]!,
           montantLabel(montantsParCle[k]!),
           '$conc',
-          '$pay',
+          '$sold',
+          '$part',
           '$reste',
           formatMontant(tot),
         ]);
       }
       totalConcernes = sumConc;
-      totalPayeurs = sumPay;
-      final int sumReste = sumConc - sumPay < 0 ? 0 : sumConc - sumPay;
+      totalSoldes = sumSolde;
+      totalPartiels = sumPartiel;
+      final int sumReste =
+      sumConc - sumSolde - sumPartiel < 0 ? 0 : sumConc - sumSolde - sumPartiel;
       rowsClasse.add([
         'TOTAL',
         '',
         '',
         '$sumConc',
-        '$sumPay',
+        '$sumSolde',
+        '$sumPartiel',
         '$sumReste',
         formatMontant(sumTot),
       ]);
@@ -5740,23 +6192,27 @@ class FraisScolaires {
       final rowsSection = <List<String>>[];
       for (final s in sectionsVues) {
         int conc = 0;
-        int pay = 0;
+        int sold = 0;
+        int part = 0;
         double tot = 0;
         final Set<double> montantsSection = {};
         for (final k in cles) {
           if (sectionDeCle[k] != s) continue;
           conc += concernesParCle[k]!.length;
-          pay += payeursParCle[k]!.length;
+          sold += soldesParCle[k]!.length;
+          part += partielsParCle[k]!.length;
           tot += totalParCle[k] ?? 0;
           montantsSection.addAll(montantsParCle[k]!);
         }
-        if (conc == 0 && pay == 0) continue;
+        if (conc == 0 && sold == 0 && part == 0) continue;
+        final int reste = conc - sold - part < 0 ? 0 : conc - sold - part;
         rowsSection.add([
           s,
           montantLabel(montantsSection),
           '$conc',
-          '$pay',
-          '${conc - pay < 0 ? 0 : conc - pay}',
+          '$sold',
+          '$part',
+          '$reste',
           formatMontant(tot),
         ]);
       }
@@ -5764,7 +6220,8 @@ class FraisScolaires {
         'TOTAL',
         '',
         '$sumConc',
-        '$sumPay',
+        '$sumSolde',
+        '$sumPartiel',
         '$sumReste',
         formatMontant(sumTot),
       ]);
@@ -5777,7 +6234,10 @@ class FraisScolaires {
         pw.SizedBox(height: 4),
         pw.Text(
           "Les montants peuvent différer d'une section à l'autre : ils sont "
-              "rassemblés ici sous un seul et même type de frais.",
+              "rassemblés ici sous un seul et même type de frais. "
+              "« Ont tout payé » = toutes les tranches payées (ou paiement "
+              "unique) ; « Paiement partiel » = au moins une tranche payée "
+              "mais pas toutes.",
           style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
         ),
         pw.SizedBox(height: 8),
@@ -5786,12 +6246,14 @@ class FraisScolaires {
             'Section',
             'Montant unitaire (FC)',
             'Élèves concernés',
-            'Ont payé',
+            'Ont tout payé',
+            'Paiement partiel',
             'Pas encore payé',
             'Total collecté (FC)',
           ],
           data: rowsSection,
-          columnWidths: _buildColumnWidths([2.2, 1.6, 1.2, 1.0, 1.3, 1.6]),
+          columnWidths:
+          _buildColumnWidths([2.2, 1.6, 1.2, 1.0, 1.1, 1.3, 1.6]),
           headerStyle: pw.TextStyle(
             fontSize: 9,
             fontWeight: pw.FontWeight.bold,
@@ -5803,7 +6265,7 @@ class FraisScolaires {
           cellAlignment: pw.Alignment.center,
           cellAlignments: {
             0: pw.Alignment.centerLeft,
-            5: pw.Alignment.centerRight,
+            6: pw.Alignment.centerRight,
           },
           cellPadding:
           const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
@@ -5817,8 +6279,9 @@ class FraisScolaires {
         pw.SizedBox(height: 4),
         pw.Text(
           "Pour chaque classe : le montant à payer, le nombre d'élèves "
-              "concernés, ceux qui ont déjà payé, ceux qui n'ont pas encore "
-              "payé, et le total collecté.",
+              "concernés, ceux qui ont tout payé, ceux qui n'ont payé qu'une "
+              "partie (tranches), ceux qui n'ont pas encore payé, et le "
+              "total collecté.",
           style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
         ),
         pw.SizedBox(height: 8),
@@ -5828,13 +6291,14 @@ class FraisScolaires {
             'Classe',
             'Montant unitaire (FC)',
             'Élèves concernés',
-            'Ont payé',
+            'Ont tout payé',
+            'Paiement partiel',
             'Pas encore payé',
             'Total collecté (FC)',
           ],
           data: rowsClasse,
           columnWidths:
-          _buildColumnWidths([1.8, 1.4, 1.6, 1.2, 1.0, 1.3, 1.6]),
+          _buildColumnWidths([1.8, 1.4, 1.6, 1.2, 1.0, 1.1, 1.3, 1.6]),
           headerStyle: pw.TextStyle(
             fontSize: 9,
             fontWeight: pw.FontWeight.bold,
@@ -5847,7 +6311,7 @@ class FraisScolaires {
           cellAlignments: {
             0: pw.Alignment.centerLeft,
             1: pw.Alignment.centerLeft,
-            6: pw.Alignment.centerRight,
+            7: pw.Alignment.centerRight,
           },
           cellPadding:
           const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
@@ -5855,6 +6319,123 @@ class FraisScolaires {
         ),
         pw.SizedBox(height: 24),
       ]);
+
+      // --- Tableau par tranche (uniquement si des paiements de tranches) --
+      if (aDesTranches) {
+        final Map<String, Map<String, dynamic>> parTranche = {};
+        for (final en in entrees) {
+          final AutreFraisPaiement p = en['p'] as AutreFraisPaiement;
+          if (p.trancheId.isEmpty) continue;
+          final String s0 = en['section'] as String;
+          final String c0 = en['classe'] as String;
+          final String s = s0.isEmpty ? '-' : s0;
+          final String c = c0.isEmpty ? '-' : c0;
+          final String k = '${cleSC(s, c)}\u0002${p.trancheNumero}\u0002'
+              '${p.trancheNom}';
+          final d = parTranche.putIfAbsent(k, () => {
+            'section': s,
+            'classe': c,
+            'numero': p.trancheNumero,
+            'nom': p.trancheLibelle,
+            'montants': <double>{},
+            'eleves': <String>{},
+            'total': 0.0,
+          });
+          (d['montants'] as Set<double>).add(p.montant);
+          (d['eleves'] as Set<String>).add(p.eleveId);
+          d['total'] = (d['total'] as double) + p.montant;
+        }
+
+        final listeTr = parTranche.values.toList();
+        listeTr.sort((a, b) {
+          final String sa = a['section'] as String;
+          final String sb = b['section'] as String;
+          final String ca = a['classe'] as String;
+          final String cb = b['classe'] as String;
+          int c = indexSectionPourTri(sa).compareTo(indexSectionPourTri(sb));
+          if (c != 0) return c;
+          c = sa.toLowerCase().compareTo(sb.toLowerCase());
+          if (c != 0) return c;
+          c = indexClassePourTri(sa, ca).compareTo(indexClassePourTri(sb, cb));
+          if (c != 0) return c;
+          c = ca.toLowerCase().compareTo(cb.toLowerCase());
+          if (c != 0) return c;
+          return (a['numero'] as int).compareTo(b['numero'] as int);
+        });
+
+        final rowsTr = <List<String>>[];
+        double sumTrTotal = 0;
+        int sumTrPaiements = 0;
+        for (final d in listeTr) {
+          final int nb = (d['eleves'] as Set<String>).length;
+          sumTrPaiements += nb;
+          sumTrTotal += d['total'] as double;
+          rowsTr.add([
+            d['section'] as String,
+            d['classe'] as String,
+            d['nom'] as String,
+            montantLabel(d['montants'] as Set<double>),
+            '$nb',
+            formatMontant(d['total'] as double),
+          ]);
+        }
+        rowsTr.add([
+          'TOTAL',
+          '',
+          '',
+          '',
+          '$sumTrPaiements',
+          formatMontant(sumTrTotal),
+        ]);
+
+        recapWidgets.addAll([
+          pw.Text(
+            "3. RÉCAPITULATIF PAR TRANCHE",
+            style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Text(
+            "Pour chaque section et classe : combien d'élèves ont payé "
+                "chaque tranche, le montant de la tranche et le total "
+                "collecté.",
+            style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+          ),
+          pw.SizedBox(height: 8),
+          pw.TableHelper.fromTextArray(
+            headers: const [
+              'Section',
+              'Classe',
+              'Tranche',
+              'Montant de la tranche (FC)',
+              'Élèves ayant payé',
+              'Total collecté (FC)',
+            ],
+            data: rowsTr,
+            columnWidths: _buildColumnWidths([1.8, 1.4, 2.2, 1.6, 1.2, 1.6]),
+            headerStyle: pw.TextStyle(
+              fontSize: 9,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.white,
+            ),
+            headerDecoration:
+            const pw.BoxDecoration(color: PdfColors.indigo700),
+            headerAlignment: pw.Alignment.center,
+            cellStyle: const pw.TextStyle(fontSize: 9),
+            cellAlignment: pw.Alignment.center,
+            cellAlignments: {
+              0: pw.Alignment.centerLeft,
+              1: pw.Alignment.centerLeft,
+              2: pw.Alignment.centerLeft,
+              5: pw.Alignment.centerRight,
+            },
+            cellPadding:
+            const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+            oddRowDecoration:
+            const pw.BoxDecoration(color: PdfColors.indigo50),
+          ),
+          pw.SizedBox(height: 24),
+        ]);
+      }
     }
 
     // ---- 4. Titre ---------------------------------------------------------
@@ -5871,16 +6452,17 @@ class FraisScolaires {
     if (classFilter != null) title += " - $classFilter";
 
     final headers = [
-      'ID', 'Nom Complet', 'Section', 'Classe', 'Type de Frais',
+      'ID', 'Nom Complet', 'Section', 'Classe', 'Type de Frais', 'Tranche',
       'Montant (FC)', 'Date de Paiement',
     ];
 
     final columnWidths =
-    _buildColumnWidths([0.6, 2.1, 1.0, 1.1, 1.5, 1.0, 1.3]);
+    _buildColumnWidths([0.6, 2.0, 1.0, 1.1, 1.4, 1.5, 1.0, 1.3]);
     final double cellFontSize = _tableCellFontSize(headers.length);
     final double headerFontSize = _tableHeaderFontSize(headers.length);
 
     final AutreFraisGroupe? grp = groupe;
+    final String numeroDetail = aDesTranches ? "4" : "3";
 
     final pdf = pw.Document();
     pdf.addPage(
@@ -5920,9 +6502,10 @@ class FraisScolaires {
                   pw.SizedBox(height: 2),
                   pw.Text(
                     "Élèves concernés : $totalConcernes  |  "
-                        "Ont payé : $totalPayeurs  |  "
+                        "Ont tout payé : $totalSoldes  |  "
+                        "Paiement partiel : $totalPartiels  |  "
                         "Pas encore payé : "
-                        "${totalConcernes - totalPayeurs < 0 ? 0 : totalConcernes - totalPayeurs}",
+                        "${totalConcernes - totalSoldes - totalPartiels < 0 ? 0 : totalConcernes - totalSoldes - totalPartiels}",
                     style: const pw.TextStyle(fontSize: 11),
                   ),
                 ],
@@ -5949,6 +6532,19 @@ class FraisScolaires {
                     ),
                   ),
                 ],
+                if (aDesTranches) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    "Ce frais est payé par tranches : chaque paiement "
+                        "correspond à une tranche (voir le récapitulatif par "
+                        "tranche et la colonne « Tranche »).",
+                    style: pw.TextStyle(
+                      fontSize: 10,
+                      fontStyle: pw.FontStyle.italic,
+                      color: PdfColors.grey700,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -5961,7 +6557,7 @@ class FraisScolaires {
           ...recapWidgets,
           pw.Text(
             modeFusion
-                ? "3. DÉTAIL DES PAIEMENTS (par section, puis par classe)"
+                ? "$numeroDetail. DÉTAIL DES PAIEMENTS (par section, puis par classe)"
                 : "DÉTAIL DES PAIEMENTS",
             style:
             pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
@@ -6856,6 +7452,19 @@ class FraisScolaires {
       for (var f in serverAutresFrais) {
         if (!existingFraisIds.contains(f.id)) {
           autresFrais.add(f);
+        } else {
+          // ⚡ NOUVEAU — le frais existe déjà localement : on récupère
+          // seulement les tranches du serveur pour les cibles qui n'ont
+          // encore aucune tranche en local (aucun doublon, aucun écrasement).
+          for (final local in autresFrais) {
+            if (local.id != f.id) continue;
+            f.tranchesParCle.forEach((cle, liste) {
+              if (!local.tranchesParCle.containsKey(cle)) {
+                local.tranchesParCle[cle] = liste;
+              }
+            });
+            break;
+          }
         }
       }
     }
