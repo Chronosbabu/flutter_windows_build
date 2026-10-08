@@ -3446,21 +3446,25 @@ class FraisScolaires {
     return reste;
   }
 
-  // ⚡ MODIFIÉ — "payé" signifie maintenant "entièrement payé" :
-  //   - sans tranche : au moins un paiement existe (comportement d'avant) ;
-  //   - avec tranches : TOUTES les tranches de l'élève sont payées.
-  // Un ancien paiement sans tranche (fait avant la configuration des
-  // tranches) compte comme "tout payé".
+  // ⚡ CORRIGÉ — "payé" signifie "entièrement payé" :
+  //   - SANS tranche pour l'élève : au moins un paiement existe (comportement
+  //     d'avant, inchangé) ;
+  //   - AVEC tranches pour l'élève : TOUTES les tranches de l'élève doivent
+  //     être payées. Un ancien paiement unique (fait AVANT la configuration
+  //     des tranches, donc sans trancheId) ne compte plus comme "tout payé" :
+  //     il ne bloque plus l'élève, qui doit payer chaque tranche (première,
+  //     deuxième, troisième…). Cet ancien paiement reste enregistré et
+  //     continue d'être compté dans les totaux de caisse et les rapports.
   bool hasPaidAutreFrais(Eleve eleve, AutreFrais frais, [String? year]) {
     final paiements = getPaiementsEleveAutreFrais(eleve, frais, year);
     if (paiements.isEmpty) return false;
-    if (paiements.any((p) => p.trancheId.isEmpty)) return true;
     final tranches = getTranchesPourEleve(frais, eleve);
     if (tranches.isEmpty) return true;
     return tranches.every((t) => paiements.any((p) => p.trancheId == t.id));
   }
 
-  // Au moins un paiement, mais pas encore tout payé (cas des tranches).
+  // Au moins un paiement (tranche ou ancien paiement unique), mais pas encore
+  // tout payé (cas des tranches).
   bool hasPaidPartiellementAutreFrais(Eleve eleve, AutreFrais frais,
       [String? year]) {
     final paiements = getPaiementsEleveAutreFrais(eleve, frais, year);
@@ -6090,12 +6094,16 @@ class FraisScolaires {
         paiements.where((p) => p.eleveId == e.id).toList();
         if (paiementsEleve.isNotEmpty) {
           final tranches = getTranchesPourEleve(fraisApplicable, e);
-          final bool ancienPaiementComplet =
-          paiementsEleve.any((p) => p.trancheId.isEmpty);
           final Set<String> idsPayes =
           paiementsEleve.map((p) => p.trancheId).toSet();
-          final bool solde = ancienPaiementComplet ||
-              tranches.isEmpty ||
+          // ⚡ CORRIGÉ — même règle que hasPaidAutreFrais :
+          //   - sans tranche pour l'élève : un paiement suffit (soldé) ;
+          //   - avec tranches : TOUTES les tranches doivent être payées.
+          // Un ancien paiement unique (sans tranche) ne compte plus comme
+          // "tout payé" quand des tranches existent pour cet élève : il est
+          // classé en "paiement partiel" tant que les tranches ne sont pas
+          // toutes payées.
+          final bool solde = tranches.isEmpty ||
               tranches.every((t) => idsPayes.contains(t.id));
           if (solde) {
             soldesParCle[k]!.add(e.id);
@@ -6236,8 +6244,8 @@ class FraisScolaires {
           "Les montants peuvent différer d'une section à l'autre : ils sont "
               "rassemblés ici sous un seul et même type de frais. "
               "« Ont tout payé » = toutes les tranches payées (ou paiement "
-              "unique) ; « Paiement partiel » = au moins une tranche payée "
-              "mais pas toutes.",
+              "unique) ; « Paiement partiel » = au moins un paiement mais "
+              "pas toutes les tranches.",
           style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
         ),
         pw.SizedBox(height: 8),
