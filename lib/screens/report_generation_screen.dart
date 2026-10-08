@@ -12,48 +12,13 @@ class ReportGenerationScreen extends StatefulWidget {
 }
 
 class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
-  // ==========================================================================
-  // ⚡ CATÉGORIE DE RAPPORT
-  // "principal" = frais mensuel principal (comportement inchangé, via
-  //               fs.generatePdf).
-  // "autres"    = autres frais de paiement / frais additionnels-éphémères
-  //               (via fs.generateAutresFraisPdf — avec bloc de signatures
-  //               identique au rapport principal).
-  // Les deux catégories restent dans le même écran de génération, comme
-  // demandé, et partagent le même bloc "Signataires".
-  // ==========================================================================
-  String reportCategory = "principal"; // "principal" | "autres"
-
-  // --- Filtres communs aux deux catégories ---
+  String reportCategory = "principal";
   String? selectedSection;
   String? selectedClass;
-
-  // --- Spécifique au rapport "Frais Principal" ---
-  String reportType = "annual"; // daily | monthly | annual
-
-  // ==========================================================================
-  // ⚡ MODIFIÉ — Spécifique au rapport "Autres Frais de Paiement"
-  // On ne choisit plus un frais individuel (par id) mais un TYPE de frais
-  // (clé de groupe = nom normalisé). Tous les frais portant le même nom
-  // (ex : "Frais de l'État" ajouté une fois par classe/section avec des
-  // montants différents) sont ainsi fusionnés EN UN SEUL TYPE, uniquement
-  // pour la génération du rapport. Aucune donnée n'est modifiée.
-  // null = tous les types de frais additionnels confondus.
-  // ==========================================================================
+  String reportType = "annual";
   String? selectedAutreFraisGroupeCle;
-
-  // ==========================================================================
-  // INCLURE (OU NON) LA PARTIE "DÉPENSES" DANS LE PDF.
-  // Ne concerne que le rapport "Frais Principal".
-  // ==========================================================================
   bool includeDepenses = true;
-
-  // ==========================================================================
-  // VILLE POUR LA MENTION "Fait à ..., le ..." DU BLOC DE SIGNATURES.
-  // Pré-remplie avec la dernière ville utilisée (fs.lastReportCity).
-  // ==========================================================================
   late final TextEditingController _cityController;
-
   bool _generating = false;
 
   FraisScolaires get fs => widget.fraisScolaires;
@@ -71,7 +36,6 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     super.dispose();
   }
 
-  // Libellé affiché dans la liste déroulante pour un type de frais fusionné.
   String _libelleGroupe(AutreFraisGroupe g) {
     final String montant = g.montantMin == g.montantMax
         ? "${formatMontant(g.montantMin)} FC"
@@ -82,17 +46,23 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     return "${g.nom} — $montant$fusion";
   }
 
+  String _periodeAutresFrais() {
+    switch (reportType) {
+      case "daily":
+        return "today";
+      case "monthly":
+        return "month";
+      default:
+        return "year";
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final signataires = fs.getSignataires();
-
-    // ⚡ MODIFIÉ — liste des types de frais fusionnés par nom.
     final List<AutreFraisGroupe> groupesAutresFrais =
     fs.getAutresFraisGroupes();
 
-    // Sécurité : si la clé sélectionnée n'existe plus (frais supprimé),
-    // on revient sur "Tous les types confondus" pour éviter une erreur
-    // d'affichage de la liste déroulante.
     if (selectedAutreFraisGroupeCle != null &&
         !groupesAutresFrais
             .any((g) => g.cle == selectedAutreFraisGroupeCle)) {
@@ -107,9 +77,6 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ====================================================================
-          // Choix de la catégorie de rapport.
-          // ====================================================================
           _sectionCard(
             title: "1. Catégorie de rapport",
             child: SegmentedButton<String>(
@@ -129,45 +96,38 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
               onSelectionChanged: (newSelection) {
                 setState(() {
                   reportCategory = newSelection.first;
-                  // On réinitialise la classe sélectionnée pour éviter
-                  // un filtre incohérent en changeant de catégorie.
                   selectedClass = null;
                 });
               },
             ),
           ),
           const SizedBox(height: 16),
-
-          // ====================================================================
-          // Bloc "2." — dépend de la catégorie choisie.
-          // ====================================================================
-          if (reportCategory == "principal")
-            _sectionCard(
-              title: "2. Type de rapport",
-              child: DropdownButtonFormField<String>(
-                value: reportType,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  contentPadding:
-                  EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                ),
-                items: const [
-                  DropdownMenuItem(value: "daily", child: Text("Journalier")),
-                  DropdownMenuItem(
-                      value: "monthly", child: Text("Mensuel")),
-                  DropdownMenuItem(value: "annual", child: Text("Annuel")),
-                ],
-                onChanged: (val) => setState(() => reportType = val!),
+          _sectionCard(
+            title: "2. Type de rapport",
+            subtitle: reportCategory == "principal"
+                ? null
+                : "Journalier : paiements d'aujourd'hui. Mensuel : paiements "
+                "du mois en cours. Annuel : tous les paiements de l'année "
+                "scolaire.",
+            child: DropdownButtonFormField<String>(
+              value: reportType,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                contentPadding:
+                EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               ),
-            )
-          else
-          // ⚡ MODIFIÉ — Sélection du TYPE de frais additionnel. Les frais
-          // portant le même nom sont automatiquement fusionnés en un seul
-          // choix (même s'ils ont des montants différents selon la
-          // section/classe). Le rapport généré rassemble alors tout sous
-          // un seul type de frais, filtrable par section et par classe.
+              items: const [
+                DropdownMenuItem(value: "daily", child: Text("Journalier")),
+                DropdownMenuItem(value: "monthly", child: Text("Mensuel")),
+                DropdownMenuItem(value: "annual", child: Text("Annuel")),
+              ],
+              onChanged: (val) => setState(() => reportType = val!),
+            ),
+          ),
+          const SizedBox(height: 16),
+          if (reportCategory == "autres") ...[
             _sectionCard(
-              title: "2. Type de frais additionnel",
+              title: "3. Type de frais additionnel",
               subtitle: "Choisissez un type de frais (ex: Frais de l'État) "
                   "ou tous les types confondus. Les frais portant le même "
                   "nom sont automatiquement fusionnés en un seul type "
@@ -230,15 +190,11 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
                 ],
               ),
             ),
-          const SizedBox(height: 16),
-
-          // ====================================================================
-          // "2 bis." Inclure ou non les dépenses dans le PDF.
-          // Uniquement pour le rapport "Frais Principal".
-          // ====================================================================
+            const SizedBox(height: 16),
+          ],
           if (reportCategory == "principal") ...[
             _sectionCard(
-              title: "2 bis. Dépenses dans le rapport",
+              title: "3. Dépenses dans le rapport",
               subtitle: includeDepenses
                   ? "La partie \"Dépenses\" (journalières, mensuelles et "
                   "annuelles, avec répartition par rubrique et par "
@@ -261,12 +217,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
             ),
             const SizedBox(height: 16),
           ],
-
-          // ====================================================================
-          // Filtres Section / Classe — communs aux deux catégories.
-          // ====================================================================
           _sectionCard(
-            title: "3. Filtres (optionnel)",
+            title: "4. Filtres (optionnel)",
             subtitle: "Limitez le rapport à une section et/ou une classe, "
                 "ou laissez sur \"Toutes\" pour couvrir toute l'école.",
             child: Column(
@@ -315,12 +267,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
             ),
           ),
           const SizedBox(height: 16),
-
-          // ====================================================================
-          // Ville pour la mention "Fait à ..., le ..." des signatures.
-          // ====================================================================
           _sectionCard(
-            title: "4. Ville (pour la mention \"Fait à ..., le ...\")",
+            title: "5. Ville (pour la mention \"Fait à ..., le ...\")",
             subtitle: "Cette ville apparaîtra juste au-dessus des "
                 "signatures, en bas du rapport (Frais Principal ou "
                 "Autres Frais).",
@@ -338,13 +286,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
             ),
           ),
           const SizedBox(height: 16),
-
-          // ====================================================================
-          // Signataires — partagés entre le rapport "Frais Principal" et
-          // "Autres Frais de Paiement".
-          // ====================================================================
           _sectionCard(
-            title: "5. Signataires (optionnel)",
+            title: "6. Signataires (optionnel)",
             subtitle: "Ces personnes apparaîtront en bas du rapport "
                 "(Frais Principal ou Autres Frais), avec un espace pour signer.",
             child: Column(
@@ -437,10 +380,6 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     );
   }
 
-  // ==========================================================================
-  // Classes à proposer dans le filtre "Classe", limitées à la section
-  // choisie s'il y en a une.
-  // ==========================================================================
   List<String> _classesForCurrentSectionFilter() {
     final classes = fs.currentData.eleves
         .where(
@@ -613,15 +552,6 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     );
   }
 
-  // ==========================================================================
-  // Aiguille vers la bonne méthode de génération PDF selon la catégorie :
-  //   - "principal" -> fs.generatePdf
-  //   - "autres"    -> fs.generateAutresFraisPdf, avec la CLÉ DU GROUPE
-  //     (autreFraisGroupeCle) : tous les frais de même nom sont fusionnés
-  //     en un seul type, filtrables par section et par classe.
-  // La ville saisie est sauvegardée (fs.setLastReportCity) puis transmise
-  // au paramètre `city` ; un champ vide retombe sur "Lubumbashi".
-  // ==========================================================================
   Future<void> _generateReport() async {
     setState(() => _generating = true);
 
@@ -629,10 +559,10 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     _cityController.text.trim().isEmpty ? null : _cityController.text.trim();
     await fs.setLastReportCity(_cityController.text);
 
+    final String dateJour = DateTime.now().toString().split(' ')[0];
     final Map<String, dynamic> result;
     if (reportCategory == "principal") {
-      final filename =
-          "Rapport_${reportType}_${DateTime.now().toString().split(' ')[0]}";
+      final filename = "Rapport_${reportType}_$dateJour";
       result = await fs.generatePdf(
         filename: filename,
         reportType: reportType,
@@ -642,14 +572,14 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
         includeDepenses: includeDepenses,
       );
     } else {
-      final filename =
-          "Rapport_AutresFrais_${DateTime.now().toString().split(' ')[0]}";
+      final filename = "Rapport_AutresFrais_${reportType}_$dateJour";
       result = await fs.generateAutresFraisPdf(
         filename: filename,
         autreFraisGroupeCle: selectedAutreFraisGroupeCle,
         sectionFilter: selectedSection,
         classFilter: selectedClass,
         city: city,
+        periode: _periodeAutresFrais(),
       );
     }
 
