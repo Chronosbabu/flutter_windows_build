@@ -915,6 +915,28 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return null;
   }
 
+  // ⚡ NOUVEAU — Texte affiché directement sur la carte de l'élève :
+  // liste des dates de paiement (sans doublon, de la plus ancienne à la plus
+  // récente, format jj/mm/aaaa). Lecture seule : ne modifie aucune donnée.
+  // Retourne une chaîne vide si l'élève n'a encore aucun paiement.
+  String _datesPaiementsLabel(Eleve eleve) {
+    final Set<String> dates = {};
+    for (final t in eleve.transactions) {
+      final d = t['date']?.toString().trim() ?? '';
+      if (d.isNotEmpty) dates.add(d);
+    }
+    if (dates.isEmpty) return '';
+    final List<String> triees = dates.toList()..sort();
+    final List<String> affichees = triees.map((d) {
+      final p = d.split('-');
+      if (p.length == 3 && p[0].length == 4) {
+        return '${p[2]}/${p[1]}/${p[0]}';
+      }
+      return d;
+    }).toList();
+    return '\n📅 Dates de paiement : ${affichees.join(', ')}';
+  }
+
   String? _premierMoisNonPaye(Eleve eleve) {
     for (final m in widget.fraisScolaires.months) {
       final required =
@@ -1384,6 +1406,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                       'ID: ${eleve.id}\n'
                           'Classe: ${eleve.classe} | Section: ${eleve.section}\n'
                           'Total payé: ${widget.fraisScolaires.getStudentTotalPaid(eleve)} FC'
+                          '${_datesPaiementsLabel(eleve)}'
                           '${eleve.montantMensuelPersonnalise != null ? '\n⭐ Montant personnalisé : ${eleve.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois' : ''}'
                           '${eleve.exceptionsMoisPersonnalisees.isNotEmpty ? '\n⭐ ${eleve.exceptionsMoisPersonnalisees.length} mois en exception' : ''}'
                           '${moisDebloqueActif != null ? '\n🔓 Mois déverrouillé : $moisDebloqueActif' : ''}',

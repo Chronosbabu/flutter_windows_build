@@ -17,6 +17,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   String? selectedClass;
   String reportType = "annual";
   String? selectedAutreFraisGroupeCle;
+  // ⚡ NOUVEAU — mois choisi pour le rapport mensuel (null = mois en cours)
+  String? selectedMois;
   bool includeDepenses = true;
   late final TextEditingController _cityController;
   bool _generating = false;
@@ -105,23 +107,72 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
           _sectionCard(
             title: "2. Type de rapport",
             subtitle: reportCategory == "principal"
-                ? null
+                ? "Pour un rapport Mensuel, vous pouvez choisir le mois "
+                "en cours ou un mois passé (Septembre, Octobre, ...)."
                 : "Journalier : paiements d'aujourd'hui. Mensuel : paiements "
-                "du mois en cours. Annuel : tous les paiements de l'année "
-                "scolaire.",
-            child: DropdownButtonFormField<String>(
-              value: reportType,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                contentPadding:
-                EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              ),
-              items: const [
-                DropdownMenuItem(value: "daily", child: Text("Journalier")),
-                DropdownMenuItem(value: "monthly", child: Text("Mensuel")),
-                DropdownMenuItem(value: "annual", child: Text("Annuel")),
+                "du mois choisi (mois en cours ou mois passé). Annuel : tous "
+                "les paiements de l'année scolaire.",
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: reportType,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    contentPadding:
+                    EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                        value: "daily", child: Text("Journalier")),
+                    DropdownMenuItem(
+                        value: "monthly", child: Text("Mensuel")),
+                    DropdownMenuItem(value: "annual", child: Text("Annuel")),
+                  ],
+                  onChanged: (val) => setState(() => reportType = val!),
+                ),
+                if (reportType == "monthly") ...[
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String?>(
+                    value: selectedMois,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: "Mois du rapport",
+                      prefixIcon: Icon(Icons.calendar_month),
+                      border: OutlineInputBorder(),
+                      contentPadding:
+                      EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    ),
+                    items: [
+                      DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text(
+                          fs.currentSchoolMonthName != null
+                              ? "Mois en cours (${fs.currentSchoolMonthName})"
+                              : "Mois en cours",
+                        ),
+                      ),
+                      ...fs.months.map(
+                            (m) => DropdownMenuItem<String?>(
+                          value: m,
+                          child: Text(m),
+                        ),
+                      ),
+                    ],
+                    onChanged: (val) => setState(() => selectedMois = val),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    selectedMois == null
+                        ? "Le rapport portera sur le mois en cours."
+                        : "Le rapport portera sur le mois de $selectedMois "
+                        "(année scolaire ${fs.currentYear}) : élèves, montants, "
+                        "répartition par administration et dépenses de ce mois.",
+                    style:
+                    const TextStyle(fontSize: 12, color: Colors.indigo),
+                  ),
+                ],
               ],
-              onChanged: (val) => setState(() => reportType = val!),
             ),
           ),
           const SizedBox(height: 16),
@@ -196,9 +247,10 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
             _sectionCard(
               title: "3. Dépenses dans le rapport",
               subtitle: includeDepenses
-                  ? "La partie \"Dépenses\" (journalières, mensuelles et "
-                  "annuelles, avec répartition par rubrique et par "
-                  "section) sera incluse dans le PDF."
+                  ? "La partie \"Dépenses\" (avec répartition par rubrique et "
+                  "par section) sera incluse dans le PDF. Pour un rapport "
+                  "mensuel d'un mois choisi, seules les dépenses de ce mois "
+                  "sont affichées."
                   : "Aucune information sur les dépenses n'apparaîtra dans "
                   "le PDF. Seuls les élèves, les montants et les "
                   "signataires y figureront.",
@@ -560,9 +612,15 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     await fs.setLastReportCity(_cityController.text);
 
     final String dateJour = DateTime.now().toString().split(' ')[0];
+
+    // ⚡ NOUVEAU — le mois choisi ne s'applique qu'au rapport mensuel.
+    final String? moisChoisi =
+    reportType == "monthly" ? selectedMois : null;
+    final String suffixeMois = moisChoisi != null ? "_$moisChoisi" : "";
+
     final Map<String, dynamic> result;
     if (reportCategory == "principal") {
-      final filename = "Rapport_${reportType}_$dateJour";
+      final filename = "Rapport_$reportType$suffixeMois" "_$dateJour";
       result = await fs.generatePdf(
         filename: filename,
         reportType: reportType,
@@ -570,9 +628,11 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
         classFilter: selectedClass,
         city: city,
         includeDepenses: includeDepenses,
+        mois: moisChoisi,
       );
     } else {
-      final filename = "Rapport_AutresFrais_${reportType}_$dateJour";
+      final filename =
+          "Rapport_AutresFrais_$reportType$suffixeMois" "_$dateJour";
       result = await fs.generateAutresFraisPdf(
         filename: filename,
         autreFraisGroupeCle: selectedAutreFraisGroupeCle,
@@ -580,6 +640,7 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
         classFilter: selectedClass,
         city: city,
         periode: _periodeAutresFrais(),
+        mois: moisChoisi,
       );
     }
 

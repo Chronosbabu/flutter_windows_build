@@ -18,6 +18,174 @@ extension FraisScolairesRapports on FraisScolaires {
         '${two(now.hour)}:${two(now.minute)}';
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — OUTILS POUR LES RAPPORTS D'UN MOIS PASSÉ
+  // ==========================================================================
+
+  /// Retourne l'année et le mois calendaires (1er du mois) correspondant à un
+  /// mois scolaire (ex : "Septembre" de l'année 2025-2026 -> 01/09/2025).
+  DateTime _dateRepereMois(String mois) {
+    int idx = months.indexOf(mois);
+    if (idx < 0) idx = 0;
+    final int moisCalendrier = idx < 4 ? 9 + idx : idx - 3;
+
+    int anneeDebut = DateTime.now().year;
+    int anneeFin = anneeDebut;
+    final parts = currentYear.split('-');
+    if (parts.length == 2) {
+      anneeDebut = int.tryParse(parts[0].trim()) ?? anneeDebut;
+      anneeFin = int.tryParse(parts[1].trim()) ?? (anneeDebut + 1);
+    }
+    final int annee = idx < 4 ? anneeDebut : anneeFin;
+    return DateTime(annee, moisCalendrier, 1);
+  }
+
+  String _libelleMoisCalendrier(String mois) {
+    final d = _dateRepereMois(mois);
+    return '${_moisCalendrier[d.month - 1]} ${d.year}';
+  }
+
+  /// Élèves (année en cours) ayant payé quelque chose pour le mois donné.
+  List<Eleve> _elevesAyantPayeMois(String mois) {
+    return currentData.eleves
+        .where((e) => (e.paid[mois] ?? 0) > 0)
+        .toList();
+  }
+
+  /// Total collecté pour un mois scolaire donné (élèves actifs + archivés).
+  double _totalCollecteMois(String mois) {
+    return currentData.eleves
+        .fold(0.0, (sum, e) => sum + (e.paid[mois] ?? 0)) +
+        elevesSupprimesData.eleves
+            .fold(0.0, (sum, e) => sum + (e.paid[mois] ?? 0));
+  }
+
+  /// Collecte par section pour un mois scolaire donné.
+  Map<String, double> _collecteMoisParSection(String mois) {
+    final Map<String, double> result = {};
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
+      final montant = e.paid[mois] ?? 0;
+      if (montant != 0) {
+        result[e.section] = (result[e.section] ?? 0) + montant;
+      }
+    }
+    return result;
+  }
+
+  /// Montant payé par un élève sur la période. Si [mois] est fourni et que la
+  /// période est 'month', on prend le mois choisi au lieu du mois en cours.
+  double _montantEleve(Eleve eleve, String period, String? mois) {
+    if (period == 'month' && mois != null) {
+      return eleve.paid[mois] ?? 0.0;
+    }
+    return _getStudentAmountForPeriod(eleve, period);
+  }
+
+  bool _paiementAutreFraisDansPeriodeMois(
+      AutreFraisPaiement p, String period, String? mois) {
+    if (period == 'month' && mois != null) {
+      final d = _dateRepereMois(mois);
+      return p.date.year == d.year && p.date.month == d.month;
+    }
+    return paiementAutreFraisDansPeriode(p, period);
+  }
+
+  /// Équivalent de computeDepensesStats('month') mais pour un mois choisi.
+  DepensePeriodeStats _computeDepensesStatsMois(
+      String mois, {
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final collecteAll = _collecteMoisParSection(mois);
+    final collecteBySection = <String, double>{};
+    collecteAll.forEach((s, v) {
+      if (sectionFilter == null || s == sectionFilter) {
+        collecteBySection[s] = v;
+      }
+    });
+    final double totalCollecte =
+    collecteBySection.values.fold(0.0, (a, b) => a + b);
+
+    final repere = _dateRepereMois(mois);
+    final depenses = (depensesByYear[currentYear] ?? []).where((d) {
+      final bool okPeriode =
+          d.date.year == repere.year && d.date.month == repere.month;
+      return okPeriode && _depenseConcerneFiltre(d, sectionFilter, classFilter);
+    }).toList();
+    depenses.sort((a, b) => a.date.compareTo(b.date));
+
+    final Map<String, RubriqueStat> rub = {};
+    for (final admin in config.administrations) {
+      final nom = admin.nom.trim();
+      if (nom.isEmpty) continue;
+      rub[nom] = RubriqueStat(
+        rubrique: nom,
+        pourcentage: admin.pourcentage,
+        collecte: totalCollecte * (admin.pourcentage / 100),
+      );
+    }
+
+    final Map<String, SectionStat> secStats = {};
+    final sectionsBase = sectionFilter != null
+        ? <String>[sectionFilter]
+        : List<String>.from(config.sections);
+    for (final s in sectionsBase) {
+      secStats[s] =
+          SectionStat(section: s, collecte: collecteBySection[s] ?? 0);
+    }
+    collecteBySection.forEach((s, v) {
+      secStats.putIfAbsent(s, () => SectionStat(section: s, collecte: v));
+    });
+
+    double globales = 0;
+    double independantes = 0;
+    double mixtes = 0;
+
+    for (final d in depenses) {
+      final cle = d.rubriqueAffichee;
+      final r = rub.putIfAbsent(
+        cle,
+            () => RubriqueStat(rubrique: cle, pourcentage: 0, collecte: 0),
+      );
+      if (d.portee == kDepenseGlobale) {
+        if (sectionFilter == null) {
+          r.globales += d.montant;
+          globales += d.montant;
+        }
+      } else {
+        final parts = repartitionDepenseParSection(d);
+        parts.forEach((s, amt) {
+          if (sectionFilter != null && s != sectionFilter) return;
+          final st = secStats.putIfAbsent(
+              s, () => SectionStat(section: s, collecte: 0));
+          if (d.portee == kDepenseIndependante) {
+            r.independantes += amt;
+            st.independantes += amt;
+            independantes += amt;
+          } else {
+            r.mixtes += amt;
+            st.mixtes += amt;
+            mixtes += amt;
+          }
+        });
+      }
+    }
+
+    return DepensePeriodeStats(
+      period: 'month',
+      depenses: depenses,
+      rubriques: rub.values.toList(),
+      sections: secStats.values.toList(),
+      totalCollecte: totalCollecte,
+      globales: globales,
+      independantes: independantes,
+      mixtes: mixtes,
+      globalesExclues: sectionFilter != null,
+    );
+  }
+
+  // ==========================================================================
+
   List<pw.Widget> _buildSignatureSection([String? city]) {
     if (signataires.isEmpty) return [];
 
@@ -119,9 +287,9 @@ extension FraisScolairesRapports on FraisScolaires {
     return 7;
   }
 
-  String _tauxMensuelLabel(List<Eleve> eleves) {
+  String _tauxMensuelLabel(List<Eleve> eleves, [String? moisCible]) {
     if (eleves.isEmpty) return '-';
-    final mois = currentSchoolMonthName ?? months.first;
+    final mois = moisCible ?? currentSchoolMonthName ?? months.first;
     double? min;
     double? max;
     for (final e in eleves) {
@@ -243,7 +411,8 @@ extension FraisScolairesRapports on FraisScolaires {
   }
 
   List<pw.Widget> _buildRepartitionParOption(
-      List<Eleve> students, Map<String, double> totalBySection) {
+      List<Eleve> students, Map<String, double> totalBySection,
+      [String? moisCible]) {
     if (!aDesOptionsActives) return [];
     if (config.administrations.isEmpty || totalBySection.isEmpty) return [];
 
@@ -267,13 +436,13 @@ extension FraisScolairesRapports on FraisScolaires {
           .toList();
       totaux.add(total);
       effectifs.add(elevesGroupe.length);
-      taux.add(_tauxMensuelLabel(elevesGroupe));
+      taux.add(_tauxMensuelLabel(elevesGroupe, moisCible));
       tousLesEleves.addAll(elevesGroupe);
     }
 
     final double totalGeneral = totaux.fold(0.0, (sum, v) => sum + v);
     final int effectifGeneral = effectifs.fold(0, (sum, v) => sum + v);
-    final String tauxGeneral = _tauxMensuelLabel(tousLesEleves);
+    final String tauxGeneral = _tauxMensuelLabel(tousLesEleves, moisCible);
 
     final headers = <String>[
       'Rubrique',
@@ -360,13 +529,14 @@ extension FraisScolairesRapports on FraisScolaires {
   }
 
   List<pw.Widget> _buildRepartitionParSectionEtAdministration(
-      List<Eleve> students, String period) {
+      List<Eleve> students, String period, [String? moisCible]) {
     if (config.administrations.isEmpty || students.isEmpty) return [];
 
     final Map<String, double> totalBySection = {};
     for (final e in students) {
       totalBySection[e.section] =
-          (totalBySection[e.section] ?? 0) + _getStudentAmountForPeriod(e, period);
+          (totalBySection[e.section] ?? 0) +
+              _montantEleve(e, period, moisCible);
     }
     totalBySection.removeWhere((_, v) => v <= 0);
     if (totalBySection.isEmpty) return [];
@@ -459,7 +629,7 @@ extension FraisScolairesRapports on FraisScolaires {
       ),
       pw.SizedBox(height: 16),
 
-      ..._buildRepartitionParOption(students, totalBySection),
+      ..._buildRepartitionParOption(students, totalBySection, moisCible),
 
       pw.Container(
         width: double.infinity,
@@ -682,6 +852,7 @@ extension FraisScolairesRapports on FraisScolaires {
   List<pw.Widget> _buildDepensesPeriodeSection(
       DepensePeriodeStats s, {
         String? sectionFilter,
+        String? titreForce,
       }) {
     final widgets = <pw.Widget>[];
     final String periodeCourte = _periodeCourtePdf(s.period);
@@ -695,7 +866,7 @@ extension FraisScolairesRapports on FraisScolaires {
           borderRadius: pw.BorderRadius.all(pw.Radius.circular(4)),
         ),
         child: pw.Text(
-          _periodeTitrePdf(s.period) +
+          (titreForce ?? _periodeTitrePdf(s.period)) +
               (sectionFilter != null ? "  |  Section : $sectionFilter" : ""),
           style: pw.TextStyle(
             fontSize: 12.5,
@@ -993,6 +1164,7 @@ extension FraisScolairesRapports on FraisScolaires {
   List<pw.Widget> _buildDepensesReportSections({
     String? sectionFilter,
     String? classFilter,
+    String? mois,
   }) {
     final widgets = <pw.Widget>[
       pw.NewPage(),
@@ -1064,6 +1236,23 @@ extension FraisScolairesRapports on FraisScolaires {
       ),
       pw.SizedBox(height: 14),
     ];
+
+    // ⚡ NOUVEAU — rapport d'un mois choisi : on n'affiche que les dépenses
+    // de ce mois.
+    if (mois != null) {
+      final stats = _computeDepensesStatsMois(
+        mois,
+        sectionFilter: sectionFilter,
+        classFilter: classFilter,
+      );
+      widgets.addAll(_buildDepensesPeriodeSection(
+        stats,
+        sectionFilter: sectionFilter,
+        titreForce:
+        "DÉPENSES MENSUELLES — ${_libelleMoisCalendrier(mois)}",
+      ));
+      return widgets;
+    }
 
     for (final period in const ['today', 'month', 'year']) {
       final stats = computeDepensesStats(
@@ -1451,6 +1640,7 @@ extension FraisScolairesRapports on FraisScolaires {
     String? classFilter,
     String? city,
     bool includeDepenses = true,
+    String? mois, // ⚡ NOUVEAU — mois scolaire choisi (rapport mensuel)
   }) async {
     if (reportType == "student_list") {
       return await _generateStudentListPdf(
@@ -1460,6 +1650,14 @@ extension FraisScolairesRapports on FraisScolaires {
         city:          city,
       );
     }
+
+    // ⚡ NOUVEAU — le mois choisi n'a de sens que pour le rapport mensuel.
+    final String? moisSel = (reportType == "monthly" &&
+        mois != null &&
+        mois.trim().isNotEmpty &&
+        months.contains(mois))
+        ? mois
+        : null;
 
     final String periodePourMontant = reportType == "daily"
         ? "today"
@@ -1475,9 +1673,15 @@ extension FraisScolairesRapports on FraisScolaires {
       title    = "RAPPORT JOURNALIER";
       countLabel = "ont payé aujourd'hui";
     } else if (reportType == "monthly") {
-      students = getPaidStudentsThisMonth();
-      title    = "RAPPORT MENSUEL";
-      countLabel = "ont payé ce mois-ci";
+      if (moisSel != null) {
+        students = _elevesAyantPayeMois(moisSel);
+        title    = "RAPPORT MENSUEL — ${moisSel.toUpperCase()}";
+        countLabel = "ont payé pour le mois de $moisSel";
+      } else {
+        students = getPaidStudentsThisMonth();
+        title    = "RAPPORT MENSUEL";
+        countLabel = "ont payé ce mois-ci";
+      }
     } else {
       students = currentData.eleves;
       title    = "RAPPORT ANNUEL";
@@ -1502,14 +1706,17 @@ extension FraisScolairesRapports on FraisScolaires {
     }
 
     final double total              = students.fold(
-        0.0, (sum, e) => sum + _getStudentAmountForPeriod(e, periodePourMontant));
+        0.0, (sum, e) => sum + _montantEleve(e, periodePourMontant, moisSel));
     final adminDistribution         = calculateAdminDistribution(total);
-    final double totalMoisEcole     = getCurrentMonthTotalCollected();
+    final double totalMoisEcole     = moisSel != null
+        ? _totalCollecteMois(moisSel)
+        : getCurrentMonthTotalCollected();
     final double totalAnneeEcole    = getYearTotalCollected();
     final double totalDepensesAnnee = getTotalDepenses();
     final double soldeNetAnnee      = totalAnneeEcole - totalDepensesAnnee;
-    final String currentMonthName =
-        currentSchoolMonthName ?? "Hors année scolaire (vacances)";
+    final String currentMonthName = moisSel != null
+        ? _libelleMoisCalendrier(moisSel)
+        : (currentSchoolMonthName ?? "Hors année scolaire (vacances)");
     final bool showMoisConcerne = reportType == "daily";
 
     final headers = [
@@ -1550,7 +1757,7 @@ extension FraisScolairesRapports on FraisScolaires {
     });
 
     final rows = studentsTriesPourListe.map((e) {
-      final montant = _getStudentAmountForPeriod(e, periodePourMontant);
+      final montant = _montantEleve(e, periodePourMontant, moisSel);
       final row = [
         e.id.isNotEmpty ? e.id : "N/A",
         "${e.nom} ${e.postNom} ${e.prenom}",
@@ -1711,7 +1918,7 @@ extension FraisScolairesRapports on FraisScolaires {
           pw.SizedBox(height: 30),
           if (afficherRepartitionParSection)
             ..._buildRepartitionParSectionEtAdministration(
-                studentsAvantFiltres, periodePourMontant),
+                studentsAvantFiltres, periodePourMontant, moisSel),
           pw.Text(
             "RÉPARTITION GLOBALE PAR ADMINISTRATION",
             style: pw.TextStyle(
@@ -1729,6 +1936,7 @@ extension FraisScolairesRapports on FraisScolaires {
             ..._buildDepensesReportSections(
               sectionFilter: sectionFilter,
               classFilter: classFilter,
+              mois: moisSel,
             ),
 
           ..._buildSignatureSection(city),
@@ -2016,7 +2224,13 @@ extension FraisScolairesRapports on FraisScolaires {
     String? classFilter,
     String? city,
     String periode = 'year',
+    String? mois, // ⚡ NOUVEAU — mois scolaire choisi (période 'month')
   }) async {
+    final String? moisSel =
+    (periode == 'month' && mois != null && months.contains(mois))
+        ? mois
+        : null;
+
     String? cleGroupe = autreFraisGroupeCle;
     if (cleGroupe == null && autreFraisId != null) {
       for (final f in autresFrais) {
@@ -2057,7 +2271,7 @@ extension FraisScolairesRapports on FraisScolaires {
     }
 
     final List<AutreFraisPaiement> paiements = paiementsAnnee
-        .where((p) => paiementAutreFraisDansPeriode(p, periode))
+        .where((p) => _paiementAutreFraisDansPeriodeMois(p, periode, moisSel))
         .toList();
 
     final Map<String, List<AutreFraisPaiement>> paiementsAnneeParEleve = {};
@@ -2593,7 +2807,9 @@ extension FraisScolairesRapports on FraisScolaires {
     final String detailPeriode = periode == 'today'
         ? 'Journée du ${two(now.day)}/${two(now.month)}/${now.year}'
         : (periode == 'month'
-        ? 'Mois de ${_moisCalendrier[now.month - 1]} ${now.year}'
+        ? (moisSel != null
+        ? 'Mois de ${_libelleMoisCalendrier(moisSel)}'
+        : 'Mois de ${_moisCalendrier[now.month - 1]} ${now.year}')
         : 'Année scolaire $currentYear');
 
     String title = "RAPPORT $libellePeriode — AUTRES FRAIS DE PAIEMENT";
