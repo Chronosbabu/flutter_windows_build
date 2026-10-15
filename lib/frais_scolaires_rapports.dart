@@ -2216,6 +2216,28 @@ extension FraisScolairesRapports on FraisScolaires {
   bool _libelleEstTranche(String l) =>
       l != 'Paiement unique' && l != '-' && l.isNotEmpty;
 
+  // ==========================================================================
+  // ⚡ CORRECTION — NOM DE FICHIER DES RAPPORTS "AUTRES FRAIS"
+  // --------------------------------------------------------------------------
+  // Avant : le nom du fichier PDF ne contenait pas le type de frais. Deux
+  // frais différents (ex : "Frais de l'État" puis "Frais de bibliothèque")
+  // produisaient donc EXACTEMENT le même nom de fichier : le second rapport
+  // écrasait le premier, comme une "mise à jour".
+  //
+  // Maintenant : le nom du type de frais est inclus dans le nom du fichier.
+  //   - même type de frais, même période, même jour -> même fichier
+  //     (le rapport est simplement mis à jour / régénéré) ;
+  //   - type de frais différent -> nouveau fichier, l'ancien reste intact.
+  // ==========================================================================
+  String _nomFichierSur(String texte) {
+    final String propre = texte
+        .trim()
+        .replaceAll(RegExp(r"[’'`]"), '')
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '')
+        .replaceAll(RegExp(r'\s+'), '_');
+    return propre.isEmpty ? 'Frais' : propre;
+  }
+
   Future<Map<String, dynamic>> generateAutresFraisPdf({
     required String filename,
     String? autreFraisId,
@@ -2995,7 +3017,23 @@ extension FraisScolairesRapports on FraisScolaires {
       ),
     );
 
-    return await _savePdf(pdf, filename, "autres_frais_$periode");
+    // ⚡ CORRECTION — on ajoute le nom du type de frais au nom du fichier.
+    //  - un frais précis (ou un groupe de frais du même nom) -> son nom ;
+    //  - "tous types confondus" -> "Tous_types".
+    // Résultat : un type de frais différent donne un NOUVEAU fichier, alors
+    // que le même type (même période, même jour) met simplement à jour le
+    // fichier existant.
+    final String nomTypePourFichier = modeFusion
+        ? (grp != null
+        ? grp.nom
+        : (paiementsAnnee.isNotEmpty
+        ? paiementsAnnee.first.autreFraisNom
+        : 'Frais'))
+        : 'Tous_types';
+    final String filenameAvecType =
+        '${filename}_${_nomFichierSur(nomTypePourFichier)}';
+
+    return await _savePdf(pdf, filenameAvecType, "autres_frais_$periode");
   }
 
   Future<Map<String, dynamic>> _savePdf(
