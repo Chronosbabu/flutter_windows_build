@@ -5,6 +5,7 @@
 // Depense, RubriqueStat, SectionStat, DepensePeriodeStats, GroupeOption,
 // AutreFraisGroupe, AutreFraisTranche, AutreFrais, AutreFraisPaiement,
 // AutreFraisAdministration, RepartitionDetail, AdminAuditLog, Signataire,
+// RapportPersonnalise (réglage optionnel des montants de rapport),
 // ainsi que formatMontant() et les constantes de dépenses.
 //
 // Ce fichier fait partie de la MÊME bibliothèque que frais_scolaires.dart
@@ -535,3 +536,139 @@ class Signataire {
     'fonction': fonction,
   };
 }
+
+// ============================================================================
+// ⚡ NOUVEAU — MONTANTS PERSONNALISÉS DU RAPPORT (fonction optionnelle)
+// ============================================================================
+// Permet à certaines écoles d'afficher, SUR LES RAPPORTS PDF UNIQUEMENT, un
+// montant par élève différent du montant réel (ex : 65 000 FC réel -> 60 000
+// FC sur le rapport).
+//
+// - Désactivé par défaut : tant qu'il n'est pas activé, l'application se
+//   comporte exactement comme avant.
+// - Aucune donnée de l'école n'est modifiée (paiements, reçus, historique,
+//   paramètres restent sur les montants réels).
+// - Le réglage est enregistré à part (SharedPreferences) : le fichier de
+//   données de l'école et la sauvegarde serveur ne changent pas.
+// - L'accès est protégé par un mot de passe (voir ci-dessous).
+// ============================================================================
+
+/// ⚠️ MOT DE PASSE D'ACCÈS À LA FONCTION. À CHANGER avant de livrer l'app.
+const String kMotDePasseRapportPersonnalise = 'Rapport@2026';
+
+class RapportPersonnalise {
+  /// Interrupteur général.
+  bool actif = false;
+
+  /// Montant du rapport par section : { 'Maternelle': 60000 }
+  Map<String, double> parSection = {};
+
+  /// Montant du rapport par classe : { 'Maternelle|1ère': 60000 }
+  /// (clé = section|numéro de classe). La classe est prioritaire sur la section.
+  Map<String, double> parClasse = {};
+
+  bool _charge = false;
+  int _echecs = 0;
+  DateTime? _verrouJusqua;
+
+  static const String _cleStockage = 'rapport_personnalise_v1';
+  static const int _maxEssais = 3;
+  static const int _dureeVerrouSecondes = 60;
+
+  static String cleClasse(String section, String classeNumero) =>
+      '$section|$classeNumero';
+
+  /// Vrai seulement si la fonction est activée ET qu'au moins un montant est
+  /// défini. Sinon, les rapports restent identiques à l'ancien comportement.
+  bool get enVigueur =>
+      actif && (parSection.isNotEmpty || parClasse.isNotEmpty);
+
+  /// Montant du rapport pour une classe (la classe prime sur la section).
+  /// Null si la fonction n'est pas en vigueur ou si rien n'est défini.
+  double? montantPour(String section, String classeNumero) {
+    if (!enVigueur) return null;
+    return parClasse[cleClasse(section, classeNumero)] ?? parSection[section];
+  }
+
+  Map<String, double> _lireMontants(dynamic brut) {
+    final Map<String, double> result = {};
+    if (brut is Map) {
+      brut.forEach((k, v) {
+        if (v is num && v > 0) {
+          result[k.toString()] = v.toDouble();
+        }
+      });
+    }
+    return result;
+  }
+
+  Future<void> charger() async {
+    if (_charge) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? brut = prefs.getString(_cleStockage);
+      if (brut == null || brut.isEmpty) {
+        actif = false;
+        parSection = {};
+        parClasse = {};
+      } else {
+        final data = json.decode(brut);
+        if (data is Map) {
+          actif = data['actif'] == true;
+          parSection = _lireMontants(data['parSection']);
+          parClasse = _lireMontants(data['parClasse']);
+        }
+      }
+    } catch (_) {
+      // En cas de problème de lecture : fonction désactivée (comportement normal).
+      actif = false;
+      parSection = {};
+      parClasse = {};
+    }
+    _charge = true;
+  }
+
+  Future<bool> sauvegarder() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final bool ok = await prefs.setString(
+        _cleStockage,
+        json.encode({
+          'actif': actif,
+          'parSection': parSection,
+          'parClasse': parClasse,
+        }),
+      );
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Retourne null si le mot de passe est correct, sinon un message d'erreur.
+  /// Après 3 erreurs, l'accès est verrouillé 60 secondes.
+  String? verifierMotDePasse(String saisi) {
+    final now = DateTime.now();
+    if (_verrouJusqua != null && now.isBefore(_verrouJusqua!)) {
+      final int secondes = _verrouJusqua!.difference(now).inSeconds + 1;
+      return "Trop de tentatives. Réessayez dans $secondes seconde(s).";
+    }
+    if (saisi == kMotDePasseRapportPersonnalise) {
+      _echecs = 0;
+      _verrouJusqua = null;
+      return null;
+    }
+    _echecs++;
+    if (_echecs >= _maxEssais) {
+      _echecs = 0;
+      _verrouJusqua = now.add(const Duration(seconds: _dureeVerrouSecondes));
+      return "Mot de passe incorrect. Accès verrouillé pendant "
+          "$_dureeVerrouSecondes secondes.";
+    }
+    return "Mot de passe incorrect (${_maxEssais - _echecs} essai(s) "
+        "restant(s)).";
+  }
+}
+
+/// Instance unique utilisée par toute l'application.
+final RapportPersonnalise rapportPersonnalise = RapportPersonnalise();

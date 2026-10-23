@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../frais_scolaires.dart';
 
 class ReportGenerationScreen extends StatefulWidget {
@@ -23,6 +24,12 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
   late final TextEditingController _cityController;
   bool _generating = false;
 
+  // ⚡ NOUVEAU — accès masqué aux montants personnalisés du rapport :
+  // 3 appuis rapides sur le titre de la page.
+  int _tapsTitre = 0;
+  DateTime? _dernierTapTitre;
+  bool _dialogRapportPersonnaliseOuvert = false;
+
   FraisScolaires get fs => widget.fraisScolaires;
 
   @override
@@ -30,12 +37,71 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
     super.initState();
     _cityController =
         TextEditingController(text: fs.lastReportCity ?? 'Lubumbashi');
+    // Chargement silencieux du réglage (aucun effet visible).
+    rapportPersonnalise.charger();
   }
 
   @override
   void dispose() {
     _cityController.dispose();
     super.dispose();
+  }
+
+  // --------------------------------------------------------------------------
+  // ⚡ NOUVEAU — ouverture masquée de la fonctionnalité
+  // --------------------------------------------------------------------------
+  void _onTitreTap() {
+    final now = DateTime.now();
+    if (_dernierTapTitre == null ||
+        now.difference(_dernierTapTitre!) > const Duration(seconds: 2)) {
+      _tapsTitre = 0;
+    }
+    _dernierTapTitre = now;
+    _tapsTitre++;
+    if (_tapsTitre >= 3) {
+      _tapsTitre = 0;
+      _dernierTapTitre = null;
+      _ouvrirRapportPersonnalise();
+    }
+  }
+
+  Future<void> _ouvrirRapportPersonnalise() async {
+    if (_dialogRapportPersonnaliseOuvert) return;
+    _dialogRapportPersonnaliseOuvert = true;
+    try {
+      await rapportPersonnalise.charger();
+      if (!mounted) return;
+
+      final bool? acces = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _MotDePasseRapportDialog(),
+      );
+      if (acces != true || !mounted) return;
+
+      final bool? enregistre = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _RapportPersonnaliseDialog(fs: fs),
+      );
+      if (!mounted) return;
+
+      if (enregistre == true) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              rapportPersonnalise.enVigueur
+                  ? "✅ Montants du rapport enregistrés et activés."
+                  : "✅ Enregistré. Les rapports utilisent les montants réels.",
+            ),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } finally {
+      _dialogRapportPersonnaliseOuvert = false;
+    }
   }
 
   String _libelleGroupe(AutreFraisGroupe g) {
@@ -73,7 +139,16 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Générer un Rapport PDF"),
+        // ⚡ NOUVEAU — le titre est cliquable (3 appuis) sans rien changer
+        // à son apparence.
+        title: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _onTitreTap,
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            child: Text("Générer un Rapport PDF"),
+          ),
+        ),
         centerTitle: true,
       ),
       body: ListView(
@@ -662,5 +737,581 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
         ),
       );
     }
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — BOÎTE DE DIALOGUE « MOT DE PASSE »
+// ============================================================================
+// Retourne true si le mot de passe est correct. Après 3 erreurs, l'accès est
+// verrouillé pendant 60 secondes (géré par rapportPersonnalise).
+// ============================================================================
+class _MotDePasseRapportDialog extends StatefulWidget {
+  const _MotDePasseRapportDialog();
+
+  @override
+  State<_MotDePasseRapportDialog> createState() =>
+      _MotDePasseRapportDialogState();
+}
+
+class _MotDePasseRapportDialogState extends State<_MotDePasseRapportDialog> {
+  final TextEditingController _ctrl = TextEditingController();
+  bool _masque = true;
+  String? _erreur;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _valider() {
+    final String? erreur = rapportPersonnalise.verifierMotDePasse(_ctrl.text);
+    if (erreur == null) {
+      Navigator.pop(context, true);
+      return;
+    }
+    setState(() {
+      _erreur = erreur;
+      _ctrl.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.lock_outline, color: Colors.indigo),
+          SizedBox(width: 8),
+          Text("Accès protégé"),
+        ],
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text("Entrez le mot de passe pour continuer."),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _ctrl,
+            autofocus: true,
+            obscureText: _masque,
+            enableSuggestions: false,
+            autocorrect: false,
+            onSubmitted: (_) => _valider(),
+            decoration: InputDecoration(
+              labelText: "Mot de passe",
+              border: const OutlineInputBorder(),
+              errorText: _erreur,
+              errorMaxLines: 3,
+              suffixIcon: IconButton(
+                icon: Icon(
+                    _masque ? Icons.visibility : Icons.visibility_off),
+                onPressed: () => setState(() => _masque = !_masque),
+              ),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text("Annuler"),
+        ),
+        ElevatedButton(
+          onPressed: _valider,
+          child: const Text("Valider"),
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — BOÎTE DE DIALOGUE « MONTANTS PERSONNALISÉS DU RAPPORT »
+// ============================================================================
+// - Interrupteur d'activation.
+// - Montant à afficher sur le rapport, par section OU par classe.
+// - Un champ laissé vide = montant réel (aucun changement pour cette cible).
+// - La classe est prioritaire sur la section.
+// - ⚡ Bloc « Différence accumulée » : somme de (montant réel - montant du
+//   rapport) sur tous les paiements, par section et par classe.
+// Retourne true si l'enregistrement a réussi.
+// ============================================================================
+class _RapportPersonnaliseDialog extends StatefulWidget {
+  final FraisScolaires fs;
+
+  const _RapportPersonnaliseDialog({required this.fs});
+
+  @override
+  State<_RapportPersonnaliseDialog> createState() =>
+      _RapportPersonnaliseDialogState();
+}
+
+class _RapportPersonnaliseDialogState
+    extends State<_RapportPersonnaliseDialog> {
+  late bool _actif;
+  String _mode = 'section';
+  String? _erreur;
+  bool _enregistrement = false;
+  late DifferenceRapport _diff;
+
+  final Map<String, TextEditingController> _ctrlSection = {};
+  final Map<String, TextEditingController> _ctrlClasse = {};
+  final Map<String, String> _sectionDeCle = {};
+  final Map<String, String> _classeDeCle = {};
+
+  FraisScolaires get fs => widget.fs;
+
+  String _fmt(double? v) {
+    if (v == null) return '';
+    return v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _actif = rapportPersonnalise.actif;
+    _diff = fs.differenceAccumuleeRapport();
+    for (final section in fs.config.sections) {
+      _ctrlSection[section] = TextEditingController(
+          text: _fmt(rapportPersonnalise.parSection[section]));
+      for (final classe in fs.getClassesForSection(section)) {
+        final String cle = RapportPersonnalise.cleClasse(section, classe);
+        _sectionDeCle[cle] = section;
+        _classeDeCle[cle] = classe;
+        _ctrlClasse[cle] = TextEditingController(
+            text: _fmt(rapportPersonnalise.parClasse[cle]));
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _ctrlSection.values) {
+      c.dispose();
+    }
+    for (final c in _ctrlClasse.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  double? _valeur(String texte) {
+    final String t =
+    texte.trim().replaceAll(RegExp(r'\s'), '').replaceAll(',', '.');
+    return double.tryParse(t);
+  }
+
+  void _toutEffacer() {
+    setState(() {
+      for (final c in _ctrlSection.values) {
+        c.clear();
+      }
+      for (final c in _ctrlClasse.values) {
+        c.clear();
+      }
+      _erreur = null;
+    });
+  }
+
+  Future<void> _enregistrer() async {
+    final Map<String, double> nouvSection = {};
+    final Map<String, double> nouvClasse = {};
+    String? erreur;
+
+    for (final entry in _ctrlSection.entries) {
+      final String section = entry.key;
+      final String texte = entry.value.text.trim();
+      if (texte.isEmpty) continue;
+      final double? v = _valeur(texte);
+      if (v == null || v <= 0) {
+        erreur = "Montant invalide pour la section « $section ».";
+        break;
+      }
+      final double ref = fs.montantReferencePourRapport(section);
+      if (v > ref + 0.0001) {
+        erreur = "Section « $section » : le montant du rapport "
+            "(${formatMontant(v)} FC) ne peut pas dépasser le montant réel "
+            "(${formatMontant(ref)} FC).";
+        break;
+      }
+      if (v < ref) nouvSection[section] = v;
+    }
+
+    if (erreur == null) {
+      for (final entry in _ctrlClasse.entries) {
+        final String cle = entry.key;
+        final String section = _sectionDeCle[cle]!;
+        final String classe = _classeDeCle[cle]!;
+        final String texte = entry.value.text.trim();
+        if (texte.isEmpty) continue;
+        final double? v = _valeur(texte);
+        if (v == null || v <= 0) {
+          erreur = "Montant invalide pour $section › $classe.";
+          break;
+        }
+        final double ref = fs.montantReferencePourRapport(section, classe);
+        if (v > ref + 0.0001) {
+          erreur = "$section › $classe : le montant du rapport "
+              "(${formatMontant(v)} FC) ne peut pas dépasser le montant réel "
+              "(${formatMontant(ref)} FC).";
+          break;
+        }
+        if (v < ref) nouvClasse[cle] = v;
+      }
+    }
+
+    if (erreur != null) {
+      setState(() => _erreur = erreur);
+      return;
+    }
+
+    setState(() {
+      _erreur = null;
+      _enregistrement = true;
+    });
+
+    final bool ancienActif = rapportPersonnalise.actif;
+    final Map<String, double> ancienSection =
+    Map<String, double>.from(rapportPersonnalise.parSection);
+    final Map<String, double> ancienClasse =
+    Map<String, double>.from(rapportPersonnalise.parClasse);
+
+    rapportPersonnalise.actif = _actif;
+    rapportPersonnalise.parSection = nouvSection;
+    rapportPersonnalise.parClasse = nouvClasse;
+
+    final bool ok = await rapportPersonnalise.sauvegarder();
+    if (!mounted) return;
+
+    if (!ok) {
+      rapportPersonnalise.actif = ancienActif;
+      rapportPersonnalise.parSection = ancienSection;
+      rapportPersonnalise.parClasse = ancienClasse;
+      setState(() {
+        _enregistrement = false;
+        _erreur = "Échec de l'enregistrement. Réessayez.";
+      });
+      return;
+    }
+
+    Navigator.pop(context, true);
+  }
+
+  Widget _ligne({
+    required String libelle,
+    required double reel,
+    required TextEditingController ctrl,
+    String note = '',
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(libelle,
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  "Montant réel : ${formatMontant(reel)} FC$note",
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 150,
+            child: TextField(
+              controller: ctrl,
+              keyboardType:
+              const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[0-9., ]')),
+              ],
+              decoration: const InputDecoration(
+                labelText: "Sur le rapport",
+                suffixText: "FC",
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _lignesSections() {
+    return fs.config.sections.map((s) {
+      return _ligne(
+        libelle: s,
+        reel: fs.montantReferencePourRapport(s),
+        ctrl: _ctrlSection[s]!,
+        note: fs.sectionAFraisConfigure(s) ? '' : ' (frais non configurés)',
+      );
+    }).toList();
+  }
+
+  List<Widget> _lignesClasses() {
+    final widgets = <Widget>[];
+    for (final section in fs.config.sections) {
+      final classes = fs.getClassesForSection(section);
+      if (classes.isEmpty) continue;
+      widgets.add(Padding(
+        padding: const EdgeInsets.only(top: 12, bottom: 2),
+        child: Text(
+          section,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+            color: Colors.indigo,
+          ),
+        ),
+      ));
+      for (final classe in classes) {
+        final String cle = RapportPersonnalise.cleClasse(section, classe);
+        final ctrl = _ctrlClasse[cle];
+        if (ctrl == null) continue;
+        widgets.add(_ligne(
+          libelle: classe,
+          reel: fs.montantReferencePourRapport(section, classe),
+          ctrl: ctrl,
+        ));
+      }
+    }
+    if (widgets.isEmpty) {
+      widgets.add(const Text("Aucune classe configurée.",
+          style: TextStyle(color: Colors.grey)));
+    }
+    return widgets;
+  }
+
+  // --------------------------------------------------------------------------
+  // ⚡ NOUVEAU — bloc « Différence accumulée »
+  // --------------------------------------------------------------------------
+  Widget _ligneDifference(String libelle, double montant,
+      {bool gras = false, double retrait = 0}) {
+    return Padding(
+      padding: EdgeInsets.only(left: retrait, top: 2, bottom: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Text(
+              libelle,
+              style: TextStyle(
+                fontSize: gras ? 13 : 12,
+                fontWeight: gras ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ),
+          Text(
+            "${formatMontant(montant)} FC",
+            style: TextStyle(
+              fontSize: gras ? 13 : 12,
+              fontWeight: gras ? FontWeight.bold : FontWeight.normal,
+              color: Colors.deepOrange.shade800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _blocDifference() {
+    final List<Widget> lignes = [];
+
+    if (!rapportPersonnalise.enVigueur) {
+      lignes.add(const Text(
+        "Aucune différence pour le moment : la fonction n'est pas activée "
+            "(ou aucun montant n'est enregistré). Activez-la, enregistrez, "
+            "puis rouvrez cette fenêtre pour voir la différence.",
+        style: TextStyle(fontSize: 12),
+      ));
+    } else {
+      lignes.add(_ligneDifference(
+        "TOTAL accumulé (toute l'école)",
+        _diff.total,
+        gras: true,
+      ));
+      lignes.add(const Divider(height: 12));
+
+      bool aAuMoinsUneLigne = false;
+      final List<String> sectionsOrdonnees = [
+        ...fs.config.sections.where((s) => _diff.parSection.containsKey(s)),
+        ..._diff.parSection.keys
+            .where((s) => !fs.config.sections.contains(s))
+            .toList()
+          ..sort(),
+      ];
+      for (final section in sectionsOrdonnees) {
+        final double valSection = _diff.parSection[section] ?? 0.0;
+        if (valSection.abs() < 0.5) continue;
+        aAuMoinsUneLigne = true;
+        lignes.add(Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: _ligneDifference(section, valSection, gras: true),
+        ));
+        final classes = _diff.parClasse[section] ?? const <String, double>{};
+        final List<String> nomsClasses = classes.keys.toList()..sort();
+        for (final classe in nomsClasses) {
+          final double v = classes[classe] ?? 0.0;
+          if (v.abs() < 0.5) continue;
+          lignes.add(_ligneDifference("• $classe", v, retrait: 14));
+        }
+      }
+      if (!aAuMoinsUneLigne) {
+        lignes.add(const Text(
+          "Aucun paiement concerné pour l'instant.",
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ));
+      }
+      lignes.add(const SizedBox(height: 6));
+      lignes.add(const Text(
+        "Différence = montant réel payé − montant affiché sur le rapport, "
+            "cumulée sur tous les paiements de l'année (calculée avec les "
+            "montants enregistrés).",
+        style: TextStyle(fontSize: 11, color: Colors.grey),
+      ));
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.deepOrange.shade50,
+        border: Border.all(color: Colors.deepOrange.shade200),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "Différence accumulée (montant retenu)",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: Colors.deepOrange.shade900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          ...lignes,
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.tune, color: Colors.indigo),
+          SizedBox(width: 8),
+          Expanded(child: Text("Montants affichés sur le rapport")),
+        ],
+      ),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _actif,
+                onChanged: (v) => setState(() => _actif = v),
+                title: const Text("Activer les montants personnalisés"),
+                subtitle: Text(
+                  _actif
+                      ? "Les rapports PDF afficheront les montants saisis "
+                      "ci-dessous."
+                      : "Désactivé : les rapports affichent les montants "
+                      "réels (comportement normal).",
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+              const Divider(),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.indigo.shade50,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  "Saisissez le montant mensuel par élève à montrer sur le "
+                      "rapport (ex : 60 000 au lieu de 65 000). Les reçus, "
+                      "l'historique et toute l'application gardent le montant "
+                      "réel. Le montant du rapport doit être inférieur ou "
+                      "égal au montant réel. Un champ vide = montant réel. "
+                      "Si une section ET une de ses classes sont remplies, "
+                      "la classe est prioritaire. Les paiements partiels "
+                      "sont affichés proportionnellement.",
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+              const SizedBox(height: 12),
+              _blocDifference(),
+              const SizedBox(height: 12),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                    value: 'section',
+                    label: Text("Par section"),
+                    icon: Icon(Icons.account_tree),
+                  ),
+                  ButtonSegment(
+                    value: 'classe',
+                    label: Text("Par classe"),
+                    icon: Icon(Icons.class_),
+                  ),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (s) => setState(() => _mode = s.first),
+              ),
+              const SizedBox(height: 8),
+              if (_mode == 'section') ..._lignesSections(),
+              if (_mode == 'classe') ..._lignesClasses(),
+              if (_erreur != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _erreur!,
+                  style: const TextStyle(
+                      color: Colors.red, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _enregistrement ? null : _toutEffacer,
+          child: const Text("Tout effacer"),
+        ),
+        TextButton(
+          onPressed:
+          _enregistrement ? null : () => Navigator.pop(context, false),
+          child: const Text("Annuler"),
+        ),
+        ElevatedButton(
+          onPressed: _enregistrement ? null : _enregistrer,
+          child: _enregistrement
+              ? const SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+              : const Text("Enregistrer"),
+        ),
+      ],
+    );
   }
 }

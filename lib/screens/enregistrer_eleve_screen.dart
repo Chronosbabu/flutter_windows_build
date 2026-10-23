@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 
@@ -29,6 +30,13 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
 
   bool _isSaving = false;
 
+  // ⚡ NOUVEAU — clés de mémorisation permanente de la section / classe /
+  // sous-classe choisies. Elles restent en place (même après fermeture de
+  // l'écran ou de l'application) jusqu'à ce que l'utilisateur les change.
+  static const String _prefSection = 'enreg_eleve_section';
+  static const String _prefClasse = 'enreg_eleve_classe';
+  static const String _prefSousClasse = 'enreg_eleve_sous_classe';
+
   // ==========================================================================
   // AUTRES INFORMATIONS SUR L'IDENTITÉ DE L'ÉLÈVE (OPTIONNEL)
   // ==========================================================================
@@ -54,7 +62,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     if (widget.fraisScolaires.config.sections.isNotEmpty) {
       selectedSection = widget.fraisScolaires.config.sections.first;
     }
-    // ⚡ NOUVEAU — à l'ouverture de cet écran de paiement/inscription, on
+    // ⚡ NOUVEAU — on recharge la dernière sélection mémorisée.
+    _loadSavedSelection();
+    // ⚡ à l'ouverture de cet écran de paiement/inscription, on
     // tente de vider la file d'attente des reçus non encore imprimés (ex:
     // paiements faits pendant que l'imprimante était débranchée). Cela
     // fonctionne même après un redémarrage complet de l'application ou de
@@ -63,7 +73,78 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     _flushPendingReceipts();
   }
 
-  // ⚡ NOUVEAU
+  // ==========================================================================
+  // ⚡ NOUVEAU — MÉMORISATION PERMANENTE DE LA SECTION / CLASSE / SOUS-CLASSE
+  // ==========================================================================
+  Future<void> _loadSavedSelection() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedSection = prefs.getString(_prefSection);
+      final savedClasse = prefs.getString(_prefClasse);
+      final savedSous = prefs.getString(_prefSousClasse);
+
+      final fs = widget.fraisScolaires;
+
+      // On ne restaure que ce qui existe encore dans la configuration.
+      String? section = selectedSection;
+      if (savedSection != null && fs.config.sections.contains(savedSection)) {
+        section = savedSection;
+      }
+
+      String? classe;
+      String? sous;
+      if (section != null &&
+          savedSection == section &&
+          savedClasse != null &&
+          fs.getClassesForSection(section).contains(savedClasse)) {
+        classe = savedClasse;
+        if (savedSous != null &&
+            savedSous.isNotEmpty &&
+            fs.getSubClassesFor(section, savedClasse).contains(savedSous)) {
+          sous = savedSous;
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        selectedSection = section;
+        selectedClasseNumero = classe;
+        selectedSousClasse = sous;
+      });
+    } catch (_) {
+      // Pas grave : on garde simplement les valeurs par défaut.
+    }
+  }
+
+  Future<void> _saveSelection() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (selectedSection != null) {
+        await prefs.setString(_prefSection, selectedSection!);
+      } else {
+        await prefs.remove(_prefSection);
+      }
+      if (selectedClasseNumero != null) {
+        await prefs.setString(_prefClasse, selectedClasseNumero!);
+      } else {
+        await prefs.remove(_prefClasse);
+      }
+      if (selectedSousClasse != null) {
+        await prefs.setString(_prefSousClasse, selectedSousClasse!);
+      } else {
+        await prefs.remove(_prefSousClasse);
+      }
+    } catch (_) {}
+  }
+
+  // ⚡ NOUVEAU — remet le curseur dans "Nom" (après la fin de la frame, pour
+  // que ça marche même juste après un setState ou une fermeture de menu).
+  void _focusNom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) nomFocus.requestFocus();
+    });
+  }
+
   Future<void> _flushPendingReceipts() async {
     final count = await widget.fraisScolaires.flushReceiptQueue();
     if (mounted && count > 0) {
@@ -106,9 +187,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       c.clear();
     }
     setState(() {
-      selectedClasseNumero = null;
-      selectedSousClasse = null;
-      // On garde la section sélectionnée pour accélérer la saisie en série
+      // ⚡ CORRIGÉ — la section, le numéro de classe et la sous-classe sont
+      // CONSERVÉS après chaque ajout : on ne les efface plus. Ils changent
+      // uniquement quand l'utilisateur les modifie lui-même.
       selectedDateNaissance = null;
       photoBytes = null;
       _payerPrincipal = false;
@@ -116,7 +197,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       _payerAutreFrais = false;
       _selectedAutreFraisPaiement = null;
     });
-    nomFocus.requestFocus();
+    _focusNom();
   }
 
   // ==================== GÉNÉRATION D'ID 100% LOCALE ====================
@@ -189,9 +270,11 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                     selectedSousClasse = null;
                     _selectedAutreFraisPaiement = null;
                   });
+                  _saveSelection();
                 }
               }
               if (mounted) Navigator.pop(ctx);
+              _focusNom();
             },
             child: const Text("Ajouter"),
           ),
@@ -237,9 +320,11 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                     selectedSousClasse = value;
                     _selectedAutreFraisPaiement = null;
                   });
+                  _saveSelection();
                 }
               }
               if (mounted) Navigator.pop(ctx);
+              _focusNom();
             },
             child: const Text("Ajouter"),
           ),
@@ -505,6 +590,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       ),
     );
     if (mounted) setState(() {});
+    // ⚡ NOUVEAU — après les infos supplémentaires, retour direct au champ Nom.
+    _focusNom();
   }
 
   int _countFilledExtras() {
@@ -521,19 +608,32 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
   }
 
   Future<void> _ajouterEleve() async {
+    // ⚡ NOUVEAU — protection contre un double appui sur Entrée : si un
+    // enregistrement est déjà en cours, on ignore la deuxième demande.
+    if (_isSaving) return;
+
     if (nomController.text.trim().isEmpty ||
         postNomController.text.trim().isEmpty ||
         prenomController.text.trim().isEmpty ||
         selectedSection == null ||
         selectedClasseNumero == null) {
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Veuillez remplir tous les champs")),
       );
+      // On remet le curseur sur le premier champ vide pour corriger vite.
+      if (nomController.text.trim().isEmpty) {
+        nomFocus.requestFocus();
+      } else if (postNomController.text.trim().isEmpty) {
+        postNomFocus.requestFocus();
+      } else if (prenomController.text.trim().isEmpty) {
+        prenomFocus.requestFocus();
+      }
       return;
     }
 
     // ==========================================================================
-    // ⚡ NOUVEAU — UNICITÉ STRICTE NOM + POST-NOM + PRÉNOM
+    // UNICITÉ STRICTE NOM + POST-NOM + PRÉNOM
     //
     // Deux élèves peuvent partager deux de ces trois informations (même nom
     // et même post-nom, ou même nom et même prénom, etc.), mais JAMAIS les
@@ -549,6 +649,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       prenom: prenomController.text.trim(),
     );
     if (duplicateEleve != null) {
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -561,6 +662,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
           duration: const Duration(seconds: 5),
         ),
       );
+      prenomFocus.requestFocus();
       return;
     }
 
@@ -569,6 +671,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       montantPrincipalAPayer =
           double.tryParse(_montantPrincipalController.text.trim());
       if (montantPrincipalAPayer == null || montantPrincipalAPayer <= 0) {
+        ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -582,6 +685,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
     }
 
     if (_payerAutreFrais && _selectedAutreFraisPaiement == null) {
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -634,12 +738,12 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       // ==========================================================================
       // APPLICATION DES DEUX PAIEMENTS OPTIONNELS, DE MANIÈRE CUMULABLE.
       //
-      // ⚡ CORRIGÉ — `handlePayment` renvoie désormais la liste des
-      // transactions qu'il vient de créer (une par mois affecté, plus
-      // l'éventuelle transaction d'excédent sur le dernier mois si le
-      // montant dépasse un mois). On conserve cette liste pour pouvoir
-      // imprimer (ou mettre en file d'attente) UN REÇU PAR TRANSACTION,
-      // exactement comme dans l'écran "Paiements des Élèves".
+      // `handlePayment` renvoie la liste des transactions qu'il vient de
+      // créer (une par mois affecté, plus l'éventuelle transaction
+      // d'excédent sur le dernier mois si le montant dépasse un mois). On
+      // conserve cette liste pour pouvoir imprimer (ou mettre en file
+      // d'attente) UN REÇU PAR TRANSACTION, exactement comme dans l'écran
+      // "Paiements des Élèves".
       // ==========================================================================
       String? moisPrincipalPaye;
       List<Map<String, dynamic>> transactionsPrincipal = [];
@@ -666,14 +770,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       await widget.fraisScolaires.saveData(); // Sauvegarde locale (fichier sur l'appareil)
 
       // ==========================================================================
-      // ⚡ CORRIGÉ — IMPRESSION DÉSORMAIS GÉRÉE EXCLUSIVEMENT PAR LE SYSTÈME
-      // CENTRALISÉ DE FraisScolaires (anti-doublon + file d'attente
-      // persistante) : voir `printOrQueuePrincipalReceipt` et
-      // `printOrQueueAutreFraisReceipt`. Avant, cet écran imprimait
-      // directement lui-même (méthodes locales désormais supprimées), sans
-      // jamais vérifier si un reçu identique avait déjà été imprimé
-      // ailleurs, et sans jamais mettre en file d'attente si l'imprimante
-      // était débranchée. Maintenant :
+      // IMPRESSION GÉRÉE EXCLUSIVEMENT PAR LE SYSTÈME CENTRALISÉ DE
+      // FraisScolaires (anti-doublon + file d'attente persistante) : voir
+      // `printOrQueuePrincipalReceipt` et `printOrQueueAutreFraisReceipt`.
       //   - Si un reçu identique (même transaction) a déjà été imprimé une
       //     fois, peu importe depuis quel écran, il ne sera JAMAIS
       //     réimprimé.
@@ -682,8 +781,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
       //     disponible (même après extinction complète de l'ordinateur ou
       //     de l'application), voir `flushReceiptQueue`.
       //
-      // ⚡ CORRIGÉ #2 — `printOrQueuePrincipalReceipt` attend désormais un
-      // paramètre `transaction:` (et non plus `mois:` / `montantPaye:`).
+      // `printOrQueuePrincipalReceipt` attend un paramètre `transaction:`.
       // On imprime donc UN REÇU PAR TRANSACTION créée par `handlePayment`.
       // ==========================================================================
       int nbRecusPrincipalImprimes = 0;
@@ -725,16 +823,20 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             "${autreFraisRecuImprimeMaintenant ? '' : ' (reçu en attente d\'impression)'}";
       }
 
+      // ⚡ NOUVEAU — on remplace le message précédent au lieu de les empiler,
+      // pour que les ajouts en série restent fluides.
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
               "✅ ${nouvelEleve.nom} ${nouvelEleve.postNom} ajouté\nID: ${nouvelEleve.id}$messagePaiement"),
-          duration: const Duration(seconds: 3),
+          duration: const Duration(seconds: 2),
         ),
       );
       _clearFields();
     } catch (e) {
       if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Erreur lors de l'ajout : $e")),
       );
@@ -804,6 +906,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                   TextField(
                     controller: _montantPrincipalController,
                     keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.done,
+                    // ⚡ NOUVEAU — Entrée dans le montant ajoute l'élève.
+                    onSubmitted: (_) => _ajouterEleve(),
                     decoration: InputDecoration(
                       labelText: "Montant à payer (FC)",
                       border: const OutlineInputBorder(),
@@ -962,13 +1067,18 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              "Remplissez le formulaire et ajoutez plusieurs élèves rapidement",
+              "Tapez le Nom, appuyez sur Entrée, puis le Post-nom, Entrée, "
+                  "puis le Prénom, Entrée : l'élève est ajouté. La classe "
+                  "choisie reste mémorisée jusqu'à ce que vous la changiez.",
               style: TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 25),
             TextField(
               controller: nomController,
               focusNode: nomFocus,
+              // ⚡ NOUVEAU — curseur directement dans "Nom" à l'ouverture.
+              autofocus: true,
+              textInputAction: TextInputAction.next,
               textCapitalization: TextCapitalization.words,
               decoration: const InputDecoration(
                 labelText: "Nom",
@@ -980,6 +1090,7 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             TextField(
               controller: postNomController,
               focusNode: postNomFocus,
+              textInputAction: TextInputAction.next,
               textCapitalization: TextCapitalization.words,
               decoration: const InputDecoration(
                 labelText: "Post-nom",
@@ -991,11 +1102,15 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             TextField(
               controller: prenomController,
               focusNode: prenomFocus,
+              textInputAction: TextInputAction.done,
               textCapitalization: TextCapitalization.words,
               decoration: const InputDecoration(
                 labelText: "Prénom",
                 border: OutlineInputBorder(),
               ),
+              // ⚡ NOUVEAU — Entrée dans "Prénom" = ajouter l'élève, sans
+              // avoir à descendre cliquer sur le bouton.
+              onSubmitted: (_) => _ajouterEleve(),
             ),
             const SizedBox(height: 20),
 
@@ -1016,6 +1131,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                   selectedSousClasse = null;
                   _selectedAutreFraisPaiement = null;
                 });
+                _saveSelection();
+                _focusNom();
               },
             ),
             const SizedBox(height: 20),
@@ -1025,7 +1142,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: selectedClasseNumero,
+                    value: classesNumeros.contains(selectedClasseNumero)
+                        ? selectedClasseNumero
+                        : null,
                     decoration: const InputDecoration(
                       labelText: "Numéro de classe",
                       border: OutlineInputBorder(),
@@ -1039,6 +1158,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                         selectedSousClasse = null;
                         _selectedAutreFraisPaiement = null;
                       });
+                      _saveSelection();
+                      _focusNom();
                     },
                   ),
                 ),
@@ -1057,7 +1178,9 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: selectedSousClasse,
+                    value: sousClasses.contains(selectedSousClasse)
+                        ? selectedSousClasse
+                        : null,
                     decoration: const InputDecoration(
                       labelText: "Sous-classe (optionnel)",
                       border: OutlineInputBorder(),
@@ -1071,6 +1194,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
                         selectedSousClasse = value;
                         _selectedAutreFraisPaiement = null;
                       });
+                      _saveSelection();
+                      _focusNom();
                     },
                   ),
                 ),
@@ -1144,7 +1269,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             const SizedBox(height: 6),
             const Center(
               child: Text(
-                "Nom du père, nom de la mère, adresse, date de naissance, photo, "
+                "Nom du père, nom de la mère"
+                    ", adresse, date de naissance, photo, "
                     "et vos propres questions personnalisées.",
                 style: TextStyle(color: Colors.grey, fontSize: 11.5),
                 textAlign: TextAlign.center,
@@ -1154,7 +1280,8 @@ class _EnregistrerEleveScreenState extends State<EnregistrerEleveScreen> {
             const SizedBox(height: 30),
             const Center(
               child: Text(
-                "Les champs se vident automatiquement après chaque ajout\n"
+                "Les champs Nom, Post-nom et Prénom se vident après chaque ajout ; "
+                    "la section et la classe restent en place\n"
                     "L'ID unique est généré automatiquement, hors ligne, pour chaque élève",
                 style: TextStyle(color: Colors.grey, fontSize: 13),
                 textAlign: TextAlign.center,

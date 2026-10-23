@@ -1,5 +1,25 @@
 part of frais_scolaires;
 
+// ============================================================================
+// ⚡ NOUVEAU — RÉSULTAT DU CALCUL « DIFFÉRENCE ACCUMULÉE »
+// ============================================================================
+// Différence = montant réel payé − montant affiché sur le rapport, cumulée sur
+// tous les paiements de l'année (élèves actifs + archivés).
+//   - parSection : { 'Primaire': 125000 }
+//   - parClasse  : { 'Primaire': { '1ère A': 40000, '2ème': 85000 } }
+// ============================================================================
+class DifferenceRapport {
+  final Map<String, double> parSection;
+  final Map<String, Map<String, double>> parClasse;
+
+  const DifferenceRapport({
+    this.parSection = const {},
+    this.parClasse = const {},
+  });
+
+  double get total => parSection.values.fold(0.0, (a, b) => a + b);
+}
+
 extension FraisScolairesRapports on FraisScolaires {
   static const List<String> _joursSemaine = [
     'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'
@@ -16,6 +36,126 @@ extension FraisScolairesRapports on FraisScolaires {
     final jour = _joursSemaine[now.weekday - 1];
     return '$jour ${two(now.day)}/${two(now.month)}/${now.year} à '
         '${two(now.hour)}:${two(now.minute)}';
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — MONTANTS PERSONNALISÉS DU RAPPORT (fonction optionnelle)
+  // --------------------------------------------------------------------------
+  // Quand la fonction est activée (page de génération de rapport, 3 appuis sur
+  // le titre + mot de passe), les montants PAYÉS affichés dans les PDF de
+  // rapport sont recalculés proportionnellement :
+  //
+  //     montant affiché = montant réel × montant du rapport / montant réel
+  //                                      de la classe (frais mensuel)
+  //
+  // Exemple : frais réel 65 000 FC, montant du rapport 60 000 FC
+  //   - élève ayant payé 65 000 -> le rapport affiche 60 000 ;
+  //   - élève ayant payé 32 500 -> le rapport affiche 30 000.
+  //
+  // RIEN d'autre n'est modifié : les données, les reçus, l'historique et
+  // l'application restent sur les montants réels. Si la fonction est
+  // désactivée (ou qu'aucun montant n'est défini), toutes les fonctions
+  // ci-dessous renvoient exactement les valeurs d'origine.
+  // ==========================================================================
+
+  bool get _rapportPersonnaliseEnVigueur => rapportPersonnalise.enVigueur;
+
+  /// Montant mensuel réel de référence d'une classe (ou d'une section si
+  /// [classeNumero] est absent). Publique : utilisée par la boîte de dialogue.
+  double montantReferencePourRapport(String section, [String? classeNumero]) {
+    if (classeNumero != null && classeNumero.trim().isNotEmpty) {
+      final double? v =
+      config.feesByClasse['$section|${classeNumero.trim()}'];
+      if (v != null) return v;
+    }
+    return config.feesBySection[section] ??
+        FraisScolaires._montantSecoursSiNonConfigure;
+  }
+
+  /// Convertit un montant réel en montant à afficher sur le rapport.
+  double _versMontantRapport(String section, String classe, double reel) {
+    if (!_rapportPersonnaliseEnVigueur) return reel;
+    if (reel == 0) return reel;
+    final String numero = classeNumeroFromFullClasse(classe);
+    final double? cible = rapportPersonnalise.montantPour(section, numero);
+    if (cible == null || cible <= 0) return reel;
+    final double ref = montantReferencePourRapport(section, numero);
+    if (ref <= 0 || cible >= ref) return reel;
+    return reel * cible / ref;
+  }
+
+  double _versMontantRapportEleve(Eleve eleve, double reel) =>
+      _versMontantRapport(eleve.section, eleve.classe, reel);
+
+  /// ⚡ NOUVEAU — Différence accumulée (montant retenu) par section et par
+  /// classe : somme, sur tous les paiements de l'année (élèves actifs +
+  /// archivés), de (montant réel payé − montant affiché sur le rapport).
+  /// Retourne un résultat vide si la fonction n'est pas en vigueur.
+  /// Publique : utilisée par la boîte de dialogue cachée.
+  DifferenceRapport differenceAccumuleeRapport() {
+    if (!_rapportPersonnaliseEnVigueur) return const DifferenceRapport();
+    final Map<String, double> parSection = {};
+    final Map<String, Map<String, double>> parClasse = {};
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
+      final double paye =
+      months.fold<double>(0.0, (s, m) => s + (e.paid[m] ?? 0.0));
+      if (paye == 0) continue;
+      final double diff = paye - _versMontantRapportEleve(e, paye);
+      if (diff.abs() < 0.0001) continue;
+      parSection[e.section] = (parSection[e.section] ?? 0.0) + diff;
+      final classes = parClasse.putIfAbsent(e.section, () => {});
+      classes[e.classe] = (classes[e.classe] ?? 0.0) + diff;
+    }
+    return DifferenceRapport(parSection: parSection, parClasse: parClasse);
+  }
+
+  /// Total de l'année affiché dans le rapport (élèves actifs + archivés).
+  double _totalAnneeRapport() {
+    if (!_rapportPersonnaliseEnVigueur) return getYearTotalCollected();
+    double total = 0.0;
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
+      final double paye =
+      months.fold<double>(0.0, (s, m) => s + (e.paid[m] ?? 0.0));
+      total += _versMontantRapportEleve(e, paye);
+    }
+    return total;
+  }
+
+  /// Total du mois en cours affiché dans le rapport.
+  double _totalMoisCourantRapport() {
+    if (!_rapportPersonnaliseEnVigueur) return getCurrentMonthTotalCollected();
+    final idx = _schoolMonthIndexForToday();
+    if (idx < 0 || idx >= months.length) return 0.0;
+    final moisCourant = months[idx];
+    double total = 0.0;
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
+      total += _versMontantRapportEleve(e, e.paid[moisCourant] ?? 0.0);
+    }
+    return total;
+  }
+
+  /// Récapitulatif mensuel (rapport annuel).
+  List<double> _evolutionMensuelleRapport() {
+    if (!_rapportPersonnaliseEnVigueur) return getMonthlyEvolution();
+    return months
+        .map((m) => currentData.eleves.fold<double>(
+        0.0,
+            (sum, e) =>
+        sum + _versMontantRapportEleve(e, e.paid[m] ?? 0.0)))
+        .toList();
+  }
+
+  /// Collecte par section (jour / mois en cours / année) telle qu'affichée
+  /// dans la partie « Dépenses » du rapport.
+  Map<String, double> _collecteParSectionRapport(String period) {
+    final Map<String, double> result = {};
+    for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
+      final double montant =
+      _versMontantRapportEleve(e, _getStudentAmountForPeriod(e, period));
+      if (period != 'year' && montant == 0) continue;
+      result[e.section] = (result[e.section] ?? 0) + montant;
+    }
+    return result;
   }
 
   // ==========================================================================
@@ -53,7 +193,16 @@ extension FraisScolairesRapports on FraisScolaires {
   }
 
   /// Total collecté pour un mois scolaire donné (élèves actifs + archivés).
+  /// ⚡ Si les montants personnalisés sont actifs, le total est celui du
+  /// rapport ; sinon le calcul d'origine est conservé tel quel.
   double _totalCollecteMois(String mois) {
+    if (_rapportPersonnaliseEnVigueur) {
+      double total = 0.0;
+      for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
+        total += _versMontantRapportEleve(e, e.paid[mois] ?? 0.0);
+      }
+      return total;
+    }
     return currentData.eleves
         .fold(0.0, (sum, e) => sum + (e.paid[mois] ?? 0)) +
         elevesSupprimesData.eleves
@@ -64,7 +213,7 @@ extension FraisScolairesRapports on FraisScolaires {
   Map<String, double> _collecteMoisParSection(String mois) {
     final Map<String, double> result = {};
     for (final e in [...currentData.eleves, ...elevesSupprimesData.eleves]) {
-      final montant = e.paid[mois] ?? 0;
+      final montant = _versMontantRapportEleve(e, e.paid[mois] ?? 0.0);
       if (montant != 0) {
         result[e.section] = (result[e.section] ?? 0) + montant;
       }
@@ -74,11 +223,13 @@ extension FraisScolairesRapports on FraisScolaires {
 
   /// Montant payé par un élève sur la période. Si [mois] est fourni et que la
   /// période est 'month', on prend le mois choisi au lieu du mois en cours.
+  /// ⚡ Le montant est converti en montant de rapport si la fonction est
+  /// active (sinon valeur réelle inchangée).
   double _montantEleve(Eleve eleve, String period, String? mois) {
-    if (period == 'month' && mois != null) {
-      return eleve.paid[mois] ?? 0.0;
-    }
-    return _getStudentAmountForPeriod(eleve, period);
+    final double reel = (period == 'month' && mois != null)
+        ? (eleve.paid[mois] ?? 0.0)
+        : _getStudentAmountForPeriod(eleve, period);
+    return _versMontantRapportEleve(eleve, reel);
   }
 
   bool _paiementAutreFraisDansPeriodeMois(
@@ -90,13 +241,14 @@ extension FraisScolairesRapports on FraisScolaires {
     return paiementAutreFraisDansPeriode(p, period);
   }
 
-  /// Équivalent de computeDepensesStats('month') mais pour un mois choisi.
-  DepensePeriodeStats _computeDepensesStatsMois(
-      String mois, {
-        String? sectionFilter,
-        String? classFilter,
-      }) {
-    final collecteAll = _collecteMoisParSection(mois);
+  /// Construit les statistiques de dépenses à partir d'une collecte par
+  /// section et d'une liste de dépenses déjà filtrées.
+  DepensePeriodeStats _construireStatsDepenses({
+    required String period,
+    required Map<String, double> collecteAll,
+    required List<Depense> depenses,
+    String? sectionFilter,
+  }) {
     final collecteBySection = <String, double>{};
     collecteAll.forEach((s, v) {
       if (sectionFilter == null || s == sectionFilter) {
@@ -105,14 +257,6 @@ extension FraisScolairesRapports on FraisScolaires {
     });
     final double totalCollecte =
     collecteBySection.values.fold(0.0, (a, b) => a + b);
-
-    final repere = _dateRepereMois(mois);
-    final depenses = (depensesByYear[currentYear] ?? []).where((d) {
-      final bool okPeriode =
-          d.date.year == repere.year && d.date.month == repere.month;
-      return okPeriode && _depenseConcerneFiltre(d, sectionFilter, classFilter);
-    }).toList();
-    depenses.sort((a, b) => a.date.compareTo(b.date));
 
     final Map<String, RubriqueStat> rub = {};
     for (final admin in config.administrations) {
@@ -172,7 +316,7 @@ extension FraisScolairesRapports on FraisScolaires {
     }
 
     return DepensePeriodeStats(
-      period: 'month',
+      period: period,
       depenses: depenses,
       rubriques: rub.values.toList(),
       sections: secStats.values.toList(),
@@ -181,6 +325,48 @@ extension FraisScolairesRapports on FraisScolaires {
       independantes: independantes,
       mixtes: mixtes,
       globalesExclues: sectionFilter != null,
+    );
+  }
+
+  /// Équivalent de computeDepensesStats('month') mais pour un mois choisi.
+  DepensePeriodeStats _computeDepensesStatsMois(
+      String mois, {
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final repere = _dateRepereMois(mois);
+    final depenses = (depensesByYear[currentYear] ?? []).where((d) {
+      final bool okPeriode =
+          d.date.year == repere.year && d.date.month == repere.month;
+      return okPeriode && _depenseConcerneFiltre(d, sectionFilter, classFilter);
+    }).toList();
+    depenses.sort((a, b) => a.date.compareTo(b.date));
+
+    return _construireStatsDepenses(
+      period: 'month',
+      collecteAll: _collecteMoisParSection(mois),
+      depenses: depenses,
+      sectionFilter: sectionFilter,
+    );
+  }
+
+  /// ⚡ NOUVEAU — équivalent de computeDepensesStats(period) mais avec la
+  /// collecte exprimée en montants de rapport (utilisé uniquement quand la
+  /// fonction « montants personnalisés » est active).
+  DepensePeriodeStats _computeDepensesStatsRapport(
+      String period, {
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    return _construireStatsDepenses(
+      period: period,
+      collecteAll: _collecteParSectionRapport(period),
+      depenses: getDepensesForPeriod(
+        period,
+        sectionFilter: sectionFilter,
+        classFilter: classFilter,
+      ),
+      sectionFilter: sectionFilter,
     );
   }
 
@@ -293,7 +479,9 @@ extension FraisScolairesRapports on FraisScolaires {
     double? min;
     double? max;
     for (final e in eleves) {
-      final v = getRequiredForMonth(mois, e.section, e.classe);
+      // ⚡ Taux exprimé en montant de rapport si la fonction est active.
+      final v = _versMontantRapport(
+          e.section, e.classe, getRequiredForMonth(mois, e.section, e.classe));
       if (min == null || v < min) min = v;
       if (max == null || v > max) max = v;
     }
@@ -1255,7 +1443,15 @@ extension FraisScolairesRapports on FraisScolaires {
     }
 
     for (final period in const ['today', 'month', 'year']) {
-      final stats = computeDepensesStats(
+      // ⚡ Collecte exprimée en montants de rapport si la fonction est active ;
+      // sinon calcul d'origine inchangé.
+      final stats = _rapportPersonnaliseEnVigueur
+          ? _computeDepensesStatsRapport(
+        period,
+        sectionFilter: sectionFilter,
+        classFilter: classFilter,
+      )
+          : computeDepensesStats(
         period,
         sectionFilter: sectionFilter,
         classFilter: classFilter,
@@ -1457,6 +1653,8 @@ extension FraisScolairesRapports on FraisScolaires {
     );
   }
 
+  // ⚠️ REÇU / HISTORIQUE DE PAIEMENT : reste TOUJOURS sur les montants réels
+  // (aucune conversion « montants du rapport » ici).
   Future<Map<String, dynamic>> generateStudentPaymentHistoryPdf({
     required Eleve eleve,
     String? filename,
@@ -1642,6 +1840,10 @@ extension FraisScolairesRapports on FraisScolaires {
     bool includeDepenses = true,
     String? mois, // ⚡ NOUVEAU — mois scolaire choisi (rapport mensuel)
   }) async {
+    // ⚡ NOUVEAU — s'assure que le réglage « montants personnalisés » est
+    // chargé (sans effet s'il n'a jamais été activé).
+    await rapportPersonnalise.charger();
+
     if (reportType == "student_list") {
       return await _generateStudentListPdf(
         filename:      filename,
@@ -1708,10 +1910,12 @@ extension FraisScolairesRapports on FraisScolaires {
     final double total              = students.fold(
         0.0, (sum, e) => sum + _montantEleve(e, periodePourMontant, moisSel));
     final adminDistribution         = calculateAdminDistribution(total);
+    // ⚡ Totaux de l'école exprimés en montants de rapport si la fonction est
+    // active (sinon : mêmes valeurs qu'avant).
     final double totalMoisEcole     = moisSel != null
         ? _totalCollecteMois(moisSel)
-        : getCurrentMonthTotalCollected();
-    final double totalAnneeEcole    = getYearTotalCollected();
+        : _totalMoisCourantRapport();
+    final double totalAnneeEcole    = _totalAnneeRapport();
     final double totalDepensesAnnee = getTotalDepenses();
     final double soldeNetAnnee      = totalAnneeEcole - totalDepensesAnnee;
     final String currentMonthName = moisSel != null
@@ -1778,7 +1982,7 @@ extension FraisScolairesRapports on FraisScolaires {
       return row;
     }).toList();
     final List<double> recapMensuel =
-    reportType == "annual" ? getMonthlyEvolution() : const [];
+    reportType == "annual" ? _evolutionMensuelleRapport() : const [];
 
     final List<double> mainTableFlex = [
       0.7,
@@ -2059,6 +2263,9 @@ extension FraisScolairesRapports on FraisScolaires {
     String? sectionFilter,
     String? classFilter,
   }) async {
+    // ⚡ NOUVEAU — chargement du réglage « montants personnalisés ».
+    await rapportPersonnalise.charger();
+
     final students = getStudentsByOrderStatus(
       mois:          mois,
       enOrdre:       enOrdre,
@@ -2078,8 +2285,13 @@ extension FraisScolairesRapports on FraisScolaires {
     final rows = <List<String>>[];
     for (int i = 0; i < students.length; i++) {
       final e              = students[i];
-      final montantPaye    = e.paid[mois] ?? 0;
-      final montantRequis  = getRequiredForMonthForEleve(e, mois);
+      // ⚡ Montants exprimés en montants de rapport si la fonction est active
+      // (payé ET requis convertis avec le même coefficient : le statut
+      // « en ordre » reste cohérent).
+      final montantPaye    =
+      _versMontantRapportEleve(e, e.paid[mois] ?? 0.0);
+      final montantRequis  = _versMontantRapportEleve(
+          e, getRequiredForMonthForEleve(e, mois));
       rows.add([
         '${i + 1}',
         e.nom,
