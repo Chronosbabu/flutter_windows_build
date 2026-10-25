@@ -658,6 +658,7 @@ class RapportPersonnalise {
       _verrouJusqua = null;
       return null;
     }
+
     _echecs++;
     if (_echecs >= _maxEssais) {
       _echecs = 0;

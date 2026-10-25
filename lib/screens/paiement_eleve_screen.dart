@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
@@ -1194,6 +1195,35 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     );
   }
 
+  // ⚡ NOUVEAU — ouvre la fenêtre de saisie groupée des anciens paiements.
+  // Rien ne change sur cet écran tant qu'on n'appuie pas sur le bouton.
+  Future<void> _ouvrirSaisieGroupee() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SaisieGroupeeScreen(
+          fraisScolaires: widget.fraisScolaires,
+          receiptsLocked: _receiptsLocked,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _filterEleves();
+  }
+
+  // ⚡ NOUVEAU — ouvre la grille type cahier (élèves × mois).
+  Future<void> _ouvrirGrilleCahier() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => GrilleCahierScreen(
+          fraisScolaires: widget.fraisScolaires,
+          receiptsLocked: _receiptsLocked,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _filterEleves();
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<Map<String, String>> classFilterEntries = selectedSectionFilter != null
@@ -1231,6 +1261,18 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 ? "Impression des reçus bloquée — appuyer pour débloquer"
                 : "Impression des reçus active — appuyer pour bloquer",
             onPressed: _toggleReceiptsLock,
+          ),
+          // ⚡ NOUVEAU — grille type cahier (cocher les mois payés)
+          IconButton(
+            icon: const Icon(Icons.grid_on),
+            tooltip: "Grille type cahier (cocher les mois payés)",
+            onPressed: _ouvrirGrilleCahier,
+          ),
+          // ⚡ NOUVEAU — bouton de saisie groupée des anciens paiements
+          IconButton(
+            icon: const Icon(Icons.playlist_add_check_circle),
+            tooltip: "Saisie groupée des anciens paiements (cahier)",
+            onPressed: _ouvrirSaisieGroupee,
           ),
           IconButton(
             icon: _importing
@@ -2012,6 +2054,1983 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — OUTILS PARTAGÉS PAR LA SAISIE GROUPÉE ET LA GRILLE CAHIER
+// ============================================================================
+// Formats de dates + gestion des « lots saisis » (liste et annulation).
+// Chaque saisie groupée / grille crée un lot (marqueur lotSaisie sur chaque
+// paiement) : on peut ainsi retrouver et annuler un lot saisi par erreur.
+// ============================================================================
+
+String _deuxChiffres(int n) => n.toString().padLeft(2, '0');
+
+String _formatDate(DateTime d) =>
+    '${_deuxChiffres(d.day)}/${_deuxChiffres(d.month)}/${d.year}';
+
+String _formatDateHeure(DateTime d) =>
+    '${_formatDate(d)} ${_deuxChiffres(d.hour)}:${_deuxChiffres(d.minute)}';
+
+String _formatDateIso(String? iso) {
+  if (iso == null || iso.isEmpty) return '—';
+  final p = iso.split('-');
+  if (p.length == 3 && p[0].length == 4) return '${p[2]}/${p[1]}/${p[0]}';
+  return iso;
+}
+
+class _LigneLot {
+  final String mois;
+  final double montant;
+  // 'ok' | 'solde' | 'gratuit' | 'bloque' | 'sans_montant'
+  final String statut;
+  final bool plafonne;
+  final bool deblocage;
+
+  const _LigneLot({
+    required this.mois,
+    required this.montant,
+    required this.statut,
+    this.plafonne = false,
+    this.deblocage = false,
+  });
+}
+
+class _PlanEleve {
+  final Eleve eleve;
+  final List<_LigneLot> lignes;
+
+  const _PlanEleve({required this.eleve, required this.lignes});
+
+  Iterable<_LigneLot> get lignesOk =>
+      lignes.where((l) => l.statut == 'ok' && l.montant > 0);
+
+  bool get aEnregistrer => lignesOk.isNotEmpty;
+
+  double get total => lignesOk.fold(0.0, (s, l) => s + l.montant);
+
+  bool get toutSolde =>
+      lignes.isNotEmpty &&
+          lignes.every((l) => l.statut == 'solde' || l.statut == 'gratuit');
+}
+
+class _InfoLot {
+  final String id;
+  final Set<String> eleves = {};
+  final Set<String> mois = {};
+  int nbPaiements = 0;
+  double total = 0;
+  String? datePaiement;
+  DateTime? creeLe;
+
+  _InfoLot(this.id);
+
+  bool annulable(int heures) {
+    if (creeLe == null) return false;
+    return DateTime.now().difference(creeLe!) <= Duration(hours: heures);
+  }
+}
+
+class _LotsSaisie {
+  // Délai pendant lequel un lot peut être annulé directement (au-delà, il faut
+  // passer par les demandes au promoteur, paiement par paiement).
+  static const int delaiAnnulationHeures = 72;
+
+  static List<_InfoLot> collecter(FraisScolaires fs) {
+    final Map<String, _InfoLot> map = {};
+    for (final e in fs.currentData.eleves) {
+      for (final t in e.transactions) {
+        final String lot = t['lotSaisie']?.toString() ?? '';
+        if (lot.isEmpty) continue;
+        final info = map.putIfAbsent(lot, () => _InfoLot(lot));
+        info.eleves.add(e.id);
+        info.nbPaiements++;
+        info.total += (t['amount'] as num?)?.toDouble() ?? 0.0;
+        info.mois.add(t['mois']?.toString() ?? '');
+        info.datePaiement = t['date']?.toString();
+        final c = DateTime.tryParse(t['lotCreeLe']?.toString() ?? '');
+        if (c != null) info.creeLe = c;
+      }
+    }
+    final lots = map.values.toList();
+    lots.sort((a, b) {
+      final da = a.creeLe;
+      final db = b.creeLe;
+      if (da == null && db == null) return 0;
+      if (da == null) return 1;
+      if (db == null) return -1;
+      return db.compareTo(da);
+    });
+    return lots;
+  }
+
+  static Future<int> annuler(FraisScolaires fs, String lotId) async {
+    int retires = 0;
+    for (final e in fs.currentData.eleves) {
+      final aRetirer = e.transactions
+          .where((t) =>
+      t['lotSaisie'] == lotId && t['pendingRequestId'] == null)
+          .toList();
+      if (aRetirer.isEmpty) continue;
+
+      for (final t in aRetirer) {
+        final String mois = t['mois']?.toString() ?? '';
+        final double montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
+        double nouveau = (e.paid[mois] ?? 0.0) - montant;
+        if (nouveau < 0) nouveau = 0;
+        e.paid[mois] = nouveau;
+        e.transactions.remove(t);
+        final String cle = 'principal|${e.id}|${t['id']}';
+        fs.receiptQueue.removeWhere((r) => r['key'] == cle);
+        retires++;
+      }
+      // Même logique que l'annulation normale d'un paiement.
+      fs.recalculerRepartitionMoisPourEleve(e);
+    }
+    await fs.saveData();
+    return retires;
+  }
+
+  static void afficher(
+      BuildContext context, FraisScolaires fs, VoidCallback onChange) {
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          final lots = collecter(fs);
+          return AlertDialog(
+            title: const Text("Lots saisis"),
+            content: SizedBox(
+              width: 560,
+              height: 420,
+              child: lots.isEmpty
+                  ? const Center(
+                  child: Text("Aucune saisie groupée enregistrée."))
+                  : ListView.builder(
+                itemCount: lots.length,
+                itemBuilder: (c, i) {
+                  final l = lots[i];
+                  final moisTries = fs.months
+                      .where((m) => l.mois.contains(m))
+                      .toList();
+                  final bool annulable = l.annulable(delaiAnnulationHeures);
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    child: ListTile(
+                      title: Text(l.creeLe != null
+                          ? "Lot du ${_formatDateHeure(l.creeLe!)}"
+                          : "Lot ${l.id}"),
+                      subtitle: Text(
+                        "${l.eleves.length} élève(s) • ${l.nbPaiements} paiement(s)\n"
+                            "Total : ${formatMontant(l.total)} FC\n"
+                            "Mois : ${moisTries.join(', ')}\n"
+                            "Date des paiements : ${_formatDateIso(l.datePaiement)}",
+                      ),
+                      isThreeLine: true,
+                      trailing: annulable
+                          ? TextButton(
+                        onPressed: () async {
+                          final bool? conf = await showDialog<bool>(
+                            context: ctx,
+                            builder: (ctx2) => AlertDialog(
+                              title: const Text("Annuler ce lot ?"),
+                              content: Text(
+                                "Les ${l.nbPaiements} paiements de ce lot "
+                                    "(${formatMontant(l.total)} FC) seront retirés. "
+                                    "Cette action est définitive.",
+                              ),
+                              actions: [
+                                TextButton(
+                                    onPressed: () =>
+                                        Navigator.pop(ctx2, false),
+                                    child: const Text("Non")),
+                                ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.red,
+                                      foregroundColor: Colors.white),
+                                  onPressed: () =>
+                                      Navigator.pop(ctx2, true),
+                                  child: const Text("Annuler le lot"),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (conf != true) return;
+                          final n = await annuler(fs, l.id);
+                          if (!ctx.mounted) return;
+                          setD(() {});
+                          onChange();
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                    "🗑️ Lot annulé : $n paiement(s) retiré(s)."),
+                                backgroundColor: Colors.green,
+                              ),
+                            );
+                          }
+                        },
+                        child: const Text("Annuler",
+                            style: TextStyle(color: Colors.red)),
+                      )
+                          : const Tooltip(
+                        message:
+                        "Délai dépassé : passez par les demandes d'annulation au promoteur.",
+                        child: Icon(Icons.lock_clock, color: Colors.grey),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("Fermer")),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — SAISIE GROUPÉE DES ANCIENS PAIEMENTS
+// ============================================================================
+// Permet d'enregistrer d'un coup les paiements déjà faits avant l'utilisation
+// de l'application (cahier) : on coche le(s) mois, on choisit le montant, on
+// sélectionne les élèves, puis on enregistre.
+//
+// Règles (identiques au fonctionnement normal) :
+//   - un mois ne peut être payé que si les mois précédents sont soldés
+//     (sauf si l'option « Autoriser… » est activée) ;
+//   - le montant appliqué ne dépasse jamais ce qui reste à payer pour le mois ;
+//   - les exceptions de montant par élève/mois sont respectées ;
+//   - chaque paiement crée une vraie transaction (mêmes champs que d'habitude).
+//
+// Chaque paiement porte en plus les marqueurs « saisieGroupee » et « lotSaisie »
+// qui permettent de retrouver (et d'annuler) un lot saisi par erreur.
+// ============================================================================
+
+class SaisieGroupeeScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  final bool receiptsLocked;
+
+  const SaisieGroupeeScreen({
+    super.key,
+    required this.fraisScolaires,
+    required this.receiptsLocked,
+  });
+
+  @override
+  State<SaisieGroupeeScreen> createState() => _SaisieGroupeeScreenState();
+}
+
+class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
+  static const int _delaiAnnulationLotHeures =
+      _LotsSaisie.delaiAnnulationHeures;
+
+  final Set<String> _moisCoches = {};
+  String _modeMontant = 'complet'; // 'complet' | 'fixe'
+  final TextEditingController _montantCtrl = TextEditingController();
+  final TextEditingController _rechercheCtrl = TextEditingController();
+  DateTime _datePaiement = DateTime.now();
+  bool _autoriserSansPrecedents = false;
+  bool _imprimerRecus = false;
+  bool _masquerSoldes = true;
+  String? _filtreSection;
+  String? _filtreClasse;
+  final Set<String> _selection = {};
+  List<_PlanEleve> _plans = [];
+  bool _enCours = false;
+  String _progression = '';
+  int _seq = 0;
+
+  FraisScolaires get fs => widget.fraisScolaires;
+
+  @override
+  void initState() {
+    super.initState();
+    _plans = _calculerPlans();
+  }
+
+  @override
+  void dispose() {
+    _montantCtrl.dispose();
+    _rechercheCtrl.dispose();
+    super.dispose();
+  }
+
+  // --------------------------------------------------------------------------
+  // Utilitaires
+  // --------------------------------------------------------------------------
+  String _fmtDate(DateTime d) => _formatDate(d);
+
+  double? get _montantFixe {
+    final t = _montantCtrl.text
+        .trim()
+        .replaceAll(RegExp(r'\s'), '')
+        .replaceAll(',', '.');
+    if (t.isEmpty) return null;
+    return double.tryParse(t);
+  }
+
+  List<String> _moisCochesOrdonnes() =>
+      fs.months.where((m) => _moisCoches.contains(m)).toList();
+
+  // --------------------------------------------------------------------------
+  // Calcul du plan (aperçu = exactement ce qui sera enregistré)
+  // --------------------------------------------------------------------------
+  _PlanEleve _planifier(Eleve e) {
+    final Map<String, double> paidSim = Map<String, double>.from(e.paid);
+    final List<_LigneLot> lignes = [];
+    final double? fixe = _montantFixe;
+    bool precedentsSoldes = true;
+
+    for (final m in fs.months) {
+      final double requis = fs.getRequiredForMonthForEleve(e, m);
+      final double dejaPaye = paidSim[m] ?? 0.0;
+
+      if (_moisCoches.contains(m)) {
+        if (requis <= 0) {
+          lignes.add(_LigneLot(mois: m, montant: 0, statut: 'gratuit'));
+        } else if (dejaPaye >= requis) {
+          lignes.add(_LigneLot(mois: m, montant: 0, statut: 'solde'));
+        } else if (!precedentsSoldes && !_autoriserSansPrecedents) {
+          lignes.add(_LigneLot(mois: m, montant: 0, statut: 'bloque'));
+        } else {
+          final double reste = requis - dejaPaye;
+          double montant = 0;
+          bool plafonne = false;
+          bool valide = true;
+          if (_modeMontant == 'fixe') {
+            if (fixe == null || fixe <= 0) {
+              valide = false;
+            } else if (fixe > reste) {
+              montant = reste;
+              plafonne = true;
+            } else {
+              montant = fixe;
+            }
+          } else {
+            montant = reste;
+          }
+          if (!valide) {
+            lignes.add(_LigneLot(mois: m, montant: 0, statut: 'sans_montant'));
+          } else {
+            paidSim[m] = dejaPaye + montant;
+            lignes.add(_LigneLot(
+              mois: m,
+              montant: montant,
+              statut: 'ok',
+              plafonne: plafonne,
+              deblocage: !precedentsSoldes,
+            ));
+          }
+        }
+      }
+
+      if (requis > 0 && (paidSim[m] ?? 0.0) < requis) {
+        precedentsSoldes = false;
+      }
+    }
+
+    return _PlanEleve(eleve: e, lignes: lignes);
+  }
+
+  List<_PlanEleve> _calculerPlans() {
+    final String q = _rechercheCtrl.text.toLowerCase().trim();
+    final List<_PlanEleve> plans = [];
+    for (final e in fs.currentData.eleves) {
+      if (_filtreSection != null && e.section != _filtreSection) continue;
+      if (_filtreClasse != null && e.classe != _filtreClasse) continue;
+      if (q.isNotEmpty) {
+        final nom = '${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase();
+        if (!nom.contains(q) && !e.id.toLowerCase().contains(q)) continue;
+      }
+      final plan = _planifier(e);
+      if (_masquerSoldes && _moisCoches.isNotEmpty && plan.toutSolde) continue;
+      plans.add(plan);
+    }
+    plans.sort((a, b) {
+      final c = a.eleve.classe.compareTo(b.eleve.classe);
+      if (c != 0) return c;
+      final n = a.eleve.nom.toLowerCase().compareTo(b.eleve.nom.toLowerCase());
+      if (n != 0) return n;
+      return a.eleve.postNom
+          .toLowerCase()
+          .compareTo(b.eleve.postNom.toLowerCase());
+    });
+    return plans;
+  }
+
+  void _recalc() {
+    final plans = _calculerPlans();
+    final ids =
+    plans.where((p) => p.aEnregistrer).map((p) => p.eleve.id).toSet();
+    setState(() {
+      _plans = plans;
+      // On n'applique jamais qu'à ce qui est visible et enregistrable.
+      _selection.retainAll(ids);
+    });
+  }
+
+  String _resume(_PlanEleve p) {
+    if (_moisCoches.isEmpty) {
+      return 'Total déjà payé : ${formatMontant(fs.getStudentTotalPaid(p.eleve))} FC';
+    }
+    final parts = <String>[];
+    for (final l in p.lignes) {
+      switch (l.statut) {
+        case 'ok':
+          parts.add('✔ ${l.mois} : ${formatMontant(l.montant)} FC'
+              '${l.plafonne ? ' (plafonné au reste dû)' : ''}'
+              '${l.deblocage ? ' 🔓' : ''}');
+          break;
+        case 'solde':
+          parts.add('${l.mois} : déjà soldé');
+          break;
+        case 'gratuit':
+          parts.add('${l.mois} : mois gratuit');
+          break;
+        case 'bloque':
+          parts.add('⚠ ${l.mois} : bloqué (mois précédent non soldé)');
+          break;
+        case 'sans_montant':
+          parts.add('${l.mois} : entrez le montant');
+          break;
+      }
+    }
+    return parts.join('\n');
+  }
+
+  void _snack(String msg, {Color? color}) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
+  }
+
+  // --------------------------------------------------------------------------
+  // Actions de l'interface
+  // --------------------------------------------------------------------------
+  void _cocherJusquAuMoisCourant() {
+    final String? courant = fs.currentSchoolMonthName;
+    final int idx = courant == null ? -1 : fs.months.indexOf(courant);
+    _moisCoches.clear();
+    final int fin = idx < 0 ? fs.months.length - 1 : idx;
+    for (var i = 0; i <= fin; i++) {
+      _moisCoches.add(fs.months[i]);
+    }
+    _recalc();
+  }
+
+  Future<void> _choisirDate() async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final initial = DateTime(
+        _datePaiement.year, _datePaiement.month, _datePaiement.day);
+    final d = await showDatePicker(
+      context: context,
+      initialDate: initial.isAfter(today) ? today : initial,
+      firstDate: DateTime(2020),
+      lastDate: today,
+    );
+    if (d != null && mounted) setState(() => _datePaiement = d);
+  }
+
+  List<String> _classesDisponibles() {
+    final List<String> liste = _filtreSection != null
+        ? fs.getAllDisplayClassesForSection(_filtreSection!)
+        : fs.getAllDisplayClasses();
+    return LinkedHashSet<String>.from(liste).toList();
+  }
+
+  Widget _carte({required String titre, String? sousTitre, required Widget child}) {
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(titre,
+                style:
+                const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+            if (sousTitre != null) ...[
+              const SizedBox(height: 3),
+              Text(sousTitre,
+                  style: const TextStyle(fontSize: 11.5, color: Colors.grey)),
+            ],
+            const SizedBox(height: 10),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Enregistrement du lot
+  // --------------------------------------------------------------------------
+  Future<void> _enregistrer() async {
+    if (_enCours) return;
+    if (_moisCoches.isEmpty) {
+      _snack("Cochez au moins un mois.", color: Colors.orange);
+      return;
+    }
+    if (_modeMontant == 'fixe' && (_montantFixe == null || _montantFixe! <= 0)) {
+      _snack("Entrez un montant valide.", color: Colors.orange);
+      return;
+    }
+
+    final selectionnes = _plans
+        .where((p) => _selection.contains(p.eleve.id) && p.aEnregistrer)
+        .toList();
+    if (selectionnes.isEmpty) {
+      _snack("Sélectionnez au moins un élève.", color: Colors.orange);
+      return;
+    }
+
+    double totalPrevu = 0;
+    int nbPaiementsPrevus = 0;
+    for (final p in selectionnes) {
+      totalPrevu += p.total;
+      nbPaiementsPrevus += p.lignesOk.length;
+    }
+    final bool imprimer = _imprimerRecus && !widget.receiptsLocked;
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Confirmer la saisie groupée"),
+        content: SingleChildScrollView(
+          child: Text(
+            "Élèves : ${selectionnes.length}\n"
+                "Mois : ${_moisCochesOrdonnes().join(', ')}\n"
+                "Paiements à créer : $nbPaiementsPrevus\n"
+                "Total : ${formatMontant(totalPrevu)} FC\n"
+                "Date des paiements : ${_fmtDate(_datePaiement)}\n"
+                "Reçus : ${imprimer ? 'imprimés (ou mis en attente)' : 'non imprimés (ancien paiement du cahier)'}\n\n"
+                "Les paiements seront enregistrés comme des paiements normaux. "
+                "En cas d'erreur, vous pourrez annuler ce lot pendant "
+                "$_delaiAnnulationLotHeures heures depuis le bouton "
+                "« Lots saisis » en haut de cette page.",
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Retour")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Enregistrer"),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() {
+      _enCours = true;
+      _progression = 'Enregistrement...';
+    });
+
+    try {
+      final String lotId = 'LOT${DateTime.now().millisecondsSinceEpoch}';
+      final String creeLe = DateTime.now().toIso8601String();
+      final String dateStr =
+      DateTime(_datePaiement.year, _datePaiement.month, _datePaiement.day)
+          .toString()
+          .split(' ')[0];
+
+      final List<MapEntry<Eleve, Map<String, dynamic>>> nouvelles = [];
+      int nbEleves = 0;
+      double totalEnregistre = 0;
+      int nbPlafonnes = 0;
+      int nbBloques = 0;
+
+      for (final sel in selectionnes) {
+        final Eleve e = sel.eleve;
+        // Recalcul au moment de l'enregistrement (état le plus récent).
+        final plan = _planifier(e);
+        bool touche = false;
+
+        for (final l in plan.lignes) {
+          if (l.statut == 'bloque') nbBloques++;
+          if (l.statut != 'ok' || l.montant <= 0) continue;
+
+          final Map<String, dynamic> t = <String, dynamic>{
+            'id': 'TXB${DateTime.now().microsecondsSinceEpoch}_${_seq++}',
+            'date': dateStr,
+            'mois': l.mois,
+            'amount': l.montant,
+            'saisieGroupee': true,
+            'lotSaisie': lotId,
+            'lotCreeLe': creeLe,
+          };
+          if (l.deblocage) t['moisDebloque'] = true;
+
+          e.paid[l.mois] = (e.paid[l.mois] ?? 0.0) + l.montant;
+          e.transactions.add(t);
+          nouvelles.add(MapEntry(e, t));
+          totalEnregistre += l.montant;
+          if (l.plafonne) nbPlafonnes++;
+          touche = true;
+        }
+
+        if (touche) {
+          nbEleves++;
+          // Même nettoyage que le paiement normal.
+          if (e.moisDebloque != null) {
+            final String moisDeb = e.moisDebloque!;
+            final double requisDeb = fs.getRequiredForMonthForEleve(e, moisDeb);
+            if ((e.paid[moisDeb] ?? 0.0) >= requisDeb) e.moisDebloque = null;
+          }
+        }
+      }
+
+      if (!imprimer) {
+        for (final en in nouvelles) {
+          en.value['receiptConfirmed'] = true;
+        }
+      }
+
+      // Sauvegarde AVANT toute impression : les paiements sont sécurisés.
+      await fs.saveData();
+
+      int nbImprimes = 0;
+      if (imprimer) {
+        int i = 0;
+        for (final en in nouvelles) {
+          i++;
+          if (mounted) {
+            setState(() => _progression = 'Impression des reçus $i/${nouvelles.length}...');
+          }
+          final bool printed = await fs.printOrQueuePrincipalReceipt(
+              eleve: en.key, transaction: en.value);
+          en.value['receiptConfirmed'] = printed;
+          if (printed) nbImprimes++;
+        }
+        await fs.saveData();
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _selection.clear();
+      });
+      _recalc();
+
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("✅ Saisie groupée terminée"),
+          content: SingleChildScrollView(
+            child: Text(
+              "$nbEleves élève(s) • ${nouvelles.length} paiement(s)\n"
+                  "Total enregistré : ${formatMontant(totalEnregistre)} FC\n"
+                  "Date des paiements : ${_fmtDate(_datePaiement)}\n"
+                  "${imprimer ? 'Reçus imprimés : $nbImprimes/${nouvelles.length} (les autres sont en attente)\n' : ''}"
+                  "${nbPlafonnes > 0 ? '$nbPlafonnes paiement(s) plafonné(s) au reste dû\n' : ''}"
+                  "${nbBloques > 0 ? '$nbBloques mois ignoré(s) (mois précédent non soldé)\n' : ''}"
+                  "\nNuméro du lot : $lotId",
+            ),
+          ),
+          actions: [
+            ElevatedButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        _snack("❌ Erreur pendant l'enregistrement : $e", color: Colors.red);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _enCours = false;
+          _progression = '';
+        });
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Interface
+  // --------------------------------------------------------------------------
+  @override
+  Widget build(BuildContext context) {
+    final int nbSel = _selection.length;
+    double totalSel = 0;
+    for (final p in _plans) {
+      if (_selection.contains(p.eleve.id)) totalSel += p.total;
+    }
+    final List<String> sections = LinkedHashSet<String>.from(fs.config.sections).toList();
+    final List<String> classes = _classesDisponibles();
+    if (_filtreClasse != null && !classes.contains(_filtreClasse)) {
+      classes.add(_filtreClasse!);
+    }
+    final int nbSelectionnables = _plans.where((p) => p.aEnregistrer).length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Saisie groupée des anciens paiements"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: "Lots saisis (voir / annuler)",
+            onPressed: _enCours
+                ? null
+                : () => _LotsSaisie.afficher(context, fs, _recalc),
+          ),
+        ],
+      ),
+      body: AbsorbPointer(
+        absorbing: _enCours,
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        "Cette page sert à enregistrer rapidement les paiements "
+                            "déjà faits avant l'utilisation de l'application "
+                            "(cahier) : 1) cochez le(s) mois, 2) choisissez le "
+                            "montant, 3) sélectionnez les élèves, 4) enregistrez.",
+                        style: TextStyle(fontSize: 12.5),
+                      ),
+                    ),
+                    _carte(
+                      titre: "1. Mois à enregistrer",
+                      sousTitre:
+                      "Vous pouvez cocher plusieurs mois : chaque élève sera "
+                          "enregistré pour chacun d'eux.",
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 4,
+                            children: fs.months
+                                .map((m) => FilterChip(
+                              label: Text(m),
+                              selected: _moisCoches.contains(m),
+                              onSelected: (v) {
+                                if (v) {
+                                  _moisCoches.add(m);
+                                } else {
+                                  _moisCoches.remove(m);
+                                }
+                                _recalc();
+                              },
+                            ))
+                                .toList(),
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              TextButton(
+                                onPressed: _cocherJusquAuMoisCourant,
+                                child: const Text("Jusqu'au mois en cours"),
+                              ),
+                              TextButton(
+                                onPressed: () {
+                                  _moisCoches.clear();
+                                  _recalc();
+                                },
+                                child: const Text("Effacer"),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    _carte(
+                      titre: "2. Montant",
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SegmentedButton<String>(
+                            segments: const [
+                              ButtonSegment(
+                                value: 'complet',
+                                label: Text("Montant complet"),
+                                icon: Icon(Icons.done_all),
+                              ),
+                              ButtonSegment(
+                                value: 'fixe',
+                                label: Text("Montant unique"),
+                                icon: Icon(Icons.pin),
+                              ),
+                            ],
+                            selected: {_modeMontant},
+                            onSelectionChanged: (s) {
+                              _modeMontant = s.first;
+                              _recalc();
+                            },
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _modeMontant == 'complet'
+                                ? "Chaque élève est enregistré pour le montant "
+                                "complet de chaque mois coché (selon les "
+                                "paramètres, exceptions comprises)."
+                                : "Le même montant est enregistré pour chaque "
+                                "mois coché et chaque élève (jamais plus que "
+                                "ce qui reste à payer pour le mois).",
+                            style: const TextStyle(
+                                fontSize: 11.5, color: Colors.grey),
+                          ),
+                          if (_modeMontant == 'fixe') ...[
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: _montantCtrl,
+                              keyboardType:
+                              const TextInputType.numberWithOptions(
+                                  decimal: true),
+                              inputFormatters: [
+                                FilteringTextInputFormatter.allow(
+                                    RegExp(r'[0-9., ]')),
+                              ],
+                              decoration: const InputDecoration(
+                                labelText: "Montant par élève et par mois",
+                                suffixText: "FC",
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                              onChanged: (_) => _recalc(),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    _carte(
+                      titre: "3. Date des paiements",
+                      sousTitre:
+                      "Choisissez la date réelle des paiements du cahier, "
+                          "pour que les rapports journaliers restent exacts.",
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.event, color: Colors.indigo),
+                              const SizedBox(width: 8),
+                              Text(_fmtDate(_datePaiement),
+                                  style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.bold)),
+                              const SizedBox(width: 12),
+                              OutlinedButton(
+                                onPressed: _choisirDate,
+                                child: const Text("Changer la date"),
+                              ),
+                            ],
+                          ),
+                          ExpansionTile(
+                            tilePadding: EdgeInsets.zero,
+                            title: const Text("Options",
+                                style: TextStyle(fontSize: 13.5)),
+                            children: [
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                value: _autoriserSansPrecedents,
+                                onChanged: (v) {
+                                  _autoriserSansPrecedents = v;
+                                  _recalc();
+                                },
+                                title: const Text(
+                                    "Autoriser même si les mois précédents ne sont pas soldés",
+                                    style: TextStyle(fontSize: 13)),
+                                subtitle: const Text(
+                                    "Par défaut, un mois n'est enregistré que si les "
+                                        "mois d'avant sont soldés (comme d'habitude).",
+                                    style: TextStyle(fontSize: 11)),
+                              ),
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                value: _imprimerRecus && !widget.receiptsLocked,
+                                onChanged: widget.receiptsLocked
+                                    ? null
+                                    : (v) => setState(() => _imprimerRecus = v),
+                                title: const Text(
+                                    "Imprimer un reçu pour chaque paiement",
+                                    style: TextStyle(fontSize: 13)),
+                                subtitle: Text(
+                                    widget.receiptsLocked
+                                        ? "🔒 L'impression est bloquée."
+                                        : "Désactivé par défaut : ce sont d'anciens "
+                                        "paiements, déjà notés dans le cahier.",
+                                    style: const TextStyle(fontSize: 11)),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    _carte(
+                      titre: "4. Élèves",
+                      sousTitre:
+                      "Filtrez par section / classe, puis « Tout sélectionner » "
+                          "et décochez ceux qui n'ont pas payé.",
+                      child: Column(
+                        children: [
+                          TextField(
+                            controller: _rechercheCtrl,
+                            decoration: const InputDecoration(
+                              labelText: "Rechercher par ID ou nom",
+                              prefixIcon: Icon(Icons.search),
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            onChanged: (_) => _recalc(),
+                          ),
+                          const SizedBox(height: 10),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: DropdownButtonFormField<String?>(
+                                  value: _filtreSection,
+                                  isExpanded: true,
+                                  decoration: const InputDecoration(
+                                    labelText: "Section",
+                                    border: OutlineInputBorder(),
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    const DropdownMenuItem<String?>(
+                                        value: null,
+                                        child: Text("Toutes")),
+                                    ...sections.map((s) =>
+                                        DropdownMenuItem<String?>(
+                                            value: s, child: Text(s))),
+                                  ],
+                                  onChanged: (v) {
+                                    _filtreSection = v;
+                                    if (_filtreClasse != null &&
+                                        !_classesDisponibles()
+                                            .contains(_filtreClasse)) {
+                                      _filtreClasse = null;
+                                    }
+                                    _recalc();
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: DropdownButtonFormField<String?>(
+                                  value: _filtreClasse,
+                                  isExpanded: true,
+                                  decoration: const InputDecoration(
+                                    labelText: "Classe",
+                                    border: OutlineInputBorder(),
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    const DropdownMenuItem<String?>(
+                                        value: null,
+                                        child: Text("Toutes")),
+                                    ...classes.map((c) =>
+                                        DropdownMenuItem<String?>(
+                                            value: c, child: Text(c))),
+                                  ],
+                                  onChanged: (v) {
+                                    _filtreClasse = v;
+                                    _recalc();
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            value: _masquerSoldes,
+                            onChanged: (v) {
+                              _masquerSoldes = v;
+                              _recalc();
+                            },
+                            title: const Text(
+                                "Masquer ceux qui ont déjà soldé les mois cochés",
+                                style: TextStyle(fontSize: 13)),
+                          ),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  "${_plans.length} élève(s) affiché(s) • $nbSelectionnables sélectionnable(s)",
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: nbSelectionnables == 0
+                                    ? null
+                                    : () => setState(() {
+                                  _selection.addAll(_plans
+                                      .where((p) => p.aEnregistrer)
+                                      .map((p) => p.eleve.id));
+                                }),
+                                child: const Text("Tout sélectionner"),
+                              ),
+                              TextButton(
+                                onPressed: _selection.isEmpty
+                                    ? null
+                                    : () => setState(() => _selection.clear()),
+                                child: const Text("Aucun"),
+                              ),
+                            ],
+                          ),
+                          if (_moisCoches.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 4),
+                              child: Text(
+                                "⚠ Cochez d'abord au moins un mois (étape 1) pour pouvoir sélectionner des élèves.",
+                                style: TextStyle(
+                                    color: Colors.deepOrange, fontSize: 12),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            SliverList(
+              delegate: SliverChildBuilderDelegate(
+                    (ctx, i) {
+                  final p = _plans[i];
+                  final e = p.eleve;
+                  final bool selectionnable = p.aEnregistrer;
+                  return Card(
+                    margin:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+                    child: CheckboxListTile(
+                      value: _selection.contains(e.id),
+                      onChanged: selectionnable
+                          ? (v) => setState(() {
+                        if (v == true) {
+                          _selection.add(e.id);
+                        } else {
+                          _selection.remove(e.id);
+                        }
+                      })
+                          : null,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: Text('${e.nom} ${e.postNom} ${e.prenom}'),
+                      subtitle: Text(
+                        '${e.classe} | ${e.section}\n${_resume(p)}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: selectionnable ? null : Colors.grey,
+                        ),
+                      ),
+                      isThreeLine: true,
+                    ),
+                  );
+                },
+                childCount: _plans.length,
+              ),
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: 90)),
+          ],
+        ),
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: Theme.of(context).scaffoldBackgroundColor,
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 6),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_enCours) ...[
+                const LinearProgressIndicator(),
+                const SizedBox(height: 6),
+                Text(_progression, style: const TextStyle(fontSize: 12)),
+                const SizedBox(height: 6),
+              ],
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      "$nbSel élève(s) sélectionné(s)\n"
+                          "Total : ${formatMontant(totalSel)} FC",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.save),
+                    label: const Text("Enregistrer"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 14),
+                    ),
+                    onPressed: (nbSel > 0 && !_enCours) ? _enregistrer : null,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ⚡ NOUVEAU — GRILLE TYPE CAHIER (élèves × mois)
+// ============================================================================
+// Un tableau comme dans le cahier : une ligne par élève, une colonne par mois.
+//   - Appuyer sur une case la COCHE, et coche aussi tous les mois précédents
+//     non encore payés de cet élève (règle normale : on paie dans l'ordre).
+//     Appuyer sur une case cochée la décoche, ainsi que les mois suivants.
+//   - Appuyer sur le NOM D'UN MOIS (en-tête) coche (ou décoche) ce mois pour
+//     tous les élèves affichés.
+//   - Les cases vertes sont déjà soldées : elles ne se modifient pas.
+//   - Chaque case cochée est enregistrée pour le montant COMPLET restant du
+//     mois (exceptions de montant respectées).
+// Rien n'est enregistré tant qu'on n'appuie pas sur « Enregistrer ».
+// Les paiements créés portent les mêmes marqueurs de lot que la saisie
+// groupée : ils sont visibles et annulables dans « Lots saisis ».
+// ============================================================================
+
+class _ResumeGrille {
+  final int eleves;
+  final int paiements;
+  final double total;
+
+  const _ResumeGrille(this.eleves, this.paiements, this.total);
+}
+
+class GrilleCahierScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  final bool receiptsLocked;
+
+  const GrilleCahierScreen({
+    super.key,
+    required this.fraisScolaires,
+    required this.receiptsLocked,
+  });
+
+  @override
+  State<GrilleCahierScreen> createState() => _GrilleCahierScreenState();
+}
+
+class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
+  static const double _largeurNom = 190;
+  static const double _largeurCelluleMin = 58;
+  static const double _hauteurLigne = 54;
+  static const double _hauteurEntete = 42;
+
+  // eleveId -> mois cochés (nouveaux paiements à enregistrer)
+  final Map<String, Set<String>> _coches = {};
+  final TextEditingController _rechercheCtrl = TextEditingController();
+  String? _filtreSection;
+  String? _filtreClasse;
+  bool _masquerSoldes = true;
+  bool _cocherSeulementCeMois = false;
+  bool _imprimerRecus = false;
+  DateTime _datePaiement = DateTime.now();
+  List<Eleve> _eleves = [];
+  bool _enCours = false;
+  String _progression = '';
+  int _seq = 0;
+
+  FraisScolaires get fs => widget.fraisScolaires;
+
+  @override
+  void initState() {
+    super.initState();
+    _recalc();
+  }
+
+  @override
+  void dispose() {
+    _rechercheCtrl.dispose();
+    super.dispose();
+  }
+
+  // --------------------------------------------------------------------------
+  // Utilitaires
+  // --------------------------------------------------------------------------
+  void _snack(String msg, {Color? color}) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
+  }
+
+  List<String> _classesDisponibles() {
+    final List<String> liste = _filtreSection != null
+        ? fs.getAllDisplayClassesForSection(_filtreSection!)
+        : fs.getAllDisplayClasses();
+    return LinkedHashSet<String>.from(liste).toList();
+  }
+
+  String _libelleMois(String m) => m.length >= 3 ? m.substring(0, 3) : m;
+
+  // 'gratuit' | 'solde' | 'coche' | 'partiel' | 'vide'
+  String _statut(Eleve e, String mois) {
+    final double requis = fs.getRequiredForMonthForEleve(e, mois);
+    if (requis <= 0) return 'gratuit';
+    final double paye = e.paid[mois] ?? 0.0;
+    if (paye >= requis) return 'solde';
+    if (_coches[e.id]?.contains(mois) ?? false) return 'coche';
+    if (paye > 0) return 'partiel';
+    return 'vide';
+  }
+
+  // --------------------------------------------------------------------------
+  // Liste des élèves affichés
+  // --------------------------------------------------------------------------
+  void _recalc() {
+    final String q = _rechercheCtrl.text.toLowerCase().trim();
+    final List<Eleve> liste = [];
+    for (final e in fs.currentData.eleves) {
+      if (_filtreSection != null && e.section != _filtreSection) continue;
+      if (_filtreClasse != null && e.classe != _filtreClasse) continue;
+      if (q.isNotEmpty) {
+        final nom = '${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase();
+        if (!nom.contains(q) && !e.id.toLowerCase().contains(q)) continue;
+      }
+      if (_masquerSoldes && !(_coches[e.id]?.isNotEmpty ?? false)) {
+        final bool toutSolde = fs.months.every((m) {
+          final s = _statut(e, m);
+          return s == 'solde' || s == 'gratuit';
+        });
+        if (toutSolde) continue;
+      }
+      liste.add(e);
+    }
+    liste.sort((a, b) {
+      final c = a.classe.compareTo(b.classe);
+      if (c != 0) return c;
+      final n = a.nom.toLowerCase().compareTo(b.nom.toLowerCase());
+      if (n != 0) return n;
+      return a.postNom.toLowerCase().compareTo(b.postNom.toLowerCase());
+    });
+    setState(() => _eleves = liste);
+  }
+
+  // --------------------------------------------------------------------------
+  // Cocher / décocher
+  // --------------------------------------------------------------------------
+  void _cocher(Eleve e, String mois) {
+    final int idx = fs.months.indexOf(mois);
+    if (idx < 0) return;
+    final Set<String> set = _coches.putIfAbsent(e.id, () => <String>{});
+    final int debut = _cocherSeulementCeMois ? idx : 0;
+    for (var i = debut; i <= idx; i++) {
+      final String m = fs.months[i];
+      final String s = _statut(e, m);
+      if (s == 'vide' || s == 'partiel') set.add(m);
+    }
+  }
+
+  void _decocher(Eleve e, String mois) {
+    final Set<String>? set = _coches[e.id];
+    if (set == null) return;
+    final int idx = fs.months.indexOf(mois);
+    if (idx < 0) return;
+    if (_cocherSeulementCeMois) {
+      set.remove(mois);
+    } else {
+      for (var i = idx; i < fs.months.length; i++) {
+        set.remove(fs.months[i]);
+      }
+    }
+    if (set.isEmpty) _coches.remove(e.id);
+  }
+
+  void _tapCellule(Eleve e, String mois) {
+    final String s = _statut(e, mois);
+    setState(() {
+      if (s == 'coche') {
+        _decocher(e, mois);
+      } else if (s == 'vide' || s == 'partiel') {
+        _cocher(e, mois);
+      }
+    });
+  }
+
+  void _toggleColonne(String mois) {
+    final concernes = _eleves.where((e) {
+      final s = _statut(e, mois);
+      return s == 'vide' || s == 'partiel' || s == 'coche';
+    }).toList();
+    if (concernes.isEmpty) return;
+    final bool tousCoches = concernes.every((e) => _statut(e, mois) == 'coche');
+    setState(() {
+      for (final e in concernes) {
+        if (tousCoches) {
+          _decocher(e, mois);
+        } else {
+          _cocher(e, mois);
+        }
+      }
+    });
+  }
+
+  void _toutEffacer() {
+    setState(() => _coches.clear());
+    _recalc();
+  }
+
+  Future<void> _choisirDate() async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final initial = DateTime(
+        _datePaiement.year, _datePaiement.month, _datePaiement.day);
+    final d = await showDatePicker(
+      context: context,
+      initialDate: initial.isAfter(today) ? today : initial,
+      firstDate: DateTime(2020),
+      lastDate: today,
+    );
+    if (d != null && mounted) setState(() => _datePaiement = d);
+  }
+
+  // --------------------------------------------------------------------------
+  // Calcul de ce qui sera enregistré (aperçu = enregistrement)
+  // --------------------------------------------------------------------------
+  List<_LigneLot> _lignesPour(Eleve e) {
+    final Set<String> set = _coches[e.id] ?? const <String>{};
+    final Map<String, double> paidSim = Map<String, double>.from(e.paid);
+    final List<_LigneLot> lignes = [];
+    bool precedentsSoldes = true;
+
+    for (final m in fs.months) {
+      final double requis = fs.getRequiredForMonthForEleve(e, m);
+      final double dejaPaye = paidSim[m] ?? 0.0;
+
+      if (set.contains(m)) {
+        if (requis <= 0) {
+          lignes.add(_LigneLot(mois: m, montant: 0, statut: 'gratuit'));
+        } else if (dejaPaye >= requis) {
+          lignes.add(_LigneLot(mois: m, montant: 0, statut: 'solde'));
+        } else if (!precedentsSoldes && !_cocherSeulementCeMois) {
+          lignes.add(_LigneLot(mois: m, montant: 0, statut: 'bloque'));
+        } else {
+          final double montant = requis - dejaPaye;
+          paidSim[m] = dejaPaye + montant;
+          lignes.add(_LigneLot(
+            mois: m,
+            montant: montant,
+            statut: 'ok',
+            deblocage: !precedentsSoldes,
+          ));
+        }
+      }
+
+      if (requis > 0 && (paidSim[m] ?? 0.0) < requis) {
+        precedentsSoldes = false;
+      }
+    }
+    return lignes;
+  }
+
+  _ResumeGrille _calculerResume() {
+    final Map<String, Eleve> parId = {
+      for (final e in fs.currentData.eleves) e.id: e
+    };
+    int nbEleves = 0;
+    int nbPaiements = 0;
+    double total = 0;
+    for (final id in _coches.keys) {
+      final Eleve? e = parId[id];
+      if (e == null) continue;
+      final ok = _lignesPour(e).where((l) => l.statut == 'ok' && l.montant > 0);
+      if (ok.isEmpty) continue;
+      nbEleves++;
+      for (final l in ok) {
+        nbPaiements++;
+        total += l.montant;
+      }
+    }
+    return _ResumeGrille(nbEleves, nbPaiements, total);
+  }
+
+  // --------------------------------------------------------------------------
+  // Enregistrement
+  // --------------------------------------------------------------------------
+  Future<void> _enregistrer() async {
+    if (_enCours) return;
+
+    final Map<String, Eleve> parId = {
+      for (final e in fs.currentData.eleves) e.id: e
+    };
+    final List<Eleve> aTraiter = [];
+    double totalPrevu = 0;
+    int nbPaiementsPrevus = 0;
+    final Set<String> moisConcernes = {};
+
+    for (final id in _coches.keys) {
+      final Eleve? e = parId[id];
+      if (e == null) continue;
+      final ok = _lignesPour(e)
+          .where((l) => l.statut == 'ok' && l.montant > 0)
+          .toList();
+      if (ok.isEmpty) continue;
+      aTraiter.add(e);
+      for (final l in ok) {
+        totalPrevu += l.montant;
+        nbPaiementsPrevus++;
+        moisConcernes.add(l.mois);
+      }
+    }
+
+    if (aTraiter.isEmpty) {
+      _snack("Cochez au moins une case dans la grille.",
+          color: Colors.orange);
+      return;
+    }
+
+    final bool imprimer = _imprimerRecus && !widget.receiptsLocked;
+    final String moisTexte =
+    fs.months.where((m) => moisConcernes.contains(m)).join(', ');
+
+    final bool? confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Confirmer l'enregistrement"),
+        content: SingleChildScrollView(
+          child: Text(
+            "Élèves : ${aTraiter.length}\n"
+                "Mois : $moisTexte\n"
+                "Paiements à créer : $nbPaiementsPrevus\n"
+                "Total : ${formatMontant(totalPrevu)} FC\n"
+                "Date des paiements : ${_formatDate(_datePaiement)}\n"
+                "Reçus : ${imprimer ? 'imprimés (ou mis en attente)' : 'non imprimés (ancien paiement du cahier)'}\n\n"
+                "Les paiements seront enregistrés comme des paiements normaux. "
+                "En cas d'erreur, vous pourrez annuler ce lot pendant "
+                "${_LotsSaisie.delaiAnnulationHeures} heures depuis le bouton "
+                "« Lots saisis » en haut de cette page.",
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Retour")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Enregistrer"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || !mounted) return;
+
+    setState(() {
+      _enCours = true;
+      _progression = 'Enregistrement...';
+    });
+
+    try {
+      final String lotId = 'LOT${DateTime.now().millisecondsSinceEpoch}';
+      final String creeLe = DateTime.now().toIso8601String();
+      final String dateStr =
+      DateTime(_datePaiement.year, _datePaiement.month, _datePaiement.day)
+          .toString()
+          .split(' ')[0];
+
+      final List<MapEntry<Eleve, Map<String, dynamic>>> nouvelles = [];
+      int nbEleves = 0;
+      double totalEnregistre = 0;
+
+      for (final e in aTraiter) {
+        // Recalcul au dernier moment (état le plus récent).
+        final lignes = _lignesPour(e)
+            .where((l) => l.statut == 'ok' && l.montant > 0)
+            .toList();
+        bool touche = false;
+
+        for (final l in lignes) {
+          final Map<String, dynamic> t = <String, dynamic>{
+            'id': 'TXB${DateTime.now().microsecondsSinceEpoch}_${_seq++}',
+            'date': dateStr,
+            'mois': l.mois,
+            'amount': l.montant,
+            'saisieGroupee': true,
+            'lotSaisie': lotId,
+            'lotCreeLe': creeLe,
+          };
+          if (l.deblocage) t['moisDebloque'] = true;
+
+          e.paid[l.mois] = (e.paid[l.mois] ?? 0.0) + l.montant;
+          e.transactions.add(t);
+          nouvelles.add(MapEntry(e, t));
+          totalEnregistre += l.montant;
+          touche = true;
+        }
+
+        if (touche) {
+          nbEleves++;
+          // Même nettoyage que le paiement normal.
+          if (e.moisDebloque != null) {
+            final String moisDeb = e.moisDebloque!;
+            final double requisDeb = fs.getRequiredForMonthForEleve(e, moisDeb);
+            if ((e.paid[moisDeb] ?? 0.0) >= requisDeb) e.moisDebloque = null;
+          }
+        }
+      }
+
+      if (!imprimer) {
+        for (final en in nouvelles) {
+          en.value['receiptConfirmed'] = true;
+        }
+      }
+
+      // Sauvegarde AVANT toute impression : les paiements sont sécurisés.
+      await fs.saveData();
+
+      int nbImprimes = 0;
+      if (imprimer) {
+        int i = 0;
+        for (final en in nouvelles) {
+          i++;
+          if (mounted) {
+            setState(() =>
+            _progression = 'Impression des reçus $i/${nouvelles.length}...');
+          }
+          final bool printed = await fs.printOrQueuePrincipalReceipt(
+              eleve: en.key, transaction: en.value);
+          en.value['receiptConfirmed'] = printed;
+          if (printed) nbImprimes++;
+        }
+        await fs.saveData();
+      }
+
+      if (!mounted) return;
+      _coches.clear();
+      _recalc();
+
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("✅ Enregistrement terminé"),
+          content: SingleChildScrollView(
+            child: Text(
+              "$nbEleves élève(s) • ${nouvelles.length} paiement(s)\n"
+                  "Total enregistré : ${formatMontant(totalEnregistre)} FC\n"
+                  "Date des paiements : ${_formatDate(_datePaiement)}\n"
+                  "${imprimer ? 'Reçus imprimés : $nbImprimes/${nouvelles.length} (les autres sont en attente)\n' : ''}"
+                  "\nNuméro du lot : $lotId",
+            ),
+          ),
+          actions: [
+            ElevatedButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        _snack("❌ Erreur pendant l'enregistrement : $e", color: Colors.red);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _enCours = false;
+          _progression = '';
+        });
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Interface
+  // --------------------------------------------------------------------------
+  Widget _icone(String statut) {
+    switch (statut) {
+      case 'solde':
+        return Icon(Icons.check_circle, color: Colors.green.shade600, size: 22);
+      case 'gratuit':
+        return const Text('—',
+            style: TextStyle(color: Colors.grey, fontSize: 16));
+      case 'coche':
+        return const Icon(Icons.check_box, color: Colors.indigo, size: 26);
+      case 'partiel':
+        return const Icon(Icons.indeterminate_check_box,
+            color: Colors.orange, size: 26);
+      default:
+        return const Icon(Icons.check_box_outline_blank,
+            color: Colors.grey, size: 26);
+    }
+  }
+
+  Widget _barreFiltres() {
+    final List<String> sections =
+    LinkedHashSet<String>.from(fs.config.sections).toList();
+    final List<String> classes = _classesDisponibles();
+    if (_filtreClasse != null && !classes.contains(_filtreClasse)) {
+      classes.add(_filtreClasse!);
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: TextField(
+                  controller: _rechercheCtrl,
+                  decoration: const InputDecoration(
+                    labelText: "Rechercher (ID ou nom)",
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onChanged: (_) => _recalc(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 2,
+                child: DropdownButtonFormField<String?>(
+                  value: _filtreSection,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: "Section",
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                        value: null, child: Text("Toutes")),
+                    ...sections.map((s) => DropdownMenuItem<String?>(
+                        value: s, child: Text(s))),
+                  ],
+                  onChanged: (v) {
+                    _filtreSection = v;
+                    if (_filtreClasse != null &&
+                        !_classesDisponibles().contains(_filtreClasse)) {
+                      _filtreClasse = null;
+                    }
+                    _recalc();
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 2,
+                child: DropdownButtonFormField<String?>(
+                  value: _filtreClasse,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: "Classe",
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                        value: null, child: Text("Toutes")),
+                    ...classes.map((c) =>
+                        DropdownMenuItem<String?>(value: c, child: Text(c))),
+                  ],
+                  onChanged: (v) {
+                    _filtreClasse = v;
+                    _recalc();
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Icon(Icons.event, size: 18, color: Colors.indigo),
+              Text("Date des paiements : ${_formatDate(_datePaiement)}",
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.bold)),
+              OutlinedButton(
+                onPressed: _choisirDate,
+                style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact),
+                child: const Text("Changer"),
+              ),
+              FilterChip(
+                label: const Text("Masquer les élèves soldés"),
+                selected: _masquerSoldes,
+                onSelected: (v) {
+                  _masquerSoldes = v;
+                  _recalc();
+                },
+              ),
+              FilterChip(
+                label: const Text("Cocher seulement ce mois"),
+                selected: _cocherSeulementCeMois,
+                tooltip:
+                "Par défaut, cocher un mois coche aussi les mois précédents non payés.",
+                onSelected: (v) => setState(() => _cocherSeulementCeMois = v),
+              ),
+              FilterChip(
+                label: const Text("Imprimer les reçus"),
+                selected: _imprimerRecus && !widget.receiptsLocked,
+                tooltip: widget.receiptsLocked
+                    ? "L'impression est bloquée."
+                    : "Désactivé par défaut : anciens paiements du cahier.",
+                onSelected: widget.receiptsLocked
+                    ? null
+                    : (v) => setState(() => _imprimerRecus = v),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              "Appuyez sur une case pour la cocher (les mois précédents non payés "
+                  "sont cochés aussi). Appuyez sur le nom d'un mois pour toute la "
+                  "colonne. Vert = déjà soldé. Orange = paiement partiel.",
+              style: TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _entete(double largeurCellule) {
+    final String? courant = fs.currentSchoolMonthName;
+    return Container(
+      height: _hauteurEntete,
+      color: Colors.indigo.shade50,
+      child: Row(
+        children: [
+          const SizedBox(
+            width: _largeurNom,
+            child: Padding(
+              padding: EdgeInsets.only(left: 12),
+              child: Text("Élève",
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ),
+          ...fs.months.map((m) => InkWell(
+            onTap: () => _toggleColonne(m),
+            child: SizedBox(
+              width: largeurCellule,
+              height: _hauteurEntete,
+              child: Center(
+                child: Text(
+                  _libelleMois(m),
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: m == courant ? Colors.deepOrange : Colors.indigo,
+                    decoration: TextDecoration.underline,
+                  ),
+                ),
+              ),
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+
+  Widget _ligne(Eleve e, double largeurCellule, int index) {
+    return Container(
+      height: _hauteurLigne,
+      decoration: BoxDecoration(
+        color: index.isEven ? null : Colors.grey.withAlpha(18),
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.withAlpha(60), width: 0.6),
+        ),
+      ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: _largeurNom,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 12, right: 6),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${e.nom} ${e.postNom} ${e.prenom}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    e.classe,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          ...fs.months.map((m) {
+            final String s = _statut(e, m);
+            return InkWell(
+              onTap: (s == 'vide' || s == 'partiel' || s == 'coche')
+                  ? () => _tapCellule(e, m)
+                  : null,
+              child: Container(
+                width: largeurCellule,
+                height: _hauteurLigne,
+                color: s == 'coche' ? Colors.indigo.withAlpha(22) : null,
+                child: Center(child: _icone(s)),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _grille() {
+    if (_eleves.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            "Aucun élève à afficher (ou tous sont déjà soldés).",
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (ctx, c) {
+        final double minLargeur =
+            _largeurNom + _largeurCelluleMin * fs.months.length;
+        final double largeur = c.maxWidth < minLargeur ? minLargeur : c.maxWidth;
+        final double largeurCellule =
+            (largeur - _largeurNom) / fs.months.length;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: largeur,
+            height: c.maxHeight,
+            child: Column(
+              children: [
+                _entete(largeurCellule),
+                const Divider(height: 1),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _eleves.length,
+                    itemExtent: _hauteurLigne,
+                    itemBuilder: (context, i) =>
+                        _ligne(_eleves[i], largeurCellule, i),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _ResumeGrille r = _calculerResume();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Grille type cahier"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.clear_all),
+            tooltip: "Tout décocher",
+            onPressed: (_coches.isEmpty || _enCours) ? null : _toutEffacer,
+          ),
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: "Lots saisis (voir / annuler)",
+            onPressed: _enCours
+                ? null
+                : () => _LotsSaisie.afficher(context, fs, _recalc),
+          ),
+        ],
+      ),
+      body: AbsorbPointer(
+        absorbing: _enCours,
+        child: Column(
+          children: [
+            _barreFiltres(),
+            const Divider(height: 1),
+            Expanded(child: _grille()),
+          ],
+        ),
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: Theme.of(context).scaffoldBackgroundColor,
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 6),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_enCours) ...[
+                const LinearProgressIndicator(),
+                const SizedBox(height: 6),
+                Text(_progression, style: const TextStyle(fontSize: 12)),
+                const SizedBox(height: 6),
+              ],
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      "${r.eleves} élève(s) • ${r.paiements} paiement(s)\n"
+                          "Total : ${formatMontant(r.total)} FC",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.save),
+                    label: const Text("Enregistrer"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 14),
+                    ),
+                    onPressed:
+                    (r.paiements > 0 && !_enCours) ? _enregistrer : null,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
