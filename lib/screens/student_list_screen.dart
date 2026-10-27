@@ -321,7 +321,8 @@ class _StudentListScreenState extends State<StudentListScreen> {
       ),
     ).then((_) {
       // Au retour de cette page (après une éventuelle suppression
-      // définitive dans l'archive), on rafraîchit l'écran au cas où.
+      // définitive dans l'archive ou une annulation de paiements), on
+      // rafraîchit l'écran au cas où.
       if (mounted) setState(() {});
     });
   }
@@ -417,6 +418,9 @@ class _StudentListScreenState extends State<StudentListScreen> {
   //      dans la page "Élèves Supprimés", tant qu'on ne le supprime pas
   //      volontairement et définitivement depuis cette page (protégé par
   //      mot de passe admin).
+  //      ⚡ NOUVEAU — Depuis la page "Élèves Supprimés", on peut aussi
+  //      ANNULER ses paiements si l'école veut retirer cet argent de la
+  //      caisse.
   //   4. Toutes les autres pages (PaiementEleveScreen, etc.) lisent
   //      currentData.eleves en direct : elles se mettent à jour
   //      automatiquement à leur prochain rebuild.
@@ -531,7 +535,9 @@ class _StudentListScreenState extends State<StudentListScreen> {
                   "l'école, et son historique complet (paiements, "
                   "informations) reste consultable dans \"Élèves "
                   "Supprimés\" tant qu'on ne le supprime pas définitivement "
-                  "depuis cette page.\n\n"
+                  "depuis cette page. Si vous voulez aussi retirer son "
+                  "argent de la caisse, vous pourrez annuler ses paiements "
+                  "depuis \"Élèves Supprimés\".\n\n"
                   "Après cette action, pensez à sauvegarder sur le serveur "
                   "(Paramètres → Sauvegarder sur le Serveur) pour que la "
                   "modification soit prise en compte sur tous les appareils.",
@@ -1434,10 +1440,17 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
 //
 // Depuis cette page, on peut :
 //   - Consulter la date et le motif de suppression de chaque élève.
+//   - ⚡ NOUVEAU — Gérer / ANNULER les paiements d'un élève supprimé
+//     (bouton 💳) : annuler un paiement précis, ou tous ses paiements
+//     (scolarité + autres frais). L'argent annulé est alors RETIRÉ de la
+//     caisse de l'école (totaux globaux, par section, par classe, rapports).
+//     Protégé par mot de passe admin + confirmation, et enregistré dans le
+//     journal d'audit.
 //   - Supprimer DÉFINITIVEMENT un élève de l'archive (protégé par mot de
 //     passe admin + confirmation) : son historique nominatif disparaît,
 //     mais l'argent reste acquis à la caisse de l'école puisqu'il a déjà
-//     été comptabilisé au moment du paiement.
+//     été comptabilisé au moment du paiement (sauf si on a annulé ses
+//     paiements avant).
 //   - Vider complètement l'archive (protégé par mot de passe admin +
 //     confirmation).
 class ElevesSupprimesScreen extends StatefulWidget {
@@ -1517,6 +1530,22 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
     return passwordOk == true;
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — OUVERTURE DE LA GESTION DES PAIEMENTS D'UN ÉLÈVE SUPPRIMÉ
+  // ==========================================================================
+  Future<void> _openGestionPaiements(Eleve eleve) async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => _PaiementsEleveSupprimeDialog(
+        eleve: eleve,
+        fraisScolaires: widget.fraisScolaires,
+        verifyAdminPassword: _verifyAdminPassword,
+      ),
+    );
+    // Au retour, on rafraîchit la liste (le "Total déjà payé" a pu changer).
+    if (mounted) setState(() {});
+  }
+
   Future<void> _requestDeleteForever(Eleve eleve) async {
     final bool passwordOk = await _verifyAdminPassword();
     if (!passwordOk) return;
@@ -1572,6 +1601,9 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
                   "complètement du logiciel. L'argent déjà payé reste acquis "
                   "à la caisse de l'école, puisqu'il a déjà été comptabilisé "
                   "au moment du paiement.\n\n"
+                  "Si vous voulez aussi retirer son argent de la caisse, "
+                  "annulez d'abord ses paiements avec le bouton 💳 "
+                  "avant de le supprimer définitivement.\n\n"
                   "Après suppression, pensez à sauvegarder sur le serveur "
                   "(Paramètres → Sauvegarder sur le Serveur).",
               style: TextStyle(fontSize: 12.5, color: Colors.black87),
@@ -1709,9 +1741,11 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
                     child: Text(
                       "Ces élèves ne figurent plus dans le registre actif, "
                           "mais l'argent qu'ils ont déjà payé reste comptabilisé "
-                          "dans la caisse de l'école. La suppression définitive "
-                          "d'un historique nécessite le mot de passe "
-                          "administrateur.",
+                          "dans la caisse de l'école. Avec le bouton 💳 vous "
+                          "pouvez annuler leurs paiements si vous voulez "
+                          "retirer cet argent de la caisse. La suppression "
+                          "définitive d'un historique nécessite le mot de "
+                          "passe administrateur.",
                       style: TextStyle(fontSize: 12.5, color: Colors.indigo),
                     ),
                   ),
@@ -1816,17 +1850,544 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
                               ],
                             ),
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.delete_forever,
-                                color: Colors.red, size: 26),
-                            tooltip: "Supprimer définitivement l'historique",
-                            onPressed: () => _requestDeleteForever(e),
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // ⚡ NOUVEAU — gérer / annuler les paiements
+                              IconButton(
+                                icon: const Icon(Icons.payments_outlined,
+                                    color: Colors.orange, size: 26),
+                                tooltip: "Gérer / annuler les paiements",
+                                onPressed: () => _openGestionPaiements(e),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_forever,
+                                    color: Colors.red, size: 26),
+                                tooltip:
+                                "Supprimer définitivement l'historique",
+                                onPressed: () => _requestDeleteForever(e),
+                              ),
+                            ],
                           ),
                         ],
                       ),
                     ),
                   );
                 },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ==============================================================================
+// ⚡ NOUVEAU — BOÎTE DE DIALOGUE "PAIEMENTS D'UN ÉLÈVE SUPPRIMÉ"
+// ==============================================================================
+// Affiche tous les paiements d'un élève archivé :
+//   - les paiements de scolarité (eleve.transactions),
+//   - les paiements d'"autres frais" (autresFraisPaiementsByYear, toutes
+//     années confondues).
+//
+// Permet :
+//   - d'annuler UN paiement précis,
+//   - d'annuler TOUS les paiements de scolarité,
+//   - d'annuler TOUS les paiements d'autres frais.
+//
+// Chaque annulation :
+//   1. demande le mot de passe administrateur,
+//   2. demande une confirmation explicite,
+//   3. appelle les méthodes existantes de FraisScolaires
+//      (cancelTransaction / annulerPaiementAutreFrais) qui retirent
+//      l'argent de la caisse, ajoutent une ligne au journal d'audit et
+//      sauvegardent les données.
+// Comme tous les totaux de l'école additionnent aussi les élèves archivés,
+// l'argent annulé disparaît automatiquement du montant global, des totaux
+// par section/classe et des rapports.
+class _PaiementsEleveSupprimeDialog extends StatefulWidget {
+  final Eleve eleve;
+  final FraisScolaires fraisScolaires;
+  final Future<bool> Function() verifyAdminPassword;
+
+  const _PaiementsEleveSupprimeDialog({
+    required this.eleve,
+    required this.fraisScolaires,
+    required this.verifyAdminPassword,
+  });
+
+  @override
+  State<_PaiementsEleveSupprimeDialog> createState() =>
+      _PaiementsEleveSupprimeDialogState();
+}
+
+class _PaiementsEleveSupprimeDialogState
+    extends State<_PaiementsEleveSupprimeDialog> {
+  bool busy = false;
+
+  Eleve get eleve => widget.eleve;
+  FraisScolaires get fs => widget.fraisScolaires;
+
+  // ---------- Données ----------
+
+  List<Map<String, dynamic>> _transactionsTriees() {
+    final list = List<Map<String, dynamic>>.from(eleve.transactions);
+    list.sort((a, b) => (b['date'] ?? '')
+        .toString()
+        .compareTo((a['date'] ?? '').toString()));
+    return list;
+  }
+
+  /// Paiements "autres frais" de cet élève, toutes années confondues.
+  List<MapEntry<String, AutreFraisPaiement>> _autresPaiements() {
+    final result = <MapEntry<String, AutreFraisPaiement>>[];
+    fs.autresFraisPaiementsByYear.forEach((year, liste) {
+      for (final p in liste) {
+        if (p.eleveId == eleve.id) {
+          result.add(MapEntry(year, p));
+        }
+      }
+    });
+    result.sort((a, b) => b.value.date.compareTo(a.value.date));
+    return result;
+  }
+
+  double _totalAutres() => _autresPaiements()
+      .fold(0.0, (sum, e) => sum + e.value.montant);
+
+  // ---------- Confirmation générique ----------
+
+  Future<bool> _confirmer({
+    required String titre,
+    required String message,
+    required String boutonLabel,
+  }) async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded,
+                color: Colors.red, size: 26),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(titre,
+                  style: const TextStyle(color: Colors.red, fontSize: 17)),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Text(message, style: const TextStyle(fontSize: 13)),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(boutonLabel,
+                style: const TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 5)),
+    );
+  }
+
+  // ---------- Annulation d'UN paiement de scolarité ----------
+
+  Future<void> _annulerUneTransaction(Map<String, dynamic> t) async {
+    if (busy) return;
+    final double montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
+    final String mois = t['mois']?.toString() ?? '';
+    final String date = t['date']?.toString() ?? '';
+
+    final bool pwd = await widget.verifyAdminPassword();
+    if (!pwd) return;
+
+    final bool ok = await _confirmer(
+      titre: "Annuler ce paiement",
+      message: "Vous allez annuler le paiement de ${formatMontant(montant)} FC "
+          "($mois, $date) de ${eleve.nom} ${eleve.postNom} ${eleve.prenom}.\n\n"
+          "Ce montant sera RETIRÉ de la caisse de l'école (montant global, "
+          "section, classe, rapports). Cette action est enregistrée dans le "
+          "journal d'audit.\n\n"
+          "Pensez ensuite à sauvegarder sur le serveur.",
+      boutonLabel: "Annuler le paiement",
+    );
+    if (!ok) return;
+
+    setState(() => busy = true);
+    try {
+      await fs.cancelTransaction(eleve: eleve, transaction: t);
+      _snack("✅ Paiement de ${formatMontant(montant)} FC annulé. "
+          "Pensez à sauvegarder sur le serveur.");
+    } catch (e) {
+      _snack("Erreur lors de l'annulation : $e");
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  // ---------- Annulation de TOUS les paiements de scolarité ----------
+
+  Future<void> _annulerToutesTransactions() async {
+    if (busy) return;
+    final double total = fs.getStudentTotalPaid(eleve);
+    if (eleve.transactions.isEmpty && total <= 0.5) return;
+
+    final bool pwd = await widget.verifyAdminPassword();
+    if (!pwd) return;
+
+    final bool ok = await _confirmer(
+      titre: "Annuler tous les paiements de scolarité",
+      message: "Vous allez annuler TOUS les paiements de scolarité de "
+          "${eleve.nom} ${eleve.postNom} ${eleve.prenom}, soit "
+          "${formatMontant(total)} FC.\n\n"
+          "Cet argent sera RETIRÉ de la caisse de l'école (montant global, "
+          "section, classe, rapports). Cette action est enregistrée dans le "
+          "journal d'audit.\n\n"
+          "Pensez ensuite à sauvegarder sur le serveur.",
+      boutonLabel: "Tout annuler",
+    );
+    if (!ok) return;
+
+    setState(() => busy = true);
+    try {
+      final copie = List<Map<String, dynamic>>.from(eleve.transactions);
+      for (final t in copie) {
+        await fs.cancelTransaction(eleve: eleve, transaction: t);
+      }
+
+      // Cas des anciens paiements sans historique de transactions : il reste
+      // de l'argent dans eleve.paid. On le remet à zéro et on l'enregistre
+      // dans le journal d'audit.
+      final double reste = fs.getStudentTotalPaid(eleve);
+      if (reste > 0.5) {
+        eleve.paid.clear();
+        fs.adminAuditLog.add(AdminAuditLog(
+          id: 'AUD${DateTime.now().microsecondsSinceEpoch}',
+          action: 'annulation',
+          eleveId: eleve.id,
+          eleveNomComplet: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+          classe: eleve.classe,
+          mois: 'Tous les paiements (sans historique détaillé)',
+          montantAvant: reste,
+          montantApres: 0,
+        ));
+        await fs.saveData();
+      }
+
+      _snack("✅ Tous les paiements de scolarité (${formatMontant(total)} FC) "
+          "ont été annulés. Pensez à sauvegarder sur le serveur.");
+    } catch (e) {
+      _snack("Erreur lors de l'annulation : $e");
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  // ---------- Annulation d'UN paiement "autres frais" ----------
+
+  Future<void> _annulerUnAutrePaiement(
+      String year, AutreFraisPaiement p) async {
+    if (busy) return;
+
+    final bool pwd = await widget.verifyAdminPassword();
+    if (!pwd) return;
+
+    final bool ok = await _confirmer(
+      titre: "Annuler ce paiement",
+      message: "Vous allez annuler le paiement \"${p.autreFraisNom}\" de "
+          "${formatMontant(p.montant)} FC (${p.dateFormatee}) de "
+          "${eleve.nom} ${eleve.postNom} ${eleve.prenom}.\n\n"
+          "Ce montant sera RETIRÉ de la caisse de l'école. Cette action est "
+          "enregistrée dans le journal d'audit.\n\n"
+          "Pensez ensuite à sauvegarder sur le serveur.",
+      boutonLabel: "Annuler le paiement",
+    );
+    if (!ok) return;
+
+    setState(() => busy = true);
+    try {
+      await fs.annulerPaiementAutreFrais(
+        paiement: p,
+        eleve: eleve,
+        year: year,
+      );
+      _snack("✅ Paiement \"${p.autreFraisNom}\" annulé. "
+          "Pensez à sauvegarder sur le serveur.");
+    } catch (e) {
+      _snack("Erreur lors de l'annulation : $e");
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  // ---------- Annulation de TOUS les paiements "autres frais" ----------
+
+  Future<void> _annulerTousAutresPaiements() async {
+    if (busy) return;
+    final liste = _autresPaiements();
+    if (liste.isEmpty) return;
+    final double total = _totalAutres();
+
+    final bool pwd = await widget.verifyAdminPassword();
+    if (!pwd) return;
+
+    final bool ok = await _confirmer(
+      titre: "Annuler tous les autres frais payés",
+      message: "Vous allez annuler TOUS les paiements d'autres frais de "
+          "${eleve.nom} ${eleve.postNom} ${eleve.prenom}, soit "
+          "${formatMontant(total)} FC (${liste.length} paiement(s)).\n\n"
+          "Cet argent sera RETIRÉ de la caisse de l'école. Cette action est "
+          "enregistrée dans le journal d'audit.\n\n"
+          "Pensez ensuite à sauvegarder sur le serveur.",
+      boutonLabel: "Tout annuler",
+    );
+    if (!ok) return;
+
+    setState(() => busy = true);
+    try {
+      for (final entry in liste) {
+        await fs.annulerPaiementAutreFrais(
+          paiement: entry.value,
+          eleve: eleve,
+          year: entry.key,
+        );
+      }
+      _snack("✅ Tous les autres frais (${formatMontant(total)} FC) ont été "
+          "annulés. Pensez à sauvegarder sur le serveur.");
+    } catch (e) {
+      _snack("Erreur lors de l'annulation : $e");
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  // ---------- Interface ----------
+
+  Widget _sectionTitle(String label, double total, VoidCallback? onCancelAll) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              "$label — ${formatMontant(total)} FC",
+              style: const TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 13.5),
+            ),
+          ),
+          TextButton.icon(
+            icon: const Icon(Icons.delete_sweep, size: 18, color: Colors.red),
+            label: const Text("Tout annuler",
+                style: TextStyle(color: Colors.red, fontSize: 12.5)),
+            onPressed: (busy || onCancelAll == null) ? null : onCancelAll,
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final transactions = _transactionsTriees();
+    final autres = _autresPaiements();
+    final double totalScolarite = fs.getStudentTotalPaid(eleve);
+    final double totalAutres = _totalAutres();
+
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480, maxHeight: 680),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // ---------- En-tête ----------
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: const BoxDecoration(
+                color: Colors.indigo,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "PAIEMENTS DE L'ÉLÈVE SUPPRIMÉ",
+                    style: TextStyle(
+                        color: Colors.white70, fontSize: 11, letterSpacing: 1),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    "${eleve.nom} ${eleve.postNom} ${eleve.prenom}",
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16),
+                  ),
+                  Text(
+                    "${eleve.section} - ${eleve.classe}  |  ID : ${eleve.id}",
+                    style:
+                    const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+
+            // ---------- Corps ----------
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(8),
+                        border:
+                        Border.all(color: Colors.orange.withOpacity(0.4)),
+                      ),
+                      child: const Text(
+                        "Annuler un paiement RETIRE cet argent de la caisse de "
+                            "l'école (montant global, section, classe, "
+                            "rapports). Le mot de passe administrateur est "
+                            "demandé à chaque annulation.",
+                        style: TextStyle(fontSize: 12, color: Colors.black87),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+
+                    // ----- Scolarité -----
+                    _sectionTitle(
+                      "Scolarité",
+                      totalScolarite,
+                      (transactions.isEmpty && totalScolarite <= 0.5)
+                          ? null
+                          : _annulerToutesTransactions,
+                    ),
+                    if (transactions.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          totalScolarite > 0.5
+                              ? "Aucun détail de transaction (anciens paiements). "
+                              "Utilisez \"Tout annuler\" pour retirer "
+                              "${formatMontant(totalScolarite)} FC."
+                              : "Aucun paiement de scolarité.",
+                          style: const TextStyle(
+                              fontSize: 12.5, color: Colors.grey),
+                        ),
+                      )
+                    else
+                      ...transactions.map((t) {
+                        final double montant =
+                            (t['amount'] as num?)?.toDouble() ?? 0.0;
+                        final String mois = t['mois']?.toString() ?? '';
+                        final String date = t['date']?.toString() ?? '';
+                        return Card(
+                          margin: const EdgeInsets.symmetric(vertical: 3),
+                          child: ListTile(
+                            dense: true,
+                            title: Text(
+                              "${formatMontant(montant)} FC",
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.green),
+                            ),
+                            subtitle: Text("$mois  •  $date"),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.cancel,
+                                  color: Colors.red),
+                              tooltip: "Annuler ce paiement",
+                              onPressed: busy
+                                  ? null
+                                  : () => _annulerUneTransaction(t),
+                            ),
+                          ),
+                        );
+                      }),
+
+                    const Divider(height: 24),
+
+                    // ----- Autres frais -----
+                    _sectionTitle(
+                      "Autres frais",
+                      totalAutres,
+                      autres.isEmpty ? null : _annulerTousAutresPaiements,
+                    ),
+                    if (autres.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          "Aucun paiement d'autres frais.",
+                          style: TextStyle(fontSize: 12.5, color: Colors.grey),
+                        ),
+                      )
+                    else
+                      ...autres.map((entry) {
+                        final p = entry.value;
+                        final String tranche =
+                        fs.libelleTranchePaiementAutreFrais(p);
+                        return Card(
+                          margin: const EdgeInsets.symmetric(vertical: 3),
+                          child: ListTile(
+                            dense: true,
+                            title: Text(
+                              "${p.autreFraisNom} — ${formatMontant(p.montant)} FC",
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.green),
+                            ),
+                            subtitle: Text("$tranche  •  ${p.dateFormatee}"),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.cancel,
+                                  color: Colors.red),
+                              tooltip: "Annuler ce paiement",
+                              onPressed: busy
+                                  ? null
+                                  : () => _annulerUnAutrePaiement(
+                                  entry.key, p),
+                            ),
+                          ),
+                        );
+                      }),
+                  ],
+                ),
+              ),
+            ),
+
+            // ---------- Pied ----------
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+              child: Row(
+                children: [
+                  if (busy)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 12),
+                      child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: busy ? null : () => Navigator.pop(context),
+                      child: const Text("Fermer"),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

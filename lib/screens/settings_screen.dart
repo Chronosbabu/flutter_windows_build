@@ -54,6 +54,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Eleve> _resultatsRechercheEleveException = [];
   final List<_ExceptionDraft> _brouillonsException = [];
 
+  // ⚡ NOUVEAU — permet de faire défiler la page automatiquement jusqu'à la
+  // zone de modification d'une exception quand on clique sur "Modifier"
+  // depuis la liste des élèves en exception.
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _cleBrouillons = GlobalKey();
+
   List<String> _availablePrinters = [];
   String? _selectedPrinterName;
   bool _loadingPrinters = false;
@@ -78,6 +84,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    nameController.dispose();
+    feeController.dispose();
+    newClasseController.dispose();
+    _scrollController.dispose();
     eleveExceptionSearchController.dispose();
     for (final d in _brouillonsException) {
       d.montantController.dispose();
@@ -106,6 +116,66 @@ class _SettingsScreenState extends State<SettingsScreen> {
             GrilleFraisScreen(fraisScolaires: widget.fraisScolaires),
       ),
     );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — OUVERTURE DE LA PAGE "ÉLÈVES EN EXCEPTION"
+  // ==========================================================================
+  // Au lieu d'afficher la liste directement dans les Paramètres (ce qui
+  // allongeait énormément la page), un bouton ouvre une page dédiée avec
+  // recherche et toutes les actions (modifier, retirer un mois, retirer
+  // toutes les exceptions).
+  void _openListeExceptions() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _ListeExceptionsPage(
+          fraisScolaires: widget.fraisScolaires,
+          onRetirerTout: _retirerToutesExceptionsEleve,
+          onRetirerMois: _retirerExceptionMois,
+          onModifier: (Eleve e) {
+            _ajouterBrouillonException(e);
+            _allerAuxBrouillons();
+          },
+        ),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — OUVERTURE DE LA PAGE "AUTRES FRAIS DE PAIEMENT"
+  // ==========================================================================
+  void _openListeAutresFrais() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _ListeAutresFraisPage(
+          fraisScolaires: widget.fraisScolaires,
+          scopeLabel: _autreFraisScopeLabel,
+          onAjouter: _showAddAutreFraisDialog,
+          onModifier: _editAutreFraisDialog,
+          onMontants: _manageMontantsAutreFrais,
+          onSupprimer: _deleteAutreFrais,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _allerAuxBrouillons() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _cleBrouillons.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 400),
+          alignment: 0.1,
+        );
+      }
+    });
   }
 
   Future<bool> _verifyBackupPassword() async {
@@ -620,7 +690,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  void _showAddAutreFraisDialog() async {
+  Future<void> _showAddAutreFraisDialog() async {
     if (!await _verifyBackupPassword()) return;
 
     final nomController = TextEditingController();
@@ -756,7 +826,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _editAutreFraisDialog(AutreFrais frais) async {
+  Future<void> _editAutreFraisDialog(AutreFrais frais) async {
     if (!await _verifyBackupPassword()) return;
 
     final nomController = TextEditingController(text: frais.nom);
@@ -877,19 +947,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _manageMontantsAutreFrais(AutreFrais frais) async {
+  Future<void> _manageMontantsAutreFrais(AutreFrais frais) async {
     if (!await _verifyBackupPassword()) return;
-    _showManageMontantsDialog(frais);
+    await _showManageMontantsDialog(frais);
   }
 
-  void _showManageMontantsDialog(AutreFrais frais) {
+  Future<void> _showManageMontantsDialog(AutreFrais frais) async {
     final montantSectionController = TextEditingController();
     final montantClasseController = TextEditingController();
     String? sectionPourSection;
     String? sectionPourClasse;
     String? classePourClasse;
 
-    showDialog(
+    await showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
@@ -1130,7 +1200,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _deleteAutreFrais(AutreFrais frais) async {
+  Future<void> _deleteAutreFrais(AutreFrais frais) async {
     if (!await _verifyBackupPassword()) return;
     final confirm = await showDialog<bool>(
       context: context,
@@ -1600,77 +1670,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildCarteEleveException(Eleve e) {
-    final moisConcernes = widget.fraisScolaires.months
-        .where((m) => e.exceptionsMoisPersonnalisees.containsKey(m))
-        .toList();
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 3),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.star, color: Colors.indigo),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('${e.nom} ${e.postNom} ${e.prenom}',
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
-                      Text('${e.classe} - ${e.section}',
-                          style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
-                  tooltip: "Modifier",
-                  onPressed: () => _ajouterBrouillonException(e),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
-                  tooltip: "Retirer toutes les exceptions",
-                  onPressed: () => _retirerToutesExceptionsEleve(e),
-                ),
-              ],
-            ),
-            if (e.montantMensuelPersonnalise != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  "Tous les mois : ${e.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois"
-                      "${moisConcernes.isNotEmpty ? ' (sauf les mois précisés ci-dessous)' : ''}",
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold, color: Colors.indigo, fontSize: 12.5),
-                ),
-              ),
-            if (moisConcernes.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: moisConcernes.map((m) {
-                    final v = e.exceptionsMoisPersonnalisees[m] ?? 0;
-                    return InputChip(
-                      label: Text(v <= 0
-                          ? "$m : Gratuit"
-                          : "$m : ${v.toStringAsFixed(0)} FC"),
-                      onDeleted: () => _retirerExceptionMois(e, m),
-                    );
-                  }).toList(),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _addOptionDialog() async {
     if (!await _verifyBackupPassword()) return;
     final controller = TextEditingController();
@@ -2026,6 +2025,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: ListView(
+          controller: _scrollController,
+          // Construit toute la page d'avance pour que le défilement
+          // automatique vers la zone de modification fonctionne toujours.
+          cacheExtent: 100000,
           children: [
             if (_showBackupReminder)
               Container(
@@ -2096,6 +2099,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
               ),
+
+            // ⚡ NOUVEAU — ACCÈS RAPIDE aux deux longues listes
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.indigo.withAlpha(12),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.indigo.shade100),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Accès rapide",
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold, color: Colors.indigo),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    children: [
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.star),
+                        label: Text(
+                            "Élèves en exception (${elevesAvecExceptionPersonnalisee.length})"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.indigo,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: _openListeExceptions,
+                      ),
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.receipt_long),
+                        label: Text("Autres frais (${autresFraisList.length})"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.teal,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: _openListeAutresFrais,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
             const SizedBox(height: 20),
             const Text("Gestion des Sections",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -2518,22 +2569,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                 ),
               ),
-            ..._brouillonsException.map(_buildBrouillonException),
-            if (_brouillonsException.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.check),
-                label: Text(
-                    "Enregistrer les exceptions (${_brouillonsException.length} élève(s))"),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.indigo,
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(double.infinity, 46),
-                ),
-                onPressed: _enregistrerBrouillonsException,
-              ),
-            ],
+            // Zone de modification des exceptions (la clé sert au défilement
+            // automatique quand on clique sur "Modifier" depuis la liste).
+            Column(
+              key: _cleBrouillons,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ..._brouillonsException.map(_buildBrouillonException),
+                if (_brouillonsException.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.check),
+                    label: Text(
+                        "Enregistrer les exceptions (${_brouillonsException.length} élève(s))"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.indigo,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size(double.infinity, 46),
+                    ),
+                    onPressed: _enregistrerBrouillonsException,
+                  ),
+                ],
+              ],
+            ),
             const SizedBox(height: 16),
+            // ⚡ NOUVEAU — la longue liste des élèves en exception n'est plus
+            // affichée ici : un seul bouton ouvre une page dédiée avec
+            // recherche et toutes les actions.
             if (elevesAvecExceptionPersonnalisee.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 8),
@@ -2542,14 +2604,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
                 ),
               )
-            else ...[
-              Text(
-                "Élèves avec une exception de paiement (${elevesAvecExceptionPersonnalisee.length}) :",
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+            else
+              ElevatedButton.icon(
+                icon: const Icon(Icons.star),
+                label: Text(
+                    "Voir / rechercher les élèves en exception (${elevesAvecExceptionPersonnalisee.length})"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.indigo,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(double.infinity, 46),
+                ),
+                onPressed: _openListeExceptions,
               ),
-              const SizedBox(height: 6),
-              ...elevesAvecExceptionPersonnalisee.map(_buildCarteEleveException),
-            ],
 
             const Divider(),
             const Text("Recalcul de Sécurité des Paiements",
@@ -2671,6 +2737,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
+            // ⚡ NOUVEAU — la liste des autres frais n'est plus affichée ici :
+            // un bouton ouvre une page dédiée avec recherche et toutes les
+            // actions (modifier, montants par section/classe, supprimer).
             if (autresFraisList.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 8),
@@ -2680,39 +2749,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               )
             else
-              ...autresFraisList.map((f) {
-                final nbExceptions = f.montantsParSection.length + f.montantsParClasse.length;
-                return Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  child: ListTile(
-                    title: Text(f.nom),
-                    subtitle: Text(
-                      "${f.montant.toStringAsFixed(0)} FC — ${_autreFraisScopeLabel(f)}"
-                          "${nbExceptions > 0 ? ' • $nbExceptions montant(s) spécifique(s)' : ''}",
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.edit, color: Colors.indigo),
-                          tooltip: "Modifier le frais",
-                          onPressed: () => _editAutreFraisDialog(f),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.tune, color: Colors.teal),
-                          tooltip: "Montants par section/classe",
-                          onPressed: () => _manageMontantsAutreFrais(f),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline, color: Colors.red),
-                          tooltip: "Supprimer",
-                          onPressed: () => _deleteAutreFrais(f),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.receipt_long),
+                label: Text(
+                    "Voir / gérer les autres frais (${autresFraisList.length})"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.teal,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(double.infinity, 46),
+                ),
+                onPressed: _openListeAutresFrais,
+              ),
             const SizedBox(height: 10),
             ElevatedButton.icon(
               icon: const Icon(Icons.add_box),
@@ -3505,6 +3552,367 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: const Text("Enregistrer"),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ==============================================================================
+// ⚡ NOUVEAU — PAGE "ÉLÈVES EN EXCEPTION" (liste complète + recherche)
+// ==============================================================================
+// Ouverte depuis les Paramètres. Affiche TOUS les élèves qui ont une
+// exception de paiement (montant personnalisé et/ou exceptions par mois) avec
+// une barre de recherche (nom, post-nom, prénom, ID, classe, section).
+//
+// Aucune logique financière n'est dupliquée ici : chaque action appelle
+// exactement les mêmes méthodes qu'avant, définies dans l'écran Paramètres
+// (mot de passe demandé, recalcul automatique des paiements, etc.) :
+//   - Modifier        → ferme cette page et ouvre la zone de modification
+//                       dans les Paramètres (comme l'ancien bouton crayon).
+//   - Corbeille       → retire toutes les exceptions de l'élève.
+//   - Croix d'un mois → retire l'exception de ce mois seulement.
+class _ListeExceptionsPage extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  final Future<void> Function(Eleve) onRetirerTout;
+  final Future<void> Function(Eleve, String) onRetirerMois;
+  final void Function(Eleve) onModifier;
+
+  const _ListeExceptionsPage({
+    required this.fraisScolaires,
+    required this.onRetirerTout,
+    required this.onRetirerMois,
+    required this.onModifier,
+  });
+
+  @override
+  State<_ListeExceptionsPage> createState() => _ListeExceptionsPageState();
+}
+
+class _ListeExceptionsPageState extends State<_ListeExceptionsPage> {
+  final TextEditingController _searchController = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  bool _correspond(Eleve e, String q) {
+    return e.nom.toLowerCase().contains(q) ||
+        e.postNom.toLowerCase().contains(q) ||
+        e.prenom.toLowerCase().contains(q) ||
+        e.id.toLowerCase().contains(q) ||
+        e.classe.toLowerCase().contains(q) ||
+        e.section.toLowerCase().contains(q);
+  }
+
+  Widget _buildCarte(Eleve e) {
+    final moisConcernes = widget.fraisScolaires.months
+        .where((m) => e.exceptionsMoisPersonnalisees.containsKey(m))
+        .toList();
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.star, color: Colors.indigo),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('${e.nom} ${e.postNom} ${e.prenom}',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text('${e.classe} - ${e.section}  |  ID : ${e.id}',
+                          style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
+                  tooltip: "Modifier",
+                  onPressed: () {
+                    Navigator.pop(context);
+                    widget.onModifier(e);
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+                  tooltip: "Retirer toutes les exceptions",
+                  onPressed: () async {
+                    await widget.onRetirerTout(e);
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ],
+            ),
+            if (e.montantMensuelPersonnalise != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  "Tous les mois : ${e.montantMensuelPersonnalise!.toStringAsFixed(0)} FC/mois"
+                      "${moisConcernes.isNotEmpty ? ' (sauf les mois précisés ci-dessous)' : ''}",
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, color: Colors.indigo, fontSize: 12.5),
+                ),
+              ),
+            if (moisConcernes.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: moisConcernes.map((m) {
+                    final v = e.exceptionsMoisPersonnalisees[m] ?? 0;
+                    return InputChip(
+                      label: Text(v <= 0
+                          ? "$m : Gratuit"
+                          : "$m : ${v.toStringAsFixed(0)} FC"),
+                      onDeleted: () async {
+                        await widget.onRetirerMois(e, m);
+                        if (mounted) setState(() {});
+                      },
+                    );
+                  }).toList(),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tous = widget.fraisScolaires.getElevesAvecExceptionPersonnalisee();
+    final q = _query.trim().toLowerCase();
+    final liste = q.isEmpty ? tous : tous.where((e) => _correspond(e, q)).toList();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text("Élèves en exception")),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                labelText: "Rechercher (nom, ID, classe, section...)",
+                prefixIcon: const Icon(Icons.search),
+                border: const OutlineInputBorder(),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                  icon: const Icon(Icons.clear),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _query = '');
+                  },
+                ),
+              ),
+              onChanged: (v) => setState(() => _query = v),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                q.isEmpty
+                    ? "Total : ${tous.length} élève(s) en exception"
+                    : "${liste.length} résultat(s) sur ${tous.length}",
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: liste.isEmpty
+                  ? Center(
+                child: Text(
+                  tous.isEmpty
+                      ? "Aucun élève n'a actuellement d'exception de paiement."
+                      : "Aucun élève trouvé.",
+                  style: const TextStyle(
+                      color: Colors.grey, fontStyle: FontStyle.italic),
+                ),
+              )
+                  : ListView.builder(
+                itemCount: liste.length,
+                itemBuilder: (context, i) => _buildCarte(liste[i]),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ==============================================================================
+// ⚡ NOUVEAU — PAGE "AUTRES FRAIS DE PAIEMENT" (liste complète + recherche)
+// ==============================================================================
+// Ouverte depuis les Paramètres. Affiche tous les frais additionnels avec une
+// barre de recherche et les mêmes actions qu'avant (toutes définies dans
+// l'écran Paramètres, mot de passe demandé comme d'habitude) :
+//   - Modifier le frais,
+//   - Montants par section/classe,
+//   - Supprimer,
+//   - Ajouter un nouveau frais.
+class _ListeAutresFraisPage extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  final String Function(AutreFrais) scopeLabel;
+  final Future<void> Function() onAjouter;
+  final Future<void> Function(AutreFrais) onModifier;
+  final Future<void> Function(AutreFrais) onMontants;
+  final Future<void> Function(AutreFrais) onSupprimer;
+
+  const _ListeAutresFraisPage({
+    required this.fraisScolaires,
+    required this.scopeLabel,
+    required this.onAjouter,
+    required this.onModifier,
+    required this.onMontants,
+    required this.onSupprimer,
+  });
+
+  @override
+  State<_ListeAutresFraisPage> createState() => _ListeAutresFraisPageState();
+}
+
+class _ListeAutresFraisPageState extends State<_ListeAutresFraisPage> {
+  final TextEditingController _searchController = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tous = widget.fraisScolaires.getAutresFrais();
+    final q = _query.trim().toLowerCase();
+    final liste = q.isEmpty
+        ? tous
+        : tous
+        .where((f) =>
+    f.nom.toLowerCase().contains(q) ||
+        widget.scopeLabel(f).toLowerCase().contains(q))
+        .toList();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text("Autres Frais de Paiement")),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add_box),
+              label: const Text("Ajouter un Frais Additionnel"),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+              ),
+              onPressed: () async {
+                await widget.onAjouter();
+                if (mounted) setState(() {});
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                labelText: "Rechercher un frais (nom, section, classe...)",
+                prefixIcon: const Icon(Icons.search),
+                border: const OutlineInputBorder(),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                  icon: const Icon(Icons.clear),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _query = '');
+                  },
+                ),
+              ),
+              onChanged: (v) => setState(() => _query = v),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                q.isEmpty
+                    ? "Total : ${tous.length} frais"
+                    : "${liste.length} résultat(s) sur ${tous.length}",
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: liste.isEmpty
+                  ? Center(
+                child: Text(
+                  tous.isEmpty
+                      ? "Aucun frais additionnel défini pour le moment."
+                      : "Aucun frais trouvé.",
+                  style: const TextStyle(
+                      color: Colors.grey, fontStyle: FontStyle.italic),
+                ),
+              )
+                  : ListView.builder(
+                itemCount: liste.length,
+                itemBuilder: (context, i) {
+                  final f = liste[i];
+                  final nbExceptions =
+                      f.montantsParSection.length + f.montantsParClasse.length;
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    child: ListTile(
+                      title: Text(f.nom),
+                      subtitle: Text(
+                        "${f.montant.toStringAsFixed(0)} FC — ${widget.scopeLabel(f)}"
+                            "${nbExceptions > 0 ? ' • $nbExceptions montant(s) spécifique(s)' : ''}",
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit, color: Colors.indigo),
+                            tooltip: "Modifier le frais",
+                            onPressed: () async {
+                              await widget.onModifier(f);
+                              if (mounted) setState(() {});
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.tune, color: Colors.teal),
+                            tooltip: "Montants par section/classe",
+                            onPressed: () async {
+                              await widget.onMontants(f);
+                              if (mounted) setState(() {});
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline,
+                                color: Colors.red),
+                            tooltip: "Supprimer",
+                            onPressed: () async {
+                              await widget.onSupprimer(f);
+                              if (mounted) setState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
