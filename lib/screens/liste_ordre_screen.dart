@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
+import '../services/cahier_paiement_service.dart';
 
 class ListeOrdreScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -19,6 +20,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
   bool enOrdre = true;
   List<Eleve> resultats = [];
   bool listeGeneree = false;
+
+  // ⚡ NOUVEAU — indique qu'un cahier de paiement est en cours de génération
+  bool _generationCahier = false;
 
   @override
   void initState() {
@@ -106,6 +110,94 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
         ),
       );
     }
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — CAHIER DE PAIEMENT (PDF)
+  // ==========================================================================
+  // Génère un cahier de paiement pour la section / classe actuellement
+  // choisies dans les filtres ci-dessus (toutes si rien n'est choisi).
+  // Le mois et le statut "Ont déjà payé / Pas encore payé" ne sont PAS
+  // utilisés : le cahier montre tous les mois, de Septembre à Juin.
+  // Fonction en lecture seule : aucune donnée de l'école n'est modifiée.
+  Future<void> _genererCahier() async {
+    if (_generationCahier) return;
+
+    final String sectionTxt = selectedSection ?? "Toutes les sections";
+    final String classeTxt = selectedClasse ?? "Toutes les classes";
+    final String nomParDefaut =
+    "Cahier_Paiement_${selectedSection ?? 'Toutes_Sections'}_${selectedClasse ?? 'Toutes_Classes'}"
+        .replaceAll(' ', '_');
+
+    final controller = TextEditingController(text: nomParDefaut);
+
+    final filename = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Cahier de paiement (PDF)"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "Section : $sectionTxt\nClasse : $classeTxt",
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              "Une page (ou plus) par classe, avec tous les élèves et les "
+                  "mois de Septembre à Juin : montant payé, mois soldé ou "
+                  "reste à payer.",
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: "Nom du fichier",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text("Générer"),
+          ),
+        ],
+      ),
+    );
+
+    if (filename == null || filename.isEmpty) return;
+
+    setState(() => _generationCahier = true);
+
+    final resultat = await genererCahierPaiementPdf(
+      fraisScolaires: widget.fraisScolaires,
+      filename: filename,
+      sectionFilter: selectedSection,
+      classFilter: selectedClasse,
+    );
+
+    if (!mounted) return;
+    setState(() => _generationCahier = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          resultat.succes
+              ? "✅ Cahier généré : ${resultat.nbEleves} élève(s), "
+              "${resultat.nbClasses} classe(s).\nFichier : ${resultat.chemin}"
+              : "❌ ${resultat.erreur ?? 'Erreur inconnue'}",
+        ),
+        backgroundColor: resultat.succes ? Colors.green : Colors.red,
+        duration: const Duration(seconds: 7),
+      ),
+    );
   }
 
   @override
@@ -241,7 +333,35 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                 onPressed: _genererListe,
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
+
+            // ==================== ⚡ NOUVEAU — CAHIER DE PAIEMENT ====================
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: _generationCahier
+                    ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+                    : const Icon(Icons.menu_book),
+                label: Text(_generationCahier
+                    ? "Génération du cahier..."
+                    : "Cahier de paiement (PDF)"),
+                onPressed: _generationCahier ? null : _genererCahier,
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: Text(
+                "Le cahier utilise la section et la classe choisies ci-dessus "
+                    "(toutes si rien n'est choisi) et montre tous les mois.",
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+            ),
+            const SizedBox(height: 12),
 
             // ==================== RÉSUMÉ ====================
             if (listeGeneree)
