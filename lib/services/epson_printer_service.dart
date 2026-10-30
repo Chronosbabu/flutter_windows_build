@@ -13,6 +13,136 @@ class EscPosPrinterService {
   static bool _logFileResolved = false;
   static const int _maxLogSizeBytes = 5 * 1024 * 1024;
 
+  // ---------------------------------------------------------------------------
+  // MISE EN PAGE DES REÇUS (réglages centralisés)
+  // ---------------------------------------------------------------------------
+
+  /// Nombre de caractères par ligne (police A, papier 80 mm).
+  /// 42 = valeur sûre pour les imprimantes 512 points ; si ton imprimante
+  /// est en 576 points tu peux monter à 48.
+  static const int _cols = 42;
+
+  /// Nombre de lignes vides laissées pour la signature + le cachet.
+  /// Augmente cette valeur si tu veux encore plus de place.
+  static const int _signatureFeedLines = 7;
+
+  /// Style de texte courant : gras + double hauteur (plus lisible).
+  static const PosStyles _body =
+  PosStyles(bold: true, height: PosTextSize.size2);
+
+  static const PosStyles _bodyRight = PosStyles(
+      bold: true, height: PosTextSize.size2, align: PosAlign.right);
+
+  static const PosStyles _bodyCenter = PosStyles(
+      bold: true, height: PosTextSize.size2, align: PosAlign.center);
+
+  static const PosStyles _center = PosStyles(align: PosAlign.center);
+
+  static const PosStyles _titleStyle = PosStyles(
+    align: PosAlign.center,
+    bold: true,
+    underline: true,
+    height: PosTextSize.size2,
+  );
+
+  static const PosStyles _bigCenter = PosStyles(
+    align: PosAlign.center,
+    bold: true,
+    height: PosTextSize.size2,
+    width: PosTextSize.size2,
+  );
+
+  /// Nom de l'élève : très grand si le nom est court, sinon double hauteur.
+  static PosStyles _nameStyle(String name) {
+    if (name.length <= (_cols ~/ 2)) {
+      return const PosStyles(
+        bold: true,
+        height: PosTextSize.size2,
+        width: PosTextSize.size2,
+      );
+    }
+    return const PosStyles(
+      bold: true,
+      height: PosTextSize.size2,
+      width: PosTextSize.size1,
+    );
+  }
+
+  static List<int> _sepLine(Generator g, String ch) {
+    return g.text(ch * _cols, styles: _center);
+  }
+
+  /// Ligne séparatrice + logo/nom de l'école.
+  static List<int> _schoolHeader(
+      Generator generator, {
+        required String schoolName,
+        required Uint8List? logoBytes,
+        required String contexte,
+      }) {
+    List<int> bytes = [];
+    bytes += _sepLine(generator, '=');
+
+    if (logoBytes != null) {
+      try {
+        final headerImage = _buildReceiptHeaderImage(
+          schoolName: schoolName,
+          logoBytes: logoBytes,
+        );
+        bytes += generator.image(headerImage);
+      } catch (e, st) {
+        _log('EXCEPTION génération du logo ($contexte), logo ignoré : '
+            '$e\n$st');
+        bytes += generator.text(schoolName.toUpperCase(), styles: _bigCenter);
+      }
+    } else {
+      bytes += generator.text(schoolName.toUpperCase(), styles: _bigCenter);
+    }
+    return bytes;
+  }
+
+  /// Bloc signature / cachet : grand espace vide pour signer et apposer
+  /// le sceau ou le logo.
+  static List<int> _signatureBlock(Generator generator) {
+    List<int> bytes = [];
+    bytes += generator.text(
+      'Signature / Cachet :',
+      styles: const PosStyles(
+        bold: true,
+        height: PosTextSize.size2,
+        width: PosTextSize.size2,
+      ),
+    );
+    bytes += generator.feed(_signatureFeedLines);
+    bytes += generator.text('.' * _cols, styles: _center);
+    return bytes;
+  }
+
+  static List<int> _footer(Generator generator, {bool conserver = true}) {
+    List<int> bytes = [];
+    bytes += _sepLine(generator, '=');
+    bytes += generator.text(
+      'Merci pour votre paiement !',
+      styles: _bodyCenter,
+    );
+    if (conserver) {
+      bytes += generator.text(
+        'Conservez ce reçu.',
+        styles: const PosStyles(
+          align: PosAlign.center,
+          height: PosTextSize.size2,
+        ),
+      );
+    }
+    bytes += _sepLine(generator, '=');
+    bytes += generator.feed(2);
+    bytes += generator.cut();
+    return bytes;
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOGS
+  // ---------------------------------------------------------------------------
+
   static Future<File?> _resolveLogFile() async {
     if (_logFileResolved) return _logFile;
     _logFileResolved = true;
@@ -101,6 +231,10 @@ class EscPosPrinterService {
     unawaited(_writeToLogFile(line));
   }
 
+  // ---------------------------------------------------------------------------
+  // LISTE DES IMPRIMANTES
+  // ---------------------------------------------------------------------------
+
   static Future<List<String>> getAvailablePrinters() async {
     try {
       if (Platform.isWindows) {
@@ -159,6 +293,10 @@ class EscPosPrinterService {
       return [];
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // ENVOI DES OCTETS BRUTS
+  // ---------------------------------------------------------------------------
 
   static Future<bool> _sendRawBytes(
       String printerName, Uint8List data) async {
@@ -465,6 +603,10 @@ Write-Output \$result
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // EN-TÊTE DU REÇU (LOGO + NOM DE L'ÉCOLE)
+  // ---------------------------------------------------------------------------
+
   static img.Image _prepareLogoForPrint(Uint8List logoBytes, int targetSize) {
     final decoded = img.decodeImage(logoBytes);
     if (decoded == null) {
@@ -500,16 +642,20 @@ Write-Output \$result
     return out;
   }
 
-  static const int _headerWidth = 380;
+  /// Largeur de l'image d'en-tête en points (512 = largeur sûre 80 mm).
+  static const int _headerWidth = 512;
+
+  /// Taille du logo (carré) en points. Avant : 60 → maintenant : 110.
+  static const int _logoBox = 110;
 
   static img.Image _buildReceiptHeaderImage({
     required String schoolName,
     required Uint8List logoBytes,
   }) {
-    const int margin  = 6;
-    const int logoBox = 60;
+    const int margin = 6;
+    const int logoBox = _logoBox;
 
-    final int textZoneLeft  = margin + logoBox + margin;
+    final int textZoneLeft = margin + logoBox + margin;
     final int textZoneRight = _headerWidth - margin - logoBox - margin;
     final int textZoneWidth =
     (textZoneRight - textZoneLeft).clamp(40, _headerWidth);
@@ -572,9 +718,10 @@ Write-Output \$result
       usedFont = normalFont;
     }
 
-    const int lineHeight   = 24;
-    final int topRowHeight = logo != null ? logoBox : (usedFont == bigFont ? 52 : 32);
-    final int extraHeight  =
+    const int lineHeight = 28;
+    final int topRowHeight =
+    logo != null ? logoBox : (usedFont == bigFont ? 52 : 32);
+    final int extraHeight =
     extraLines.isEmpty ? 0 : (extraLines.length * lineHeight) + 4;
     final int headerHeight = (margin * 2) + topRowHeight + extraHeight;
 
@@ -585,7 +732,8 @@ Write-Output \$result
       final ly = margin + ((topRowHeight - logo.height) ~/ 2);
       img.compositeImage(canvas, logo, dstX: margin, dstY: ly);
       img.compositeImage(
-        canvas, logo,
+        canvas,
+        logo,
         dstX: _headerWidth - margin - logo.width,
         dstY: ly,
       );
@@ -662,6 +810,10 @@ Write-Output \$result
     return buffer.toString();
   }
 
+  // ---------------------------------------------------------------------------
+  // REÇU : PAIEMENT D'UN MOIS
+  // ---------------------------------------------------------------------------
+
   static Future<bool> printReceipt({
     required String printerName,
     required String schoolName,
@@ -706,198 +858,80 @@ Write-Output \$result
       final String numRecu = receiptNumber ??
           'RCP-${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}-${now.hour}${now.minute}${now.second}';
 
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
+      bytes += _schoolHeader(
+        generator,
+        schoolName: schoolName,
+        logoBytes: logoBytes,
+        contexte: 'printReceipt',
       );
 
-      if (logoBytes != null) {
-        try {
-          final headerImage = _buildReceiptHeaderImage(
-            schoolName: schoolName,
-            logoBytes: logoBytes,
-          );
-          bytes += generator.image(headerImage);
-        } catch (e, st) {
-          _log('EXCEPTION génération du logo (printReceipt), logo ignoré : '
-              '$e\n$st');
-          bytes += generator.text(
-            schoolName.toUpperCase(),
-            styles: const PosStyles(
-              align: PosAlign.center,
-              bold: true,
-              height: PosTextSize.size2,
-              width: PosTextSize.size2,
-            ),
-          );
-        }
-      } else {
-        bytes += generator.text(
-          schoolName.toUpperCase(),
-          styles: const PosStyles(
-            align: PosAlign.center,
-            bold: true,
-            height: PosTextSize.size2,
-            width: PosTextSize.size2,
-          ),
-        );
-      }
-
-      bytes += generator.text(
-        'REÇU DE PAIEMENT',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          underline: true,
-        ),
-      );
+      bytes += generator.text('REÇU DE PAIEMENT', styles: _titleStyle);
 
       if (noteExplicative != null && noteExplicative.trim().isNotEmpty) {
         bytes += generator.text(
           noteExplicative.trim().toUpperCase(),
-          styles: const PosStyles(align: PosAlign.center, bold: true),
+          styles: _bodyCenter,
         );
       }
 
       bytes += generator.text(
         'Année scolaire : $currentYear',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: _bodyCenter,
       );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '=');
 
-      bytes += generator.text(
-        'Nom complet :',
-        styles: const PosStyles(bold: true),
-      );
+      bytes += generator.text('Nom complet :', styles: _body);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: const PosStyles(
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size1,
-        ),
+        styles: _nameStyle(studentName),
       );
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '.');
 
       bytes += generator.row([
-        PosColumn(
-          text: 'Reçu : $numRecu',
-          width: 12,
-          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
-        ),
+        PosColumn(text: 'Reçu : $numRecu', width: 12, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'ID : $studentId',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: 'Cl. : $classe',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'ID : $studentId', width: 6, styles: _body),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Sect. : $section',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: '$today $heure',
-          width: 6,
-          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
-        ),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
+        PosColumn(text: '$today $heure', width: 6, styles: _body),
       ]);
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.row([
-        PosColumn(
-          text: 'Mois payé :',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: moisPaye,
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Mois payé :', width: 6, styles: _body),
+        PosColumn(text: moisPaye, width: 6, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Montant payé :',
-          width: 7,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Montant payé :', width: 7, styles: _body),
         PosColumn(
           text: '${montantPaye.toStringAsFixed(0)} FC',
           width: 5,
-          styles: const PosStyles(bold: true),
+          styles: _bodyRight,
         ),
       ]);
 
       if (resteAPayerMois > 0) {
         bytes += generator.row([
-          PosColumn(
-            text: 'Reste à payer :',
-            width: 7,
-            styles: const PosStyles(bold: true),
-          ),
+          PosColumn(text: 'Reste à payer :', width: 7, styles: _body),
           PosColumn(
             text: '${resteAPayerMois.toStringAsFixed(0)} FC',
             width: 5,
-            styles: const PosStyles(bold: true),
+            styles: _bodyRight,
           ),
         ]);
       } else {
         bytes += generator.text(
           '>>> MOIS COMPLÈTEMENT PAYÉ <<<',
-          styles: const PosStyles(align: PosAlign.center, bold: true),
+          styles: _bodyCenter,
         );
       }
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
 
-      bytes += generator.text(
-        'Signature :',
-        styles: const PosStyles(bold: true),
-      );
-      bytes += generator.feed(1);
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'Merci pour votre paiement !',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        'Conservez ce reçu.',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.feed(2);
-      bytes += generator.cut();
+      bytes += _signatureBlock(generator);
+      bytes += _footer(generator);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printReceipt terminé pour "$studentName" ($studentId) — '
@@ -909,6 +943,10 @@ Write-Output \$result
       return false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // REÇU : LISTE DE TRANSACTIONS
+  // ---------------------------------------------------------------------------
 
   static Future<bool> printTransactionsReceipt({
     required String printerName,
@@ -954,123 +992,50 @@ Write-Output \$result
       final String numRecu = receiptNumber ??
           'RCP-${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}-${now.hour}${now.minute}${now.second}';
 
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
+      bytes += _schoolHeader(
+        generator,
+        schoolName: schoolName,
+        logoBytes: logoBytes,
+        contexte: 'printTransactionsReceipt',
       );
-
-      if (logoBytes != null) {
-        try {
-          final headerImage = _buildReceiptHeaderImage(
-            schoolName: schoolName,
-            logoBytes: logoBytes,
-          );
-          bytes += generator.image(headerImage);
-        } catch (e, st) {
-          _log('EXCEPTION génération du logo '
-              '(printTransactionsReceipt), logo ignoré : $e\n$st');
-          bytes += generator.text(
-            schoolName.toUpperCase(),
-            styles: const PosStyles(
-              align: PosAlign.center,
-              bold: true,
-              height: PosTextSize.size2,
-              width: PosTextSize.size2,
-            ),
-          );
-        }
-      } else {
-        bytes += generator.text(
-          schoolName.toUpperCase(),
-          styles: const PosStyles(
-            align: PosAlign.center,
-            bold: true,
-            height: PosTextSize.size2,
-            width: PosTextSize.size2,
-          ),
-        );
-      }
 
       bytes += generator.text(
         duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : titre,
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          underline: true,
-        ),
+        styles: _titleStyle,
       );
       bytes += generator.text(
         'Année scolaire : $currentYear',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: _bodyCenter,
       );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '=');
 
-      bytes += generator.text(
-        'Nom complet :',
-        styles: const PosStyles(bold: true),
-      );
+      bytes += generator.text('Nom complet :', styles: _body);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: const PosStyles(
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size1,
-        ),
+        styles: _nameStyle(studentName),
       );
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '.');
 
       bytes += generator.row([
-        PosColumn(
-          text: 'Reçu : $numRecu',
-          width: 12,
-          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
-        ),
+        PosColumn(text: 'Reçu : $numRecu', width: 12, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'ID : $studentId',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: 'Cl. : $classe',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'ID : $studentId', width: 6, styles: _body),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Sect. : $section',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: '$today $heure',
-          width: 6,
-          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
-        ),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
+        PosColumn(text: '$today $heure', width: 6, styles: _body),
       ]);
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.text(
         transactions.length > 1
             ? 'DÉTAIL DES PAIEMENTS (${transactions.length})'
             : 'DÉTAIL DU PAIEMENT',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: _bodyCenter,
       );
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
 
       double total = 0;
       final sorted = List<Map<String, dynamic>>.from(transactions)
@@ -1092,72 +1057,35 @@ Write-Output \$result
           PosColumn(
             text: mois.isNotEmpty ? mois : '-',
             width: 6,
-            styles: const PosStyles(bold: true),
+            styles: _body,
           ),
           PosColumn(
             text: '${montant.toStringAsFixed(0)} FC',
             width: 6,
-            styles: const PosStyles(bold: true, align: PosAlign.right),
+            styles: _bodyRight,
           ),
         ]);
         if (date.isNotEmpty) {
           bytes += generator.text(
             '   le $date',
-            styles: const PosStyles(fontType: PosFontType.fontB),
+            styles: const PosStyles(height: PosTextSize.size2),
           );
         }
       }
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.row([
-        PosColumn(
-          text: 'TOTAL PAYÉ :',
-          width: 6,
-          styles: const PosStyles(bold: true, height: PosTextSize.size2),
-        ),
+        PosColumn(text: 'TOTAL PAYÉ :', width: 6, styles: _body),
         PosColumn(
           text: '${total.toStringAsFixed(0)} FC',
           width: 6,
-          styles: const PosStyles(
-              bold: true, height: PosTextSize.size2, align: PosAlign.right),
+          styles: _bodyRight,
         ),
       ]);
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
 
-      bytes += generator.text(
-        'Signature :',
-        styles: const PosStyles(bold: true),
-      );
-      bytes += generator.feed(1);
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'Merci pour votre paiement !',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        'Conservez ce reçu.',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.feed(2);
-      bytes += generator.cut();
+      bytes += _signatureBlock(generator);
+      bytes += _footer(generator);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printTransactionsReceipt terminé pour "$studentName" '
@@ -1169,6 +1097,10 @@ Write-Output \$result
       return false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // REÇU : BILAN + HISTORIQUE DES PAIEMENTS D'UN ÉLÈVE
+  // ---------------------------------------------------------------------------
 
   static Future<bool> printStudentPaymentHistoryReceipt({
     required String printerName,
@@ -1210,114 +1142,42 @@ Write-Output \$result
       final String heure =
           '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
+      bytes += _schoolHeader(
+        generator,
+        schoolName: schoolName,
+        logoBytes: logoBytes,
+        contexte: 'printStudentPaymentHistoryReceipt',
       );
-
-      if (logoBytes != null) {
-        try {
-          final headerImage = _buildReceiptHeaderImage(
-            schoolName: schoolName,
-            logoBytes: logoBytes,
-          );
-          bytes += generator.image(headerImage);
-        } catch (e, st) {
-          _log('EXCEPTION génération du logo '
-              '(printStudentPaymentHistoryReceipt), logo ignoré : $e\n$st');
-          bytes += generator.text(
-            schoolName.toUpperCase(),
-            styles: const PosStyles(
-              align: PosAlign.center,
-              bold: true,
-              height: PosTextSize.size2,
-              width: PosTextSize.size2,
-            ),
-          );
-        }
-      } else {
-        bytes += generator.text(
-          schoolName.toUpperCase(),
-          styles: const PosStyles(
-            align: PosAlign.center,
-            bold: true,
-            height: PosTextSize.size2,
-            width: PosTextSize.size2,
-          ),
-        );
-      }
 
       bytes += generator.text(
         duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : 'REÇU DE PAIEMENT',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          underline: true,
-        ),
+        styles: _titleStyle,
       );
       bytes += generator.text(
         'Année scolaire : $currentYear',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: _bodyCenter,
       );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '=');
 
-      bytes += generator.text(
-        'Nom complet :',
-        styles: const PosStyles(bold: true),
-      );
+      bytes += generator.text('Nom complet :', styles: _body);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: const PosStyles(
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size1,
-        ),
+        styles: _nameStyle(studentName),
       );
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '.');
 
       bytes += generator.row([
-        PosColumn(
-          text: 'ID : $studentId',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: 'Promo : $classe',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'ID : $studentId', width: 6, styles: _body),
+        PosColumn(text: 'Promo : $classe', width: 6, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Sect. : $section',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: '$today $heure',
-          width: 6,
-          styles: const PosStyles(bold: true, fontType: PosFontType.fontB),
-        ),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
+        PosColumn(text: '$today $heure', width: 6, styles: _body),
       ]);
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'BILAN FINANCIER',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
+      bytes += generator.text('BILAN FINANCIER', styles: _bodyCenter);
+      bytes += _sepLine(generator, '-');
 
       for (final mois in months) {
         final double paye = paidByMonth[mois] ?? 0.0;
@@ -1338,77 +1198,56 @@ Write-Output \$result
           PosColumn(
             text: mois,
             width: 4,
-            styles: PosStyles(bold: !nonCommence),
+            styles: PosStyles(bold: !nonCommence, height: PosTextSize.size2),
           ),
           PosColumn(
             text: '${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)}',
             width: 5,
-            styles: PosStyles(bold: !nonCommence),
+            styles: PosStyles(bold: !nonCommence, height: PosTextSize.size2),
           ),
           PosColumn(
             text: statut,
             width: 3,
-            styles: PosStyles(bold: !nonCommence, align: PosAlign.right),
+            styles: PosStyles(
+              bold: !nonCommence,
+              height: PosTextSize.size2,
+              align: PosAlign.right,
+            ),
           ),
         ]);
       }
 
       final double resteTotal = totalRequis - totalPaye;
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.row([
-        PosColumn(
-          text: 'Total payé :',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Total payé :', width: 6, styles: _body),
         PosColumn(
           text: '${totalPaye.toStringAsFixed(0)} FC',
           width: 6,
-          styles: const PosStyles(bold: true, align: PosAlign.right),
+          styles: _bodyRight,
         ),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Total requis :',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Total requis :', width: 6, styles: _body),
         PosColumn(
           text: '${totalRequis.toStringAsFixed(0)} FC',
           width: 6,
-          styles: const PosStyles(bold: true, align: PosAlign.right),
+          styles: _bodyRight,
         ),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Reste à payer :',
-          width: 6,
-          styles: const PosStyles(bold: true, height: PosTextSize.size2),
-        ),
+        PosColumn(text: 'Reste à payer :', width: 6, styles: _body),
         PosColumn(
           text: '${(resteTotal > 0 ? resteTotal : 0).toStringAsFixed(0)} FC',
           width: 6,
-          styles: const PosStyles(
-              bold: true, height: PosTextSize.size2, align: PosAlign.right),
+          styles: _bodyRight,
         ),
       ]);
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'HISTORIQUE DES PAIEMENTS',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
+      bytes += generator.text('HISTORIQUE DES PAIEMENTS', styles: _bodyCenter);
+      bytes += _sepLine(generator, '-');
 
       final sorted = List<Map<String, dynamic>>.from(transactions)
         ..sort((a, b) => (a['date'] ?? '')
@@ -1418,7 +1257,10 @@ Write-Output \$result
       if (sorted.isEmpty) {
         bytes += generator.text(
           'Aucune transaction enregistrée.',
-          styles: const PosStyles(align: PosAlign.center),
+          styles: const PosStyles(
+            align: PosAlign.center,
+            height: PosTextSize.size2,
+          ),
         );
       } else {
         for (final t in sorted) {
@@ -1434,34 +1276,20 @@ Write-Output \$result
             PosColumn(
               text: '$date - $mois',
               width: 8,
+              styles: const PosStyles(height: PosTextSize.size2),
             ),
             PosColumn(
               text: '${montant.toStringAsFixed(0)} FC',
               width: 4,
-              styles: const PosStyles(bold: true, align: PosAlign.right),
+              styles: _bodyRight,
             ),
           ]);
         }
       }
 
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'Merci pour votre paiement !',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        'Conservez ce reçu.',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.feed(2);
-      bytes += generator.cut();
+      bytes += _sepLine(generator, '-');
+      bytes += _signatureBlock(generator);
+      bytes += _footer(generator);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printStudentPaymentHistoryReceipt terminé pour "$studentName" '
@@ -1473,6 +1301,10 @@ Write-Output \$result
       return false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // REÇU : AUTRE FRAIS (UN SEUL)
+  // ---------------------------------------------------------------------------
 
   static Future<bool> printAutreFraisReceipt({
     required String printerName,
@@ -1508,136 +1340,49 @@ Write-Output \$result
       final String heure =
           '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
+      bytes += _schoolHeader(
+        generator,
+        schoolName: schoolName,
+        logoBytes: logoBytes,
+        contexte: 'printAutreFraisReceipt',
       );
 
-      if (logoBytes != null) {
-        try {
-          final headerImage = _buildReceiptHeaderImage(
-            schoolName: schoolName,
-            logoBytes: logoBytes,
-          );
-          bytes += generator.image(headerImage);
-        } catch (e, st) {
-          _log('EXCEPTION génération du logo '
-              '(printAutreFraisReceipt), logo ignoré : $e\n$st');
-          bytes += generator.text(
-            schoolName.toUpperCase(),
-            styles: const PosStyles(
-              align: PosAlign.center,
-              bold: true,
-              height: PosTextSize.size2,
-              width: PosTextSize.size2,
-            ),
-          );
-        }
-      } else {
-        bytes += generator.text(
-          schoolName.toUpperCase(),
-          styles: const PosStyles(
-            align: PosAlign.center,
-            bold: true,
-            height: PosTextSize.size2,
-            width: PosTextSize.size2,
-          ),
-        );
-      }
-
       bytes += generator.text(
-        duplicata ? '${titreFrais.toUpperCase()} (DUPLICATA)'
+        duplicata
+            ? '${titreFrais.toUpperCase()} (DUPLICATA)'
             : titreFrais.toUpperCase(),
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          underline: true,
-        ),
+        styles: _titleStyle,
       );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '=');
 
-      bytes += generator.text(
-        'Nom complet :',
-        styles: const PosStyles(bold: true),
-      );
+      bytes += generator.text('Nom complet :', styles: _body);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: const PosStyles(
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size1,
-        ),
+        styles: _nameStyle(studentName),
       );
 
       bytes += generator.row([
-        PosColumn(
-          text: 'Cl. : $classe',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: 'Sect. : $section',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
       ]);
       bytes += generator.row([
-        PosColumn(
-          text: 'Date :',
-          width: 5,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(text: '$today $heure', width: 7),
+        PosColumn(text: 'Date :', width: 4, styles: _body),
+        PosColumn(text: '$today $heure', width: 8, styles: _body),
       ]);
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.row([
-        PosColumn(
-          text: 'Montant payé :',
-          width: 7,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Montant payé :', width: 7, styles: _body),
         PosColumn(
           text: '${montant.toStringAsFixed(0)} FC',
           width: 5,
-          styles: const PosStyles(bold: true),
+          styles: _bodyRight,
         ),
       ]);
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
 
-      bytes += generator.text(
-        'Signature :',
-        styles: const PosStyles(bold: true),
-      );
-      bytes += generator.feed(1);
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'Merci pour votre paiement !',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.feed(2);
-      bytes += generator.cut();
+      bytes += _signatureBlock(generator);
+      bytes += _footer(generator, conserver: false);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printAutreFraisReceipt terminé pour "$studentName" '
@@ -1649,6 +1394,10 @@ Write-Output \$result
       return false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // REÇU : AUTRES FRAIS (PLUSIEURS PAIEMENTS)
+  // ---------------------------------------------------------------------------
 
   static Future<bool> printAutresFraisTransactionsReceipt({
     required String printerName,
@@ -1688,101 +1437,42 @@ Write-Output \$result
       final String heure =
           '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
+      bytes += _schoolHeader(
+        generator,
+        schoolName: schoolName,
+        logoBytes: logoBytes,
+        contexte: 'printAutresFraisTransactionsReceipt',
       );
-
-      if (logoBytes != null) {
-        try {
-          final headerImage = _buildReceiptHeaderImage(
-            schoolName: schoolName,
-            logoBytes: logoBytes,
-          );
-          bytes += generator.image(headerImage);
-        } catch (e, st) {
-          _log('EXCEPTION génération du logo '
-              '(printAutresFraisTransactionsReceipt), logo ignoré : '
-              '$e\n$st');
-          bytes += generator.text(
-            schoolName.toUpperCase(),
-            styles: const PosStyles(
-              align: PosAlign.center,
-              bold: true,
-              height: PosTextSize.size2,
-              width: PosTextSize.size2,
-            ),
-          );
-        }
-      } else {
-        bytes += generator.text(
-          schoolName.toUpperCase(),
-          styles: const PosStyles(
-            align: PosAlign.center,
-            bold: true,
-            height: PosTextSize.size2,
-            width: PosTextSize.size2,
-          ),
-        );
-      }
 
       bytes += generator.text(
         duplicata ? 'AUTRES FRAIS (DUPLICATA)' : 'REÇU — AUTRES FRAIS',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          bold: true,
-          underline: true,
-        ),
+        styles: _titleStyle,
       );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '=');
 
-      bytes += generator.text(
-        'Nom complet :',
-        styles: const PosStyles(bold: true),
-      );
+      bytes += generator.text('Nom complet :', styles: _body);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: const PosStyles(
-          bold: true,
-          height: PosTextSize.size2,
-          width: PosTextSize.size1,
-        ),
+        styles: _nameStyle(studentName),
       );
 
       bytes += generator.row([
-        PosColumn(
-          text: 'Cl. : $classe',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
-        PosColumn(
-          text: 'Sect. : $section',
-          width: 6,
-          styles: const PosStyles(bold: true),
-        ),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
       ]);
       bytes += generator.text(
         'Imprimé le : $today $heure',
-        styles: const PosStyles(fontType: PosFontType.fontB),
+        styles: const PosStyles(height: PosTextSize.size2),
       );
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.text(
         paiements.length > 1
             ? 'DÉTAIL DES FRAIS (${paiements.length})'
             : 'DÉTAIL DU FRAIS',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
+        styles: _bodyCenter,
       );
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
 
       double total = 0;
       final sorted = List<Map<String, dynamic>>.from(paiements)
@@ -1800,68 +1490,35 @@ Write-Output \$result
           PosColumn(
             text: nom.isNotEmpty ? nom : '-',
             width: 7,
-            styles: const PosStyles(bold: true),
+            styles: _body,
           ),
           PosColumn(
             text: '${montant.toStringAsFixed(0)} FC',
             width: 5,
-            styles: const PosStyles(bold: true, align: PosAlign.right),
+            styles: _bodyRight,
           ),
         ]);
         if (date.isNotEmpty) {
           bytes += generator.text(
             '   $date',
-            styles: const PosStyles(fontType: PosFontType.fontB),
+            styles: const PosStyles(height: PosTextSize.size2),
           );
         }
       }
 
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
       bytes += generator.row([
-        PosColumn(
-          text: 'TOTAL PAYÉ :',
-          width: 6,
-          styles: const PosStyles(bold: true, height: PosTextSize.size2),
-        ),
+        PosColumn(text: 'TOTAL PAYÉ :', width: 6, styles: _body),
         PosColumn(
           text: '${total.toStringAsFixed(0)} FC',
           width: 6,
-          styles: const PosStyles(
-              bold: true, height: PosTextSize.size2, align: PosAlign.right),
+          styles: _bodyRight,
         ),
       ]);
-      bytes += generator.text(
-        '--------------------------------',
-        styles: const PosStyles(align: PosAlign.center),
-      );
+      bytes += _sepLine(generator, '-');
 
-      bytes += generator.text(
-        'Signature :',
-        styles: const PosStyles(bold: true),
-      );
-      bytes += generator.feed(1);
-      bytes += generator.text(
-        '................................',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.text(
-        'Merci pour votre paiement !',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
-      bytes += generator.text(
-        '================================',
-        styles: const PosStyles(align: PosAlign.center),
-      );
-      bytes += generator.feed(2);
-      bytes += generator.cut();
+      bytes += _signatureBlock(generator);
+      bytes += _footer(generator, conserver: false);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printAutresFraisTransactionsReceipt terminé pour '
