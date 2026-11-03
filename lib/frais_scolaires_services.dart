@@ -134,8 +134,17 @@ extension FraisScolairesServices on FraisScolaires {
     final double moneyTodayPrincipal =
     moneyTodayBySection.values.fold(0.0, (sum, v) => sum + v);
 
+    // ⚡ CORRECTION — seuls les paiements dont le frais EXISTE encore comptent.
+    // Avant, les paiements d'un frais supprimé restaient dans les totaux et
+    // apparaissaient chez le promoteur ("Frais supprimés / non classés").
+    final Set<String> idsFraisExistants = autresFrais.map((f) => f.id).toSet();
+    final List<AutreFraisPaiement> paiementsValides =
+    (autresFraisPaiementsByYear[currentYear] ?? <AutreFraisPaiement>[])
+        .where((p) => idsFraisExistants.contains(p.autreFraisId))
+        .toList();
+
     double moneyTodayAutresFrais = 0;
-    for (final p in (autresFraisPaiementsByYear[currentYear] ?? [])) {
+    for (final p in paiementsValides) {
       if (p.date.toString().split(' ')[0] == today) {
         moneyTodayAutresFrais += p.montant;
       }
@@ -148,7 +157,7 @@ extension FraisScolairesServices on FraisScolaires {
 
     double moneyThisMonthAutresFrais = 0;
     final DateTime now = DateTime.now();
-    for (final p in (autresFraisPaiementsByYear[currentYear] ?? [])) {
+    for (final p in paiementsValides) {
       if (p.date.year == now.year && p.date.month == now.month) {
         moneyThisMonthAutresFrais += p.montant;
       }
@@ -156,8 +165,7 @@ extension FraisScolairesServices on FraisScolaires {
 
     final double totalPrincipalYear = getYearTotalCollected();
     final double totalAutresFraisYear =
-    (autresFraisPaiementsByYear[currentYear] ?? [])
-        .fold(0.0, (sum, p) => sum + p.montant);
+    paiementsValides.fold(0.0, (sum, p) => sum + p.montant);
     final Map<String, double> moneyThisYearBySection = getTotalBySection();
 
     final adminDistToday = calculateAdminDistribution(moneyTodayPrincipal);
@@ -201,9 +209,7 @@ extension FraisScolairesServices on FraisScolaires {
     // les autres types n'ont que leurs montants. Rien n'est modifié dans les
     // données : on ne fait que lire.
     final List<AutreFraisPaiement> tousPaiementsAutresFrais =
-    List<AutreFraisPaiement>.from(
-        autresFraisPaiementsByYear[currentYear] ?? const []);
-    final Set<String> idsClasses = {};
+    List<AutreFraisPaiement>.from(paiementsValides);
 
     String cleNom(String s) =>
         normaliserNomFrais(s.replaceAll('’', "'").replaceAll('`', "'"));
@@ -262,7 +268,6 @@ extension FraisScolairesServices on FraisScolaires {
     Map<String, dynamic>? statProprietaire;
     for (final groupe in groupesFrais) {
       final ids = groupe.ids.toSet();
-      idsClasses.addAll(ids);
       final bool proprietaire = groupe.cle == cleProprietaireAdmins;
       final stat = construireTypeStat(
         cle: groupe.cle,
@@ -273,25 +278,6 @@ extension FraisScolairesServices on FraisScolaires {
       );
       if (proprietaire) statProprietaire = stat;
       autresFraisParType.add(stat);
-    }
-
-    // Paiements dont le frais a été supprimé depuis : groupe à part (sans
-    // administration) pour que la somme des types égale toujours le total.
-    final Set<String> idsOrphelins = tousPaiementsAutresFrais
-        .map((p) => p.autreFraisId)
-        .where((id) => !idsClasses.contains(id))
-        .toSet();
-    if (idsOrphelins.isNotEmpty) {
-      final orphelin = construireTypeStat(
-        cle: '_autres_non_classes',
-        nom: 'Frais supprimés / non classés',
-        ids: idsOrphelins,
-        nbFusionnes: idsOrphelins.length,
-        avecAdmins: false,
-      );
-      if ((orphelin['thisYear'] as double) != 0) {
-        autresFraisParType.add(orphelin);
-      }
     }
 
     // Les administrations des autres frais appartiennent à UN seul type :
@@ -311,6 +297,7 @@ extension FraisScolairesServices on FraisScolaires {
       'schoolName': config.schoolName,
       'currentYear': currentYear,
       'currentMonthName': currentSchoolMonthName ?? '',
+      'generatedAt': DateTime.now().toIso8601String(),
 
       'moneyToday': moneyTodayPrincipal + moneyTodayAutresFrais,
       'moneyTodayPrincipal': moneyTodayPrincipal,
@@ -355,16 +342,26 @@ extension FraisScolairesServices on FraisScolaires {
     };
   }
 
-  Future<void> pushPromoterSummary() async {
-    if (schoolCode == null || schoolCode!.isEmpty) return;
-    try {
-      final summary = computePromoterSummary();
-      await http.post(
-        Uri.parse('$serverUrl/school/push_promoter_summary'),
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({'school_code': schoolCode, 'summary': summary}),
-      ).timeout(const Duration(seconds: 15));
-    } catch (_) {}
+  /// Envoie le résumé au serveur. Retourne true SEULEMENT si le serveur a
+  /// bien répondu 200 (avant, les erreurs étaient avalées sans rien dire et
+  /// le promoteur gardait d'anciennes données). Une 2ᵉ tentative est faite
+  /// car le serveur Render peut mettre du temps à se réveiller.
+  Future<bool> pushPromoterSummary() async {
+    if (schoolCode == null || schoolCode!.isEmpty) return false;
+    for (int essai = 1; essai <= 2; essai++) {
+      try {
+        final summary = computePromoterSummary();
+        final response = await http
+            .post(
+          Uri.parse('$serverUrl/school/push_promoter_summary'),
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({'school_code': schoolCode, 'summary': summary}),
+        )
+            .timeout(const Duration(seconds: 30));
+        if (response.statusCode == 200) return true;
+      } catch (_) {}
+    }
+    return false;
   }
 
   bool isReceiptPrinted(String key) => printedReceiptKeys.contains(key);
@@ -687,6 +684,7 @@ extension FraisScolairesServices on FraisScolaires {
             MapEntry(key, value.map((p) => p.toJson()).toList()),
       ),
       'paiementsAutresFraisAnnules': paiementsAutresFraisAnnules.toList(),
+      'autresFraisSupprimesIds': autresFraisSupprimesIds.toList(),
       'autresFraisAdministrations':
       autresFraisAdministrations.map((a) => a.toJson()).toList(),
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
@@ -1038,6 +1036,12 @@ extension FraisScolairesServices on FraisScolaires {
                   .map((e) => e.toString())
                   .toSet();
         }
+        if (data['autresFraisSupprimesIds'] != null) {
+          autresFraisSupprimesIds =
+              (data['autresFraisSupprimesIds'] as List<dynamic>)
+                  .map((e) => e.toString())
+                  .toSet();
+        }
         if (data['autresFraisAdministrations'] != null) {
           autresFraisAdministrations =
               (data['autresFraisAdministrations'] as List<dynamic>)
@@ -1191,6 +1195,7 @@ extension FraisScolairesServices on FraisScolaires {
             MapEntry(key, value.map((p) => p.toJson()).toList()),
       ),
       'paiementsAutresFraisAnnules': paiementsAutresFraisAnnules.toList(),
+      'autresFraisSupprimesIds': autresFraisSupprimesIds.toList(),
       'autresFraisAdministrations':
       autresFraisAdministrations.map((a) => a.toJson()).toList(),
       'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
@@ -1233,6 +1238,7 @@ extension FraisScolairesServices on FraisScolaires {
     autresFrais = [];
     autresFraisPaiementsByYear = {};
     paiementsAutresFraisAnnules = {};
+    autresFraisSupprimesIds = {};
     autresFraisAdministrations = [];
     adminAuditLog = [];
     signataires = [];
@@ -1288,6 +1294,7 @@ extension FraisScolairesServices on FraisScolaires {
               MapEntry(key, value.map((p) => p.toJson()).toList()),
         ),
         'paiementsAutresFraisAnnules': paiementsAutresFraisAnnules.toList(),
+        'autresFraisSupprimesIds': autresFraisSupprimesIds.toList(),
         'autresFraisAdministrations':
         autresFraisAdministrations.map((a) => a.toJson()).toList(),
         'adminAuditLog': adminAuditLog.map((a) => a.toJson()).toList(),
@@ -1305,9 +1312,15 @@ extension FraisScolairesServices on FraisScolaires {
           .post(
         Uri.parse('$serverUrl/backup'),
         headers: {'Content-Type': 'application/json'},
-        body: json.encode({'school_code': normalizedCode, 'data': data}),
+        body: json.encode({
+          'school_code': normalizedCode,
+          'data': data,
+          // ⚡ NOUVEAU — le résumé promoteur part dans la MÊME requête que la
+          // sauvegarde : plus de 2ᵉ appel qui peut échouer en silence.
+          'promoter_summary': computePromoterSummary(),
+        }),
       )
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 60));
 
       if (response.statusCode == 200) {
         final responseData = json.decode(response.body);
@@ -1317,8 +1330,11 @@ extension FraisScolairesServices on FraisScolaires {
           _applyIdCorrections(corrections);
           await saveData();
         }
-        await pushPromoterSummary();
-        return {'success': true};
+        // Si le serveur (ancienne version) n'a pas enregistré le résumé avec
+        // la sauvegarde, on l'envoie séparément et on rapporte le résultat.
+        bool summaryOk = responseData['summary_saved'] == true;
+        if (!summaryOk) summaryOk = await pushPromoterSummary();
+        return {'success': true, 'summarySent': summaryOk};
       }
       return {
         'success': false,
@@ -1475,6 +1491,12 @@ extension FraisScolairesServices on FraisScolaires {
         paiementsAutresFraisAnnules.add(e.toString());
       }
     }
+    if (serverData['autresFraisSupprimesIds'] != null) {
+      for (final e in (serverData['autresFraisSupprimesIds']
+      as List<dynamic>)) {
+        autresFraisSupprimesIds.add(e.toString());
+      }
+    }
 
     if (serverData['history'] != null) {
       final serverHistory =
@@ -1518,6 +1540,11 @@ extension FraisScolairesServices on FraisScolaires {
               }
               localEleve.moisDebloque ??= serverEleve.moisDebloque;
 
+              final Map<String, double> paidAvantFusion =
+              Map<String, double>.from(localEleve.paid);
+              serverEleve.paid.forEach((m, v) {
+                if (v > (paidAvantFusion[m] ?? 0)) paidAvantFusion[m] = v;
+              });
               final List<Map<String, dynamic>> mergedTransactions =
               _fusionnerTransactionsSansDoublons(
                 List<Map<String, dynamic>>.from(localEleve.transactions),
@@ -1546,6 +1573,15 @@ extension FraisScolairesServices on FraisScolaires {
                   final montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
                   paidReconstruit[mois] =
                       (paidReconstruit[mois] ?? 0) + montant;
+                }
+                // ⚡ CORRECTION — on garde les montants des mois qui n'ont AUCUNE
+                // transaction (anciens paiements sans historique). Avant, ils
+                // étaient effacés lors d'une récupération.
+                for (final mois in paidAvantFusion.keys) {
+                  if (!paidReconstruit.containsKey(mois) &&
+                      (paidAvantFusion[mois] ?? 0) > 0) {
+                    paidReconstruit[mois] = paidAvantFusion[mois]!;
+                  }
                 }
                 localEleve.paid
                   ..clear()
@@ -1594,6 +1630,7 @@ extension FraisScolairesServices on FraisScolaires {
           .toList();
       final existingFraisIds = autresFrais.map((f) => f.id).toSet();
       for (var f in serverAutresFrais) {
+        if (autresFraisSupprimesIds.contains(f.id)) continue;
         if (!existingFraisIds.contains(f.id)) {
           autresFrais.add(f);
         } else {
@@ -1625,7 +1662,9 @@ extension FraisScolairesServices on FraisScolaires {
       for (var entry in serverPaiements.entries) {
         final year       = entry.key;
         final serverList = entry.value
-            .where((p) => !paiementsAutresFraisAnnules.contains(p.id))
+            .where((p) =>
+        !paiementsAutresFraisAnnules.contains(p.id) &&
+            !autresFraisSupprimesIds.contains(p.autreFraisId))
             .toList();
 
         if (autresFraisPaiementsByYear.containsKey(year)) {
@@ -1642,7 +1681,9 @@ extension FraisScolairesServices on FraisScolaires {
       }
 
       for (final liste in autresFraisPaiementsByYear.values) {
-        liste.removeWhere((p) => paiementsAutresFraisAnnules.contains(p.id));
+        liste.removeWhere((p) =>
+        paiementsAutresFraisAnnules.contains(p.id) ||
+            autresFraisSupprimesIds.contains(p.autreFraisId));
       }
     }
     if (serverData['autresFraisAdministrations'] != null) {

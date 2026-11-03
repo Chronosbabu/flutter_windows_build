@@ -57,6 +57,10 @@ class FraisScolaires {
   List<AutreFrais> autresFrais = [];
   Map<String, List<AutreFraisPaiement>> autresFraisPaiementsByYear = {};
   Set<String> paiementsAutresFraisAnnules = {};
+  // ⚡ NOUVEAU — identifiants des "autres frais" supprimés (pierres tombales).
+  // Sans cette liste, un frais supprimé sur le PC revenait à chaque
+  // "Récupérer" car la fusion avec le serveur ré-ajoutait tout ce qui manquait.
+  Set<String> autresFraisSupprimesIds = {};
   List<AutreFraisAdministration> autresFraisAdministrations = [];
   List<AdminAuditLog> adminAuditLog = [];
   List<Signataire> signataires = [];
@@ -1594,6 +1598,7 @@ class FraisScolaires {
 
   Future<void> deleteAutreFrais(String id) async {
     autresFrais.removeWhere((f) => f.id == id);
+    autresFraisSupprimesIds.add(id);
     await saveData();
   }
 
