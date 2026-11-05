@@ -745,6 +745,8 @@ class _ReportGenerationScreenState extends State<ReportGenerationScreen> {
 // ============================================================================
 // Retourne true si le mot de passe est correct. Après 3 erreurs, l'accès est
 // verrouillé pendant 60 secondes (géré par rapportPersonnalise).
+// Le mot de passe est modifiable depuis la fenêtre suivante (bouton
+// « Changer le mot de passe »).
 // ============================================================================
 class _MotDePasseRapportDialog extends StatefulWidget {
   const _MotDePasseRapportDialog();
@@ -829,6 +831,171 @@ class _MotDePasseRapportDialogState extends State<_MotDePasseRapportDialog> {
 }
 
 // ============================================================================
+// ⚡ NOUVEAU — BOÎTE DE DIALOGUE « CHANGER LE MOT DE PASSE »
+// ============================================================================
+// Demande l'ancien mot de passe, puis le nouveau (2 fois). Retourne true si
+// le mot de passe a bien été changé.
+// ============================================================================
+class _ChangerMotDePasseDialog extends StatefulWidget {
+  const _ChangerMotDePasseDialog();
+
+  @override
+  State<_ChangerMotDePasseDialog> createState() =>
+      _ChangerMotDePasseDialogState();
+}
+
+class _ChangerMotDePasseDialogState extends State<_ChangerMotDePasseDialog> {
+  final TextEditingController _ancienCtrl = TextEditingController();
+  final TextEditingController _nouveauCtrl = TextEditingController();
+  final TextEditingController _confirmCtrl = TextEditingController();
+  bool _masque = true;
+  bool _enCours = false;
+  String? _erreur;
+
+  @override
+  void dispose() {
+    _ancienCtrl.dispose();
+    _nouveauCtrl.dispose();
+    _confirmCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _valider() async {
+    if (_enCours) return;
+    setState(() {
+      _enCours = true;
+      _erreur = null;
+    });
+
+    final String? erreur = await rapportPersonnalise.changerMotDePasse(
+      ancien: _ancienCtrl.text,
+      nouveau: _nouveauCtrl.text,
+      confirmation: _confirmCtrl.text,
+    );
+
+    if (!mounted) return;
+    if (erreur == null) {
+      Navigator.pop(context, true);
+      return;
+    }
+    setState(() {
+      _enCours = false;
+      _erreur = erreur;
+    });
+  }
+
+  InputDecoration _deco(String label, {bool avecOeil = false}) {
+    return InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+      suffixIcon: avecOeil
+          ? IconButton(
+        icon: Icon(_masque ? Icons.visibility : Icons.visibility_off),
+        onPressed: () => setState(() => _masque = !_masque),
+      )
+          : null,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.key, color: Colors.indigo),
+          SizedBox(width: 8),
+          Expanded(child: Text("Changer le mot de passe")),
+        ],
+      ),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (rapportPersonnalise.motDePasseParDefaut)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: const Text(
+                    "Vous utilisez encore le mot de passe par défaut. "
+                        "Choisissez-en un qui vous est propre.",
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              TextField(
+                controller: _ancienCtrl,
+                obscureText: _masque,
+                enableSuggestions: false,
+                autocorrect: false,
+                decoration: _deco("Ancien mot de passe", avecOeil: true),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _nouveauCtrl,
+                obscureText: _masque,
+                enableSuggestions: false,
+                autocorrect: false,
+                decoration: _deco(
+                    "Nouveau mot de passe "
+                        "(${RapportPersonnalise.longueurMinMotDePasse} caractères min.)"),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _confirmCtrl,
+                obscureText: _masque,
+                enableSuggestions: false,
+                autocorrect: false,
+                onSubmitted: (_) => _valider(),
+                decoration: _deco("Confirmer le nouveau mot de passe"),
+              ),
+              if (_erreur != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _erreur!,
+                  style: const TextStyle(
+                      color: Colors.red, fontWeight: FontWeight.bold),
+                ),
+              ],
+              const SizedBox(height: 10),
+              const Text(
+                "Le mot de passe est enregistré sur cet appareil. Notez-le "
+                    "bien : il ne peut pas être récupéré en cas d'oubli.",
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _enCours ? null : () => Navigator.pop(context, false),
+          child: const Text("Annuler"),
+        ),
+        ElevatedButton(
+          onPressed: _enCours ? null : _valider,
+          child: _enCours
+              ? const SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+              : const Text("Changer"),
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================================
 // ⚡ NOUVEAU — BOÎTE DE DIALOGUE « MONTANTS PERSONNALISÉS DU RAPPORT »
 // ============================================================================
 // - Interrupteur d'activation.
@@ -837,6 +1004,7 @@ class _MotDePasseRapportDialogState extends State<_MotDePasseRapportDialog> {
 // - La classe est prioritaire sur la section.
 // - ⚡ Bloc « Différence accumulée » : somme de (montant réel - montant du
 //   rapport) sur tous les paiements, par section et par classe.
+// - ⚡ Bouton « Changer le mot de passe » (mot de passe propre à l'école).
 // Retourne true si l'enregistrement a réussi.
 // ============================================================================
 class _RapportPersonnaliseDialog extends StatefulWidget {
@@ -914,6 +1082,24 @@ class _RapportPersonnaliseDialogState
       }
       _erreur = null;
     });
+  }
+
+  // ⚡ NOUVEAU — ouvre la fenêtre de changement de mot de passe.
+  Future<void> _changerMotDePasse() async {
+    final bool? change = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _ChangerMotDePasseDialog(),
+    );
+    if (!mounted) return;
+    if (change == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("✅ Mot de passe modifié."),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
   }
 
   Future<void> _enregistrer() async {
@@ -1235,6 +1421,14 @@ class _RapportPersonnaliseDialogState
                       : "Désactivé : les rapports affichent les montants "
                       "réels (comportement normal).",
                   style: const TextStyle(fontSize: 12),
+                ),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _enregistrement ? null : _changerMotDePasse,
+                  icon: const Icon(Icons.key, size: 18),
+                  label: const Text("Changer le mot de passe"),
                 ),
               ),
               const Divider(),

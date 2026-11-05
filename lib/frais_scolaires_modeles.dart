@@ -550,10 +550,12 @@ class Signataire {
 //   paramètres restent sur les montants réels).
 // - Le réglage est enregistré à part (SharedPreferences) : le fichier de
 //   données de l'école et la sauvegarde serveur ne changent pas.
-// - L'accès est protégé par un mot de passe (voir ci-dessous).
+// - L'accès est protégé par un mot de passe MODIFIABLE par chaque école
+//   (enregistré sur l'appareil). Valeur par défaut ci-dessous.
 // ============================================================================
 
-/// ⚠️ MOT DE PASSE D'ACCÈS À LA FONCTION. À CHANGER avant de livrer l'app.
+/// Mot de passe PAR DÉFAUT (utilisé tant que l'utilisateur n'en a pas choisi
+/// un autre depuis la fenêtre cachée).
 const String kMotDePasseRapportPersonnalise = 'Rapport@2026';
 
 class RapportPersonnalise {
@@ -571,12 +573,20 @@ class RapportPersonnalise {
   int _echecs = 0;
   DateTime? _verrouJusqua;
 
+  // ⚡ NOUVEAU — mot de passe courant (modifiable).
+  String _motDePasse = kMotDePasseRapportPersonnalise;
+
   static const String _cleStockage = 'rapport_personnalise_v1';
+  static const String _cleMotDePasse = 'rapport_personnalise_mdp_v1';
   static const int _maxEssais = 3;
   static const int _dureeVerrouSecondes = 60;
+  static const int longueurMinMotDePasse = 6;
 
   static String cleClasse(String section, String classeNumero) =>
       '$section|$classeNumero';
+
+  /// Vrai si le mot de passe n'a jamais été changé (valeur par défaut).
+  bool get motDePasseParDefaut => _motDePasse == kMotDePasseRapportPersonnalise;
 
   /// Vrai seulement si la fonction est activée ET qu'au moins un montant est
   /// défini. Sinon, les rapports restent identiques à l'ancien comportement.
@@ -625,6 +635,20 @@ class RapportPersonnalise {
       parSection = {};
       parClasse = {};
     }
+
+    // ⚡ NOUVEAU — chargement du mot de passe choisi par l'utilisateur.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? mdp = prefs.getString(_cleMotDePasse);
+      if (mdp != null && mdp.isNotEmpty) {
+        _motDePasse = mdp;
+      } else {
+        _motDePasse = kMotDePasseRapportPersonnalise;
+      }
+    } catch (_) {
+      _motDePasse = kMotDePasseRapportPersonnalise;
+    }
+
     _charge = true;
   }
 
@@ -653,7 +677,7 @@ class RapportPersonnalise {
       final int secondes = _verrouJusqua!.difference(now).inSeconds + 1;
       return "Trop de tentatives. Réessayez dans $secondes seconde(s).";
     }
-    if (saisi == kMotDePasseRapportPersonnalise) {
+    if (saisi == _motDePasse) {
       _echecs = 0;
       _verrouJusqua = null;
       return null;
@@ -668,6 +692,39 @@ class RapportPersonnalise {
     }
     return "Mot de passe incorrect (${_maxEssais - _echecs} essai(s) "
         "restant(s)).";
+  }
+
+  /// ⚡ NOUVEAU — change le mot de passe. Retourne null si tout s'est bien
+  /// passé, sinon un message d'erreur à afficher.
+  Future<String?> changerMotDePasse({
+    required String ancien,
+    required String nouveau,
+    required String confirmation,
+  }) async {
+    final String? erreurAncien = verifierMotDePasse(ancien);
+    if (erreurAncien != null) return erreurAncien;
+
+    final String n = nouveau.trim();
+    if (n.length < longueurMinMotDePasse) {
+      return "Le nouveau mot de passe doit contenir au moins "
+          "$longueurMinMotDePasse caractères.";
+    }
+    if (n != confirmation.trim()) {
+      return "La confirmation ne correspond pas au nouveau mot de passe.";
+    }
+    if (n == _motDePasse) {
+      return "Le nouveau mot de passe doit être différent de l'ancien.";
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final bool ok = await prefs.setString(_cleMotDePasse, n);
+      if (!ok) return "Échec de l'enregistrement. Réessayez.";
+    } catch (_) {
+      return "Échec de l'enregistrement. Réessayez.";
+    }
+    _motDePasse = n;
+    return null;
   }
 }
 
