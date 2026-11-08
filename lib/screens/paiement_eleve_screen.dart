@@ -24,6 +24,25 @@ class PaiementEleveScreen extends StatefulWidget {
   State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
 }
 
+// ⚡ Résultat de l'analyse du « paiement par coupure » (lecture seule).
+class _AnalyseCoupure {
+  // Montant réellement enregistrable (somme des mois couverts EN ENTIER).
+  final double accepte;
+  // Montant saisi qui ne sera PAS enregistré (à garder par l'utilisateur).
+  final double garde;
+  // Premier mois qui n'a pas pu être couvert en entier (si applicable).
+  final String? moisIncomplet;
+  // Reste dû de ce mois.
+  final double resteDuMoisIncomplet;
+
+  const _AnalyseCoupure({
+    required this.accepte,
+    required this.garde,
+    required this.moisIncomplet,
+    required this.resteDuMoisIncomplet,
+  });
+}
+
 class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   final searchController = TextEditingController();
   String? selectedClassFilter;
@@ -41,6 +60,14 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   static const String _receiptsLockedPrefKey = 'receipts_locked';
   bool _receiptsLocked = false;
 
+  // ⚡ NOUVEAU — Verrouillage du « paiement par coupure » (fonctionnalité
+  // optionnelle, cachée : 3 appuis rapides sur le titre de l'écran).
+  // Désactivé par défaut : seules les écoles qui le demandent l'activent.
+  static const String _coupureLockedPrefKey = 'coupure_locked';
+  bool _coupureLocked = false;
+  int _titreTaps = 0;
+  DateTime? _dernierTapTitre;
+
   static const String _autoImportSchoolName = 'COMPLEXE SCOLAIRE CHRIST SAUVEUR';
   static const String _autoImportFileName = 'liste.txt';
 
@@ -57,6 +84,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     _filterEleves();
     searchController.addListener(_filterEleves);
     _loadReceiptsLockState();
+    _loadCoupureLockState();
     _fetchMobilePendingPayments();
     _flushPendingReceipts();
     _pendingRequestsPoller =
@@ -133,6 +161,175 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         );
       }
     }
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — VERROUILLAGE DU PAIEMENT PAR COUPURE
+  // ==========================================================================
+  // Quand il est activé, un mois ne peut être enregistré qu'EN ENTIER :
+  //   - montant = reste dû du mois (ex. 60 000 FC) → enregistré normalement ;
+  //   - montant inférieur au reste dû du premier mois → refusé ;
+  //   - montant plus grand (ex. 110 000 FC) → réparti comme d'habitude :
+  //     les mois complets sont enregistrés (60 000 FC) et la partie qui ne
+  //     couvre pas un mois en entier (50 000 FC) N'EST PAS enregistrée ;
+  //     le logiciel demande à l'utilisateur de la garder jusqu'à ce que la
+  //     somme soit suffisante.
+  // Accès caché : 3 appuis rapides sur le titre « Paiements des Élèves ».
+  // L'état est mémorisé sur cet appareil (désactivé par défaut).
+  // ==========================================================================
+
+  Future<void> _loadCoupureLockState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final locked = prefs.getBool(_coupureLockedPrefKey) ?? false;
+    if (mounted) {
+      setState(() => _coupureLocked = locked);
+    }
+  }
+
+  Future<void> _setCoupureLocked(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_coupureLockedPrefKey, value);
+    if (mounted) {
+      setState(() => _coupureLocked = value);
+    }
+  }
+
+  void _onTitreTap() {
+    final now = DateTime.now();
+    if (_dernierTapTitre == null ||
+        now.difference(_dernierTapTitre!) > const Duration(seconds: 2)) {
+      _titreTaps = 0;
+    }
+    _dernierTapTitre = now;
+    _titreTaps++;
+    if (_titreTaps >= 3) {
+      _titreTaps = 0;
+      _dernierTapTitre = null;
+      _toggleCoupureLock();
+    }
+  }
+
+  Future<void> _toggleCoupureLock() async {
+    final bool nouveauEtat = !_coupureLocked;
+    final String titre = nouveauEtat
+        ? "Verrouiller les paiements par coupure ?"
+        : "Déverrouiller les paiements par coupure ?";
+    final String message = nouveauEtat
+        ? "Une fois activé, un mois ne pourra être payé qu'en entier. "
+        "Par exemple, si le mois est de 60 000 FC, un montant inférieur "
+        "à 60 000 FC sera refusé.\n\n"
+        "Si le montant dépasse un mois (par exemple 110 000 FC), les mois "
+        "complets seront enregistrés (60 000 FC) et la somme qui ne couvre "
+        "pas un mois en entier (50 000 FC) ne sera pas enregistrée : "
+        "l'utilisateur devra la garder jusqu'à ce qu'elle soit suffisante.\n\n"
+        "Voulez-vous vraiment verrouiller les paiements par coupure ?"
+        : "Les paiements par coupure seront de nouveau autorisés : un élève "
+        "pourra payer un mois en plusieurs fois, avec n'importe quel "
+        "montant, comme d'habitude.\n\n"
+        "Voulez-vous vraiment déverrouiller les paiements par coupure ?";
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(titre),
+        content: SingleChildScrollView(child: Text(message)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: nouveauEtat ? Colors.red : Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(nouveauEtat ? "Verrouiller" : "Déverrouiller"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await _setCoupureLocked(nouveauEtat);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              nouveauEtat
+                  ? "🔒 Paiements par coupure verrouillés."
+                  : "🔓 Paiements par coupure déverrouillés.",
+            ),
+            backgroundColor: nouveauEtat ? Colors.red : Colors.green,
+          ),
+        );
+      }
+    }
+  }
+
+  // Simule la répartition du paiement (même ordre que le fonctionnement
+  // normal) et calcule la part qui couvre des mois EN ENTIER.
+  // Ne modifie aucune donnée.
+  _AnalyseCoupure _analyserCoupure(
+      Eleve eleve, String mois, double amount, bool viaDeblocage) {
+    final fs = widget.fraisScolaires;
+    final months = fs.months;
+    final int idx = months.indexOf(mois);
+
+    if (idx == -1) {
+      return _AnalyseCoupure(
+          accepte: amount, garde: 0, moisIncomplet: null, resteDuMoisIncomplet: 0);
+    }
+
+    final List<String> ordre = [];
+    if (viaDeblocage) {
+      ordre.add(mois);
+      final String? prem = _premierMoisNonPaye(eleve);
+      final int debut = prem != null ? months.indexOf(prem) : 0;
+      for (var i = debut < 0 ? 0 : debut; i < months.length; i++) {
+        if (months[i] != mois) ordre.add(months[i]);
+      }
+    } else {
+      for (var i = idx; i < months.length; i++) {
+        ordre.add(months[i]);
+      }
+    }
+
+    const double eps = 0.0001;
+    double restant = amount;
+    double accepte = 0;
+    String? moisIncomplet;
+    double resteIncomplet = 0;
+
+    for (final m in ordre) {
+      // Le montant est épuisé : on s'arrête, rien n'est refusé ici.
+      if (restant <= eps) break;
+
+      final double requis = fs.getRequiredForMonthForEleve(eleve, m);
+      final double paye = eleve.paid[m] ?? 0.0;
+      final double reste = requis - paye;
+      if (reste <= eps) continue;
+
+      if (restant + eps >= reste) {
+        restant -= reste;
+        accepte += reste;
+        if (restant < 0) restant = 0;
+      } else {
+        // Ce mois ne peut pas être couvert en entier.
+        moisIncomplet = m;
+        resteIncomplet = reste;
+        break;
+      }
+    }
+
+    double garde = amount - accepte;
+    if (garde < eps) garde = 0;
+    return _AnalyseCoupure(
+      accepte: accepte,
+      garde: garde,
+      moisIncomplet: moisIncomplet,
+      resteDuMoisIncomplet: resteIncomplet,
+    );
   }
 
   Future<void> _flushPendingReceipts() async {
@@ -1203,6 +1400,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         builder: (_) => SaisieGroupeeScreen(
           fraisScolaires: widget.fraisScolaires,
           receiptsLocked: _receiptsLocked,
+          coupureLocked: _coupureLocked,
         ),
       ),
     );
@@ -1250,7 +1448,13 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Paiements des Élèves"),
+        // ⚡ NOUVEAU — 3 appuis rapides sur le titre = verrouillage caché du
+        // paiement par coupure (aucun indice visuel sur l'écran).
+        title: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _onTitreTap,
+          child: const Text("Paiements des Élèves"),
+        ),
         actions: [
           IconButton(
             icon: Icon(
@@ -1818,11 +2022,12 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             if (isSubmitting) return;
             setStateDialog(() => isSubmitting = true);
 
-            final amount = double.tryParse(controller.text);
-            if (amount == null || amount <= 0) {
+            double? amountSaisi = double.tryParse(controller.text);
+            if (amountSaisi == null || amountSaisi <= 0) {
               setStateDialog(() => isSubmitting = false);
               return;
             }
+            double amount = amountSaisi;
 
             if (!_peutPayerCeMois(eleve, mois)) {
               Navigator.pop(ctx);
@@ -1841,6 +2046,59 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             }
 
             final bool viaDeblocage = _paiementViaDeblocage(eleve, mois);
+
+            // ⚡ NOUVEAU — Verrouillage du paiement par coupure (si activé).
+            // Seule la part qui couvre des mois EN ENTIER est enregistrée ;
+            // le reste insuffisant n'est pas enregistré (à garder).
+            double montantGarde = 0;
+            if (_coupureLocked) {
+              final _AnalyseCoupure analyse =
+              _analyserCoupure(eleve, mois, amount, viaDeblocage);
+
+              if (analyse.accepte <= 0.0001 && analyse.moisIncomplet != null) {
+                // Même le premier mois n'est pas couvert en entier : refus.
+                final String m = analyse.moisIncomplet!;
+                final double reste = analyse.resteDuMoisIncomplet;
+                await showDialog(
+                  context: context,
+                  builder: (ctxRefus) => AlertDialog(
+                    title: const Row(
+                      children: [
+                        Icon(Icons.lock, color: Colors.red),
+                        SizedBox(width: 8),
+                        Expanded(child: Text("Paiement refusé")),
+                      ],
+                    ),
+                    content: SingleChildScrollView(
+                      child: Text(
+                        "Le paiement par coupure est verrouillé.\n\n"
+                            "Le mois \"$m\" demande ${formatMontant(reste)} FC "
+                            "et le montant saisi est de "
+                            "${formatMontant(amount)} FC "
+                            "(il manque ${formatMontant(reste - amount)} FC).\n\n"
+                            "Veuillez garder cette somme jusqu'à ce que le "
+                            "montant atteigne au moins ${formatMontant(reste)} FC, "
+                            "puis enregistrer le paiement.",
+                      ),
+                    ),
+                    actions: [
+                      ElevatedButton(
+                        onPressed: () => Navigator.pop(ctxRefus),
+                        child: const Text("Compris"),
+                      ),
+                    ],
+                  ),
+                );
+                setStateDialog(() => isSubmitting = false);
+                return;
+              }
+
+              if (analyse.garde > 0.0001 && analyse.accepte > 0.0001) {
+                // Une partie seulement est enregistrée : on réduit le montant.
+                amount = analyse.accepte;
+                montantGarde = analyse.garde;
+              }
+            }
 
             if (viaDeblocage) {
               final double soldeTotal = _soldeTotalRestantAnnee(eleve);
@@ -1915,6 +2173,40 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 const SnackBar(content: Text("✅ Paiement enregistré avec succès")),
               );
 
+              // ⚡ Information : une partie du montant n'a pas été enregistrée.
+              if (montantGarde > 0.0001) {
+                showDialog(
+                  context: context,
+                  builder: (ctxInfo) => AlertDialog(
+                    title: const Row(
+                      children: [
+                        Icon(Icons.info_outline, color: Colors.orange),
+                        SizedBox(width: 8),
+                        Expanded(child: Text("Une partie n'a pas été enregistrée")),
+                      ],
+                    ),
+                    content: SingleChildScrollView(
+                      child: Text(
+                        "Le paiement par coupure est verrouillé.\n\n"
+                            "Montant saisi : ${formatMontant(amountSaisi!)} FC\n"
+                            "Montant enregistré : ${formatMontant(amount)} FC\n"
+                            "Montant NON enregistré : ${formatMontant(montantGarde)} FC\n\n"
+                            "Veuillez rendre ou garder les "
+                            "${formatMontant(montantGarde)} FC jusqu'à ce que la "
+                            "somme devienne suffisante pour payer le mois suivant "
+                            "en entier.",
+                      ),
+                    ),
+                    actions: [
+                      ElevatedButton(
+                        onPressed: () => Navigator.pop(ctxInfo),
+                        child: const Text("Compris"),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
               if (_receiptsLocked) {
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -1976,6 +2268,23 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (_coupureLocked)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withAlpha(25),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.red),
+                      ),
+                      child: const Text(
+                        "🔒 Paiement par coupure verrouillé : seuls les mois "
+                            "payés en entier sont enregistrés.",
+                        style: TextStyle(color: Colors.red, fontSize: 11.5),
+                      ),
+                    ),
+                  ),
                 if (viaDeblocageAffichage)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 10),
@@ -2085,7 +2394,7 @@ String _formatDateIso(String? iso) {
 class _LigneLot {
   final String mois;
   final double montant;
-  // 'ok' | 'solde' | 'gratuit' | 'bloque' | 'sans_montant'
+  // 'ok' | 'solde' | 'gratuit' | 'bloque' | 'sans_montant' | 'coupure'
   final String statut;
   final bool plafonne;
   final bool deblocage;
@@ -2311,6 +2620,8 @@ class _LotsSaisie {
 //   - le montant appliqué ne dépasse jamais ce qui reste à payer pour le mois ;
 //   - les exceptions de montant par élève/mois sont respectées ;
 //   - chaque paiement crée une vraie transaction (mêmes champs que d'habitude).
+//   - ⚡ si le verrouillage du paiement par coupure est activé, un « montant
+//     unique » inférieur au reste dû d'un mois est refusé pour ce mois.
 //
 // Chaque paiement porte en plus les marqueurs « saisieGroupee » et « lotSaisie »
 // qui permettent de retrouver (et d'annuler) un lot saisi par erreur.
@@ -2319,11 +2630,14 @@ class _LotsSaisie {
 class SaisieGroupeeScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   final bool receiptsLocked;
+  // ⚡ NOUVEAU — verrouillage du paiement par coupure (désactivé par défaut)
+  final bool coupureLocked;
 
   const SaisieGroupeeScreen({
     super.key,
     required this.fraisScolaires,
     required this.receiptsLocked,
+    this.coupureLocked = false,
   });
 
   @override
@@ -2407,12 +2721,17 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
           double montant = 0;
           bool plafonne = false;
           bool valide = true;
+          bool refuseCoupure = false;
           if (_modeMontant == 'fixe') {
             if (fixe == null || fixe <= 0) {
               valide = false;
             } else if (fixe > reste) {
               montant = reste;
               plafonne = true;
+            } else if (widget.coupureLocked && fixe + 0.0001 < reste) {
+              // ⚡ Paiement par coupure verrouillé : le mois doit être
+              // couvert en entier.
+              refuseCoupure = true;
             } else {
               montant = fixe;
             }
@@ -2421,6 +2740,8 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
           }
           if (!valide) {
             lignes.add(_LigneLot(mois: m, montant: 0, statut: 'sans_montant'));
+          } else if (refuseCoupure) {
+            lignes.add(_LigneLot(mois: m, montant: 0, statut: 'coupure'));
           } else {
             paidSim[m] = dejaPaye + montant;
             lignes.add(_LigneLot(
@@ -2502,6 +2823,10 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
           break;
         case 'sans_montant':
           parts.add('${l.mois} : entrez le montant');
+          break;
+        case 'coupure':
+          parts.add('🔒 ${l.mois} : refusé (paiement par coupure verrouillé, '
+              'le montant ne couvre pas tout le mois)');
           break;
       }
     }
@@ -2655,6 +2980,7 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
       double totalEnregistre = 0;
       int nbPlafonnes = 0;
       int nbBloques = 0;
+      int nbCoupureRefuses = 0;
 
       for (final sel in selectionnes) {
         final Eleve e = sel.eleve;
@@ -2664,6 +2990,7 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
 
         for (final l in plan.lignes) {
           if (l.statut == 'bloque') nbBloques++;
+          if (l.statut == 'coupure') nbCoupureRefuses++;
           if (l.statut != 'ok' || l.montant <= 0) continue;
 
           final Map<String, dynamic> t = <String, dynamic>{
@@ -2739,6 +3066,7 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
                   "${imprimer ? 'Reçus imprimés : $nbImprimes/${nouvelles.length} (les autres sont en attente)\n' : ''}"
                   "${nbPlafonnes > 0 ? '$nbPlafonnes paiement(s) plafonné(s) au reste dû\n' : ''}"
                   "${nbBloques > 0 ? '$nbBloques mois ignoré(s) (mois précédent non soldé)\n' : ''}"
+                  "${nbCoupureRefuses > 0 ? '$nbCoupureRefuses mois refusé(s) (paiement par coupure verrouillé)\n' : ''}"
                   "\nNuméro du lot : $lotId",
             ),
           ),
@@ -2818,6 +3146,23 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
                         style: TextStyle(fontSize: 12.5),
                       ),
                     ),
+                    if (widget.coupureLocked)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        margin: const EdgeInsets.only(bottom: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.red),
+                        ),
+                        child: const Text(
+                          "🔒 Paiement par coupure verrouillé : un montant "
+                              "unique inférieur au reste dû d'un mois sera "
+                              "refusé pour ce mois.",
+                          style: TextStyle(fontSize: 12.5, color: Colors.red),
+                        ),
+                      ),
                     _carte(
                       titre: "1. Mois à enregistrer",
                       sousTitre:
@@ -3212,7 +3557,8 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
 //     tous les élèves affichés.
 //   - Les cases vertes sont déjà soldées : elles ne se modifient pas.
 //   - Chaque case cochée est enregistrée pour le montant COMPLET restant du
-//     mois (exceptions de montant respectées).
+//     mois (exceptions de montant respectées) : le paiement par coupure n'est
+//     donc jamais possible ici.
 // Rien n'est enregistré tant qu'on n'appuie pas sur « Enregistrer ».
 // Les paiements créés portent les mêmes marqueurs de lot que la saisie
 // groupée : ils sont visibles et annulables dans « Lots saisis ».

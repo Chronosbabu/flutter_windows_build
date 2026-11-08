@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
@@ -22,6 +24,10 @@ class _StudentListScreenState extends State<StudentListScreen> {
   String? selectedSectionFilter;
   String? selectedClassFilter;
 
+  // Filtre : n'afficher que les élèves sans aucune information additionnelle
+  // (pratique pour la saisie rapide).
+  bool onlyWithoutInfo = false;
+
   // ====================================================================
   // MODE PASSATION VERS LA NOUVELLE ANNÉE
   // ====================================================================
@@ -33,21 +39,9 @@ class _StudentListScreenState extends State<StudentListScreen> {
   // ====================================================================
   // MODE SUPPRESSION D'ÉLÈVE
   // ====================================================================
-  //
-  // Quand deletionMode est actif, l'AppBar change de titre, les filtres
-  // et la barre de recherche restent actifs (pour trouver rapidement
-  // l'élève à supprimer), et chaque carte affiche un bouton de corbeille
-  // rouge à droite. Un seul appui sur la corbeille déclenche la
-  // vérification du mot de passe admin puis la confirmation avant
-  // suppression définitive.
   bool deletionMode = false;
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — LOGO DE L'ÉCOLE (RÉUTILISÉ SUR LA CARTE D'ÉLÈVE)
-  // ==========================================================================
-  // Le logo est déjà géré et sauvegardé localement par SettingsScreen (fichier
-  // school_logo.png dans le dossier documents de l'application). On le
-  // recharge simplement ici pour l'afficher sur la carte d'identité d'élève.
+  // Logo de l'école (réutilisé sur la carte d'élève)
   Uint8List? _schoolLogoBytes;
 
   @override
@@ -67,21 +61,34 @@ class _StudentListScreenState extends State<StudentListScreen> {
     } catch (_) {}
   }
 
-  @override
-  Widget build(BuildContext context) {
+  bool _hasExtraInfo(Eleve e) {
+    return e.pereNom.trim().isNotEmpty ||
+        e.mereNom.trim().isNotEmpty ||
+        e.adresse.trim().isNotEmpty ||
+        e.dateNaissance.trim().isNotEmpty ||
+        e.customFields.values.any((v) => v.trim().isNotEmpty);
+  }
+
+  List<Eleve> _filteredEleves() {
     final allEleves = widget.fraisScolaires.currentData.eleves;
-    final filteredEleves = allEleves.where((eleve) {
-      final matchesSearch =
-          eleve.nom.toLowerCase().contains(searchQuery.toLowerCase()) ||
-              eleve.postNom.toLowerCase().contains(searchQuery.toLowerCase()) ||
-              eleve.prenom.toLowerCase().contains(searchQuery.toLowerCase()) ||
-              eleve.id.toLowerCase().contains(searchQuery.toLowerCase());
+    final q = searchQuery.toLowerCase();
+    return allEleves.where((eleve) {
+      final matchesSearch = eleve.nom.toLowerCase().contains(q) ||
+          eleve.postNom.toLowerCase().contains(q) ||
+          eleve.prenom.toLowerCase().contains(q) ||
+          eleve.id.toLowerCase().contains(q);
       final matchesSection =
           selectedSectionFilter == null || eleve.section == selectedSectionFilter;
       final matchesClass =
           selectedClassFilter == null || eleve.classe == selectedClassFilter;
-      return matchesSearch && matchesSection && matchesClass;
+      final matchesInfo = !onlyWithoutInfo || !_hasExtraInfo(eleve);
+      return matchesSearch && matchesSection && matchesClass && matchesInfo;
     }).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filteredEleves = _filteredEleves();
 
     final classOptions = selectedSectionFilter != null
         ? List<String>.from(
@@ -172,11 +179,24 @@ class _StudentListScreenState extends State<StudentListScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            Text(
-              "Total : ${filteredEleves.length} élève(s)",
-              style:
-              const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    "Total : ${filteredEleves.length} élève(s)",
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                ),
+                if (!promotionMode && !deletionMode)
+                  FilterChip(
+                    avatar: const Icon(Icons.person_off_outlined, size: 18),
+                    label: const Text("Sans infos"),
+                    selected: onlyWithoutInfo,
+                    onSelected: (v) => setState(() => onlyWithoutInfo = v),
+                  ),
+              ],
             ),
             const SizedBox(height: 8),
             Expanded(
@@ -225,8 +245,13 @@ class _StudentListScreenState extends State<StudentListScreen> {
       ];
     }
 
-    // Mode normal : 4 boutons côte à côte
     return [
+      // Saisie rapide des informations additionnelles
+      IconButton(
+        icon: const Icon(Icons.flash_on, color: Colors.amber),
+        tooltip: "Saisie rapide des informations des élèves",
+        onPressed: _openFastEntry,
+      ),
       IconButton(
         icon: const Icon(Icons.move_up),
         tooltip: "Passation vers la nouvelle année",
@@ -237,14 +262,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
         tooltip: "Supprimer un élève",
         onPressed: _startDeletionMode,
       ),
-      // ==================================================================
-      // ⚡ NOUVEAU — BOUTON "ÉLÈVES SUPPRIMÉS"
-      // ==================================================================
-      // Ouvre directement la page listant tous les élèves supprimés /
-      // exclus (archivés). Leur argent déjà payé reste comptabilisé dans
-      // la caisse de l'école et leur historique complet reste consultable
-      // ici, tant qu'on ne le supprime pas volontairement depuis cette
-      // page (protégé par mot de passe admin).
       IconButton(
         icon: const Icon(Icons.history),
         tooltip: "Élèves Supprimés",
@@ -258,19 +275,13 @@ class _StudentListScreenState extends State<StudentListScreen> {
     ];
   }
 
-  // ==================== CARTE NORMALE (HORS MODES SPÉCIAUX) ====================
+  // ==================== CARTE NORMALE ====================
   Widget _buildNormalCard(Eleve e) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
       child: ListTile(
-        // ⚡ NOUVEAU — clic sur un élève ouvre sa carte d'identité complète,
-        // avec possibilité de voir et modifier ses informations
-        // additionnelles (père, mère, adresse, date de naissance, photo,
-        // questions personnalisées).
         onTap: () => _showStudentCard(e),
         leading: CircleAvatar(
-          // ⚡ NOUVEAU — affiche la photo de l'élève si elle existe déjà,
-          // sinon retombe sur les initiales comme avant.
           backgroundImage: (e.photoBase64 != null && e.photoBase64!.isNotEmpty)
               ? MemoryImage(base64Decode(e.photoBase64!))
               : null,
@@ -293,24 +304,50 @@ class _StudentListScreenState extends State<StudentListScreen> {
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — OUVERTURE DE LA CARTE D'IDENTITÉ D'ÉLÈVE
+  // OUVERTURE DE LA CARTE D'IDENTITÉ / SAISIE RAPIDE
   // ==========================================================================
   void _showStudentCard(Eleve eleve) {
+    final list = _filteredEleves();
+    int idx = list.indexWhere((x) => x.id == eleve.id);
+    if (idx < 0) {
+      idx = 0;
+    }
+    _openCardDialog(list, idx, startEditing: false);
+  }
+
+  void _openFastEntry() {
+    final list = _filteredEleves();
+    if (list.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Aucun élève dans la liste affichée.")),
+      );
+      return;
+    }
+    _openCardDialog(list, 0, startEditing: true);
+  }
+
+  void _openCardDialog(List<Eleve> list, int index,
+      {required bool startEditing}) {
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) => _StudentCardDialog(
-        eleve: eleve,
+        eleves: list,
+        startIndex: index,
+        startEditing: startEditing,
         fraisScolaires: widget.fraisScolaires,
         schoolLogoBytes: _schoolLogoBytes,
         onSaved: () {
           if (mounted) setState(() {});
         },
       ),
-    );
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   // ==========================================================================
-  // ⚡ NOUVEAU — OUVERTURE DE LA PAGE "ÉLÈVES SUPPRIMÉS"
+  // OUVERTURE DE LA PAGE "ÉLÈVES SUPPRIMÉS"
   // ==========================================================================
   void _openElevesSupprimesScreen() {
     Navigator.push(
@@ -320,9 +357,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
             ElevesSupprimesScreen(fraisScolaires: widget.fraisScolaires),
       ),
     ).then((_) {
-      // Au retour de cette page (après une éventuelle suppression
-      // définitive dans l'archive ou une annulation de paiements), on
-      // rafraîchit l'écran au cas où.
       if (mounted) setState(() {});
     });
   }
@@ -386,11 +420,9 @@ class _StudentListScreenState extends State<StudentListScreen> {
     );
   }
 
-  // ==================== DÉMARRER / QUITTER LE MODE SUPPRESSION ====================
   void _startDeletionMode() {
     setState(() {
       deletionMode = true;
-      // Réinitialiser la recherche pour partir d'une ardoise vide
       searchQuery = "";
     });
   }
@@ -403,31 +435,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
   }
 
   // ==================== SUPPRESSION SÉCURISÉE D'UN ÉLÈVE ====================
-  //
-  // Flux complet :
-  //   1. Vérification du mot de passe administrateur (backupPassword de
-  //      AppState, le même que pour les autres actions sensibles).
-  //   2. Boîte de dialogue d'avertissement avec les informations de
-  //      l'élève et rappel que l'élève ne sera plus visible dans ce
-  //      registre.
-  //   3. Si l'utilisateur confirme, l'élève est retiré de
-  //      currentData.eleves ET ARCHIVÉ dans "Élèves Supprimés"
-  //      (⚡ NOUVEAU — au lieu d'une suppression définitive). L'argent
-  //      déjà payé par cet élève reste comptabilisé dans la caisse de
-  //      l'école, et tout son historique de paiements reste consultable
-  //      dans la page "Élèves Supprimés", tant qu'on ne le supprime pas
-  //      volontairement et définitivement depuis cette page (protégé par
-  //      mot de passe admin).
-  //      ⚡ NOUVEAU — Depuis la page "Élèves Supprimés", on peut aussi
-  //      ANNULER ses paiements si l'école veut retirer cet argent de la
-  //      caisse.
-  //   4. Toutes les autres pages (PaiementEleveScreen, etc.) lisent
-  //      currentData.eleves en direct : elles se mettent à jour
-  //      automatiquement à leur prochain rebuild.
-  //   5. Un message snackbar rappelle de sauvegarder sur le serveur pour
-  //      propager la suppression à distance.
   Future<void> _requestDeleteStudent(Eleve eleve) async {
-    // --- Étape 1 : Vérification du mot de passe admin ---
     final appState = Provider.of<AppState>(context, listen: false);
 
     if (appState.backupPassword == null) {
@@ -483,7 +491,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
 
     if (passwordOk != true) return;
 
-    // --- Étape 2 : Avertissement et confirmation de suppression ---
     final bool? confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -561,7 +568,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
 
     if (confirmed != true) return;
 
-    // --- Étape 3 : Archivage (⚡ NOUVEAU) au lieu d'une suppression définitive ---
     await widget.fraisScolaires.archiverEtSupprimerEleve(
       eleve,
       motif: 'Suppression manuelle depuis le registre des élèves',
@@ -583,7 +589,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
   }
 
   // ====================================================================
-  // MODE PASSATION — bannière + carte (inchangés)
+  // MODE PASSATION — bannière + carte
   // ====================================================================
 
   Widget _buildPromotionBanner() {
@@ -821,7 +827,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     });
   }
 
-  // ==================== ANNULER LE MODE PASSATION ====================
   void _cancelPromotionMode() {
     setState(() {
       promotionMode = false;
@@ -911,26 +916,60 @@ class _StudentListScreenState extends State<StudentListScreen> {
 }
 
 // ==============================================================================
-// ⚡ NOUVEAU — BOÎTE DE DIALOGUE "CARTE D'IDENTITÉ D'ÉLÈVE"
+// FORMATEUR DE DATE : tapez seulement les chiffres (ex: 05032014), les "/"
+// s'ajoutent tout seuls → 05/03/2014
 // ==============================================================================
-// Affichée au clic sur un élève dans le registre. Montre le logo de l'école,
-// le nom de l'école, la photo de l'élève, sa classe, son ID, son nom complet,
-// et toutes les informations additionnelles éventuellement remplies (père,
-// mère, adresse, date de naissance, questions personnalisées).
+class _DateSlashFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    final digitsAll = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
+    final digits =
+    digitsAll.length > 8 ? digitsAll.substring(0, 8) : digitsAll;
+    final buf = StringBuffer();
+    for (var i = 0; i < digits.length; i++) {
+      if (i == 2 || i == 4) buf.write('/');
+      buf.write(digits[i]);
+    }
+    final text = buf.toString();
+    return TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+}
+
+// ==============================================================================
+// CARTE D'IDENTITÉ D'ÉLÈVE + SAISIE RAPIDE EN SÉRIE
+// ==============================================================================
+// ORDRE DES CHAMPS :
+//   1) Les questions personnalisées de l'école, dans l'ordre exact où elles
+//      ont été ajoutées (la PREMIÈRE ajoutée est en PREMIÈRE position).
+//   2) Ensuite seulement les champs de base : père, mère, adresse, date de
+//      naissance.
 //
-// Un bouton "Modifier" permet de basculer la carte en mode édition : tous
-// les champs additionnels deviennent modifiables (y compris ajouter de
-// nouvelles questions personnalisées ou changer la photo), avec un bouton
-// "Enregistrer" qui sauvegarde directement dans FraisScolaires (fichier
-// local sur l'appareil).
+// - Mode lecture : carte d'identité, flèches pour passer d'un élève à l'autre.
+// - Mode saisie : tous les champs sont affichés d'un coup.
+//   Entrée = champ suivant. Entrée sur le dernier champ = enregistre et passe
+//   à l'élève suivant. Ctrl+Entrée (ou Cmd+Entrée) = enregistre et passe à
+//   l'élève suivant depuis N'IMPORTE QUEL champ.
+// - Chaque question peut être supprimée avec la croix rouge (suppression pour
+//   toute l'école, après confirmation).
+// - Les questions ajoutées sont mémorisées pour toute l'école (config).
+// - L'écriture sur le disque est groupée (≈1 s après la dernière saisie, et
+//   toujours à la fermeture) pour que la saisie reste instantanée.
 class _StudentCardDialog extends StatefulWidget {
-  final Eleve eleve;
+  final List<Eleve> eleves;
+  final int startIndex;
+  final bool startEditing;
   final FraisScolaires fraisScolaires;
   final Uint8List? schoolLogoBytes;
   final VoidCallback onSaved;
 
   const _StudentCardDialog({
-    required this.eleve,
+    required this.eleves,
+    required this.startIndex,
+    required this.startEditing,
     required this.fraisScolaires,
     required this.schoolLogoBytes,
     required this.onSaved,
@@ -941,42 +980,136 @@ class _StudentCardDialog extends StatefulWidget {
 }
 
 class _StudentCardDialogState extends State<_StudentCardDialog> {
-  bool editing = false;
-  bool saving = false;
+  late int index;
+  late bool editing;
+  bool photoChanged = false;
+  int savedCount = 0;
+  String? statusMessage;
 
-  late TextEditingController pereNomController;
-  late TextEditingController mereNomController;
-  late TextEditingController adresseController;
-  DateTime? selectedDateNaissance;
+  final pereCtrl = TextEditingController();
+  final mereCtrl = TextEditingController();
+  final adresseCtrl = TextEditingController();
+  final dateCtrl = TextEditingController();
+  final pereFocus = FocusNode();
+  final mereFocus = FocusNode();
+  final adresseFocus = FocusNode();
+  final dateFocus = FocusNode();
+
+  // Questions personnalisées, dans l'ordre d'ajout (la première ajoutée en
+  // première position).
+  final List<String> _questions = [];
+  final Map<String, TextEditingController> _qCtrl = {};
+  final Map<String, FocusNode> _qFocus = {};
+
   Uint8List? photoBytes;
-  late Map<String, TextEditingController> customFieldsControllers;
+
+  Timer? _saveTimer;
+  bool _dirty = false;
+  bool _writing = false;
+
+  Eleve get eleve => widget.eleves[index];
 
   @override
   void initState() {
     super.initState();
-    final e = widget.eleve;
-    pereNomController = TextEditingController(text: e.pereNom);
-    mereNomController = TextEditingController(text: e.mereNom);
-    adresseController = TextEditingController(text: e.adresse);
-    selectedDateNaissance = _parseDate(e.dateNaissance);
+    index = widget.startIndex;
+    editing = widget.startEditing;
+    for (final q in widget.fraisScolaires.config.customFieldQuestions) {
+      final t = q.trim();
+      if (t.isEmpty) continue;
+      if (_indexOfQuestion(t) == -1) {
+        _questions.add(t);
+        _ensureQuestionControllers(t);
+      }
+    }
+    _loadStudent();
+    if (editing) _focusFirst();
+  }
+
+  int _indexOfQuestion(String q) {
+    final low = q.trim().toLowerCase();
+    return _questions.indexWhere((x) => x.trim().toLowerCase() == low);
+  }
+
+  void _ensureQuestionControllers(String q) {
+    _qCtrl.putIfAbsent(q, () => TextEditingController());
+    _qFocus.putIfAbsent(q, () => FocusNode());
+  }
+
+  void _loadStudent() {
+    final e = eleve;
+    pereCtrl.text = e.pereNom;
+    mereCtrl.text = e.mereNom;
+    adresseCtrl.text = e.adresse;
+    dateCtrl.text = e.dateNaissance;
     photoBytes = (e.photoBase64 != null && e.photoBase64!.isNotEmpty)
         ? base64Decode(e.photoBase64!)
         : null;
-    customFieldsControllers = {
-      for (var entry in e.customFields.entries)
-        entry.key: TextEditingController(text: entry.value),
-    };
+    photoChanged = false;
+
+    // Questions que cet élève possède mais qui ne sont pas encore dans la
+    // liste de l'école (ex: créées depuis l'écran d'inscription) : on les
+    // ajoute à la fin de la liste et on les mémorise pour tous.
+    for (final key in e.customFields.keys) {
+      final k = key.trim();
+      if (k.isEmpty) continue;
+      if (_indexOfQuestion(k) == -1) {
+        _questions.add(k);
+        _ensureQuestionControllers(k);
+        widget.fraisScolaires.registerCustomFieldQuestion(k);
+      }
+    }
+
+    for (final q in _questions) {
+      String value = '';
+      e.customFields.forEach((k, v) {
+        if (k.trim().toLowerCase() == q.trim().toLowerCase()) value = v;
+      });
+      _qCtrl[q]!.text = value;
+    }
   }
 
-  DateTime? _parseDate(String s) {
-    if (s.trim().isEmpty) return null;
-    final parts = s.split('/');
+  // Ordre de navigation : questions personnalisées d'abord, champs de base
+  // ensuite.
+  List<FocusNode> _orderedNodes() => [
+    ..._questions.map((q) => _qFocus[q]!),
+    pereFocus,
+    mereFocus,
+    adresseFocus,
+    dateFocus,
+  ];
+
+  void _focusFirst() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && editing) {
+        _orderedNodes().first.requestFocus();
+      }
+    });
+  }
+
+  void _next(FocusNode current) {
+    final nodes = _orderedNodes();
+    final i = nodes.indexOf(current);
+    if (i >= 0 && i < nodes.length - 1) {
+      nodes[i + 1].requestFocus();
+    } else {
+      _saveAndNext();
+    }
+  }
+
+  // ---------- Date ----------
+  DateTime? _parseDateStrict(String s) {
+    final parts = s.trim().split('/');
     if (parts.length != 3) return null;
     final day = int.tryParse(parts[0]);
     final month = int.tryParse(parts[1]);
     final year = int.tryParse(parts[2]);
     if (day == null || month == null || year == null) return null;
-    return DateTime(year, month, day);
+    if (parts[2].length != 4) return null;
+    if (year < 1950 || year > DateTime.now().year) return null;
+    final d = DateTime(year, month, day);
+    if (d.day != day || d.month != month || d.year != year) return null;
+    return d;
   }
 
   String _formatDate(DateTime d) {
@@ -984,17 +1117,22 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     return '${two(d.day)}/${two(d.month)}/${d.year}';
   }
 
-  @override
-  void dispose() {
-    pereNomController.dispose();
-    mereNomController.dispose();
-    adresseController.dispose();
-    for (var c in customFieldsControllers.values) {
-      c.dispose();
+  Future<void> _pickDate() async {
+    final now = DateTime.now();
+    final current = _parseDateStrict(dateCtrl.text);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current ?? DateTime(now.year - 10),
+      firstDate: DateTime(1950),
+      lastDate: now,
+    );
+    if (picked != null) {
+      setState(() => dateCtrl.text = _formatDate(picked));
     }
-    super.dispose();
+    dateFocus.requestFocus();
   }
 
+  // ---------- Photo ----------
   Future<void> _pickPhoto() async {
     const typeGroup = XTypeGroup(
       label: 'images',
@@ -1003,22 +1141,13 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     final file = await openFile(acceptedTypeGroups: [typeGroup]);
     if (file == null) return;
     final bytes = await file.readAsBytes();
-    setState(() => photoBytes = bytes);
+    setState(() {
+      photoBytes = bytes;
+      photoChanged = true;
+    });
   }
 
-  Future<void> _pickDate() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: selectedDateNaissance ?? DateTime(now.year - 10),
-      firstDate: DateTime(1990),
-      lastDate: now,
-    );
-    if (picked != null) {
-      setState(() => selectedDateNaissance = picked);
-    }
-  }
-
+  // ---------- Nouvelle question personnalisée (mémorisée pour toute l'école) ----------
   Future<void> _addCustomField() async {
     final questionController = TextEditingController();
     final question = await showDialog<String>(
@@ -1028,9 +1157,17 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         content: TextField(
           controller: questionController,
           autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
           decoration: const InputDecoration(
             labelText: "Ex: Numéro de téléphone du parent",
+            helperText:
+            "Elle sera ajoutée pour tous les élèves, restera en mémoire et "
+                "passera avant les champs de base.",
           ),
+          onSubmitted: (v) {
+            final q = v.trim();
+            if (q.isNotEmpty) Navigator.pop(ctx2, q);
+          },
         ),
         actions: [
           TextButton(
@@ -1047,53 +1184,246 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         ],
       ),
     );
-    if (question != null && question.isNotEmpty) {
-      if (!customFieldsControllers.containsKey(question)) {
-        setState(() {
-          customFieldsControllers[question] = TextEditingController();
-        });
+    if (question == null || question.trim().isEmpty) return;
+    final q = question.trim();
+
+    final existing = _indexOfQuestion(q);
+    if (existing != -1) {
+      _qFocus[_questions[existing]]?.requestFocus();
+      return;
+    }
+
+    await widget.fraisScolaires.registerCustomFieldQuestion(q);
+    if (!mounted) return;
+    setState(() {
+      _questions.add(q);
+      _ensureQuestionControllers(q);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _qFocus[q]?.requestFocus();
+    });
+  }
+
+  // ---------- Suppression d'une question personnalisée (pour toute l'école) ----------
+  Future<void> _deleteQuestion(String q) async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 26),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text("Supprimer cette question",
+                  style: TextStyle(color: Colors.red, fontSize: 17)),
+            ),
+          ],
+        ),
+        content: Text(
+          "Question : \"$q\"\n\n"
+              "Elle sera supprimée pour TOUS les élèves de l'école, et les "
+              "réponses déjà saisies pour cette question seront effacées. "
+              "Cette action est définitive.\n\n"
+              "Pensez ensuite à sauvegarder sur le serveur.",
+          style: const TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Supprimer",
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    final fs = widget.fraisScolaires;
+    final low = q.trim().toLowerCase();
+
+    // 1) On retire la question de la liste mémorisée de l'école.
+    fs.config.customFieldQuestions
+        .removeWhere((x) => x.trim().toLowerCase() == low);
+
+    // 2) On retire les réponses chez tous les élèves (sinon la question
+    //    reviendrait toute seule en lisant leurs anciennes réponses).
+    void clean(Iterable<Eleve> list) {
+      for (final e in list) {
+        e.customFields.removeWhere((k, v) => k.trim().toLowerCase() == low);
+      }
+    }
+
+    clean(fs.currentData.eleves);
+    for (final y in fs.history.values) {
+      clean(y.eleves);
+    }
+    clean(fs.elevesSupprimesData.eleves);
+
+    // 3) On retire le champ du formulaire.
+    final ctrl = _qCtrl.remove(q);
+    final foc = _qFocus.remove(q);
+    setState(() {
+      _questions.removeWhere((x) => x.trim().toLowerCase() == low);
+      statusMessage = "Question supprimée";
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ctrl?.dispose();
+      foc?.dispose();
+    });
+
+    widget.onSaved();
+    _scheduleSave();
+    _focusFirst();
+  }
+
+  // ---------- Enregistrement ----------
+  void _applyToEleve(String dateOut) {
+    final e = eleve;
+    e.pereNom = pereCtrl.text.trim();
+    e.mereNom = mereCtrl.text.trim();
+    e.adresse = adresseCtrl.text.trim();
+    e.dateNaissance = dateOut;
+    if (photoChanged) {
+      e.photoBase64 = photoBytes != null ? base64Encode(photoBytes!) : null;
+    }
+    final Map<String, String> newCustom = {};
+    for (final q in _questions) {
+      final v = _qCtrl[q]!.text.trim();
+      if (v.isNotEmpty) newCustom[q] = v;
+    }
+    e.customFields = newCustom;
+  }
+
+  void _scheduleSave() {
+    _dirty = true;
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 1000), () {
+      _flushNow();
+    });
+  }
+
+  Future<void> _flushNow() async {
+    _saveTimer?.cancel();
+    while (_dirty) {
+      if (_writing) {
+        await Future.delayed(const Duration(milliseconds: 50));
+        continue;
+      }
+      _dirty = false;
+      _writing = true;
+      try {
+        await widget.fraisScolaires.saveData();
+      } finally {
+        _writing = false;
       }
     }
   }
 
-  void _removeCustomField(String question) {
-    setState(() {
-      customFieldsControllers[question]?.dispose();
-      customFieldsControllers.remove(question);
-    });
-  }
+  Future<void> _saveAndNext() async {
+    if (!editing) return;
+    final dateText = dateCtrl.text.trim();
+    String dateOut = '';
+    if (dateText.isNotEmpty) {
+      final d = _parseDateStrict(dateText);
+      if (d == null) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Date de naissance invalide (format jj/mm/aaaa)."),
+            backgroundColor: Colors.red,
+          ),
+        );
+        dateFocus.requestFocus();
+        return;
+      }
+      dateOut = _formatDate(d);
+    }
 
-  Future<void> _save() async {
-    setState(() => saving = true);
-    final e = widget.eleve;
-    e.pereNom = pereNomController.text.trim();
-    e.mereNom = mereNomController.text.trim();
-    e.adresse = adresseController.text.trim();
-    e.dateNaissance =
-    selectedDateNaissance != null ? _formatDate(selectedDateNaissance!) : '';
-    e.photoBase64 = photoBytes != null ? base64Encode(photoBytes!) : null;
-    e.customFields = {
-      for (var entry in customFieldsControllers.entries)
-        entry.key: entry.value.text.trim(),
-    }..removeWhere((k, v) => v.isEmpty);
-
-    await widget.fraisScolaires.saveData();
+    final nomComplet = "${eleve.nom} ${eleve.postNom}";
+    _applyToEleve(dateOut);
+    savedCount++;
     widget.onSaved();
+    _scheduleSave();
 
-    if (mounted) {
+    if (index < widget.eleves.length - 1) {
       setState(() {
-        saving = false;
-        editing = false;
+        statusMessage = "✓ $nomComplet enregistré";
+        index++;
+        _loadStudent();
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+      _focusFirst();
+    } else {
+      final messenger = ScaffoldMessenger.of(context);
+      await _flushNow();
+      if (!mounted) return;
+      Navigator.pop(context);
+      messenger.showSnackBar(
+        SnackBar(
           content: Text(
-              "✅ Informations mises à jour. Pensez à sauvegarder sur le serveur."),
+              "✅ Fin de la liste. $savedCount élève(s) enregistré(s). "
+                  "Pensez à sauvegarder sur le serveur."),
+          duration: const Duration(seconds: 5),
         ),
       );
     }
   }
 
+  void _skip() {
+    if (index < widget.eleves.length - 1) {
+      setState(() {
+        statusMessage = null;
+        index++;
+        _loadStudent();
+      });
+      _focusFirst();
+    }
+  }
+
+  void _go(int delta) {
+    final n = index + delta;
+    if (n < 0 || n >= widget.eleves.length) return;
+    setState(() {
+      statusMessage = null;
+      index = n;
+      _loadStudent();
+    });
+  }
+
+  Future<void> _close() async {
+    await _flushNow();
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  void dispose() {
+    _saveTimer?.cancel();
+    if (_dirty && !_writing) {
+      _dirty = false;
+      widget.fraisScolaires.saveData();
+    }
+    pereCtrl.dispose();
+    mereCtrl.dispose();
+    adresseCtrl.dispose();
+    dateCtrl.dispose();
+    pereFocus.dispose();
+    mereFocus.dispose();
+    adresseFocus.dispose();
+    dateFocus.dispose();
+    for (final c in _qCtrl.values) {
+      c.dispose();
+    }
+    for (final f in _qFocus.values) {
+      f.dispose();
+    }
+    super.dispose();
+  }
+
+  // ---------- UI ----------
   Widget _infoRow(String label, String value) {
     if (value.trim().isEmpty) return const SizedBox.shrink();
     return Padding(
@@ -1123,10 +1453,63 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     );
   }
 
+  Widget _editField({
+    required TextEditingController controller,
+    required FocusNode focus,
+    required String label,
+    TextCapitalization capitalization = TextCapitalization.sentences,
+    TextInputType? keyboardType,
+    List<TextInputFormatter>? formatters,
+    String? hint,
+    Widget? suffix,
+    VoidCallback? onDelete,
+  }) {
+    final Widget? suffixWidget = onDelete != null
+        ? IconButton(
+      icon: const Icon(Icons.close, color: Colors.red, size: 20),
+      tooltip: "Supprimer cette question",
+      onPressed: onDelete,
+    )
+        : suffix;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: TextField(
+        controller: controller,
+        focusNode: focus,
+        textInputAction: TextInputAction.next,
+        textCapitalization: capitalization,
+        keyboardType: keyboardType,
+        inputFormatters: formatters,
+        onSubmitted: (_) => _next(focus),
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hint,
+          suffixIcon: suffixWidget,
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionLabel(String text) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8, top: 4),
+        child: Text(
+          text,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final e = widget.eleve;
+    final e = eleve;
     final schoolName = widget.fraisScolaires.config.schoolName;
+    final total = widget.eleves.length;
 
     final bool hasAnyExtraInfo = e.pereNom.isNotEmpty ||
         e.mereNom.isNotEmpty ||
@@ -1134,295 +1517,354 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         e.dateNaissance.isNotEmpty ||
         e.customFields.values.any((v) => v.trim().isNotEmpty);
 
-    return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 440, maxHeight: 640),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // ==================== EN-TÊTE — CARTE D'IDENTITÉ ====================
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Colors.indigo, Color(0xFF3F51B5)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-              ),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      if (widget.schoolLogoBytes != null) ...[
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: Image.memory(
-                            widget.schoolLogoBytes!,
-                            width: 34,
-                            height: 34,
-                            fit: BoxFit.contain,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                      ],
-                      Flexible(
-                        child: Text(
-                          schoolName.toUpperCase(),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                      ),
-                      if (widget.schoolLogoBytes != null) ...[
-                        const SizedBox(width: 10),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: Image.memory(
-                            widget.schoolLogoBytes!,
-                            width: 34,
-                            height: 34,
-                            fit: BoxFit.contain,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    "CARTE D'IDENTITÉ SCOLAIRE",
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 11,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+    final bool isLast = index >= total - 1;
 
-            // ==================== CORPS ====================
-            Flexible(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.enter, control: true):
+        _saveAndNext,
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true):
+        _saveAndNext,
+        const SingleActivator(LogicalKeyboardKey.numpadEnter, control: true):
+        _saveAndNext,
+        const SingleActivator(LogicalKeyboardKey.numpadEnter, meta: true):
+        _saveAndNext,
+      },
+      child: Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 700),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // ==================== EN-TÊTE ====================
+              Container(
+                padding:
+                const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.indigo, Color(0xFF3F51B5)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius:
+                  BorderRadius.vertical(top: Radius.circular(18)),
+                ),
                 child: Column(
                   children: [
-                    // ---- Photo ----
-                    Stack(
-                      alignment: Alignment.bottomRight,
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        CircleAvatar(
-                          radius: 55,
-                          backgroundColor: Colors.grey.shade200,
-                          backgroundImage:
-                          photoBytes != null ? MemoryImage(photoBytes!) : null,
-                          child: photoBytes == null
-                              ? const Icon(Icons.person, size: 55, color: Colors.grey)
-                              : null,
-                        ),
-                        if (editing)
-                          CircleAvatar(
-                            radius: 16,
-                            backgroundColor: Colors.indigo,
-                            child: IconButton(
-                              icon: const Icon(Icons.camera_alt,
-                                  size: 16, color: Colors.white),
-                              onPressed: _pickPhoto,
+                        if (widget.schoolLogoBytes != null) ...[
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.memory(
+                              widget.schoolLogoBytes!,
+                              width: 30,
+                              height: 30,
+                              fit: BoxFit.contain,
                             ),
                           ),
+                          const SizedBox(width: 10),
+                        ],
+                        Flexible(
+                          child: Text(
+                            schoolName.toUpperCase(),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                        if (widget.schoolLogoBytes != null) ...[
+                          const SizedBox(width: 10),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.memory(
+                              widget.schoolLogoBytes!,
+                              width: 30,
+                              height: 30,
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
-                    const SizedBox(height: 14),
-
+                    const SizedBox(height: 3),
                     Text(
-                      "${e.nom} ${e.postNom} ${e.prenom}",
-                      textAlign: TextAlign.center,
+                      editing
+                          ? "SAISIE RAPIDE — Élève ${index + 1} / $total"
+                          : "CARTE D'IDENTITÉ SCOLAIRE — ${index + 1} / $total",
                       style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+                        color: Colors.white70,
+                        fontSize: 11,
+                        letterSpacing: 1.1,
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      "${e.section} — ${e.classe}",
-                      style: const TextStyle(
-                        color: Colors.indigo,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      "ID : ${e.id}",
-                      style: const TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12.5,
-                      ),
-                    ),
+                  ],
+                ),
+              ),
 
-                    const SizedBox(height: 18),
-                    const Divider(),
-                    const SizedBox(height: 6),
-
-                    if (!editing) ...[
-                      _infoRow("Père", e.pereNom),
-                      _infoRow("Mère", e.mereNom),
-                      _infoRow("Adresse", e.adresse),
-                      _infoRow("Naissance", e.dateNaissance),
-                      ...e.customFields.entries
-                          .where((entry) => entry.value.trim().isNotEmpty)
-                          .map((entry) => _infoRow(entry.key, entry.value)),
-                      if (!hasAnyExtraInfo)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 10),
-                          child: Text(
-                            "Aucune information additionnelle enregistrée pour cet élève.",
-                            style: TextStyle(color: Colors.grey, fontSize: 12.5),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                    ] else ...[
-                      TextField(
-                        controller: pereNomController,
-                        textCapitalization: TextCapitalization.words,
-                        decoration: const InputDecoration(
-                          labelText: "Nom du père",
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: mereNomController,
-                        textCapitalization: TextCapitalization.words,
-                        decoration: const InputDecoration(
-                          labelText: "Nom de la mère",
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: adresseController,
-                        textCapitalization: TextCapitalization.sentences,
-                        decoration: const InputDecoration(
-                          labelText: "Adresse",
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      InkWell(
-                        onTap: _pickDate,
-                        child: InputDecorator(
-                          decoration: const InputDecoration(
-                            labelText: "Date de naissance",
-                            border: OutlineInputBorder(),
-                            suffixIcon: Icon(Icons.calendar_today, size: 18),
-                          ),
-                          child: Text(
-                            selectedDateNaissance != null
-                                ? _formatDate(selectedDateNaissance!)
-                                : "Non renseignée",
-                          ),
-                        ),
-                      ),
-                      if (customFieldsControllers.isNotEmpty) ...[
-                        const SizedBox(height: 16),
-                        const Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            "Questions Personnalisées",
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 13),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        ...customFieldsControllers.entries.map(
-                              (entry) => Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+              // ==================== CORPS ====================
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          if (!editing)
+                            IconButton(
+                              icon: const Icon(Icons.chevron_left),
+                              tooltip: "Élève précédent",
+                              onPressed: index > 0 ? () => _go(-1) : null,
+                            )
+                          else
+                            const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
                               children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: entry.value,
-                                    decoration: InputDecoration(
-                                      labelText: entry.key,
-                                      border: const OutlineInputBorder(),
+                                Stack(
+                                  alignment: Alignment.bottomRight,
+                                  children: [
+                                    CircleAvatar(
+                                      radius: editing ? 38 : 55,
+                                      backgroundColor: Colors.grey.shade200,
+                                      backgroundImage: photoBytes != null
+                                          ? MemoryImage(photoBytes!)
+                                          : null,
+                                      child: photoBytes == null
+                                          ? Icon(Icons.person,
+                                          size: editing ? 38 : 55,
+                                          color: Colors.grey)
+                                          : null,
                                     ),
+                                    if (editing)
+                                      CircleAvatar(
+                                        radius: 15,
+                                        backgroundColor: Colors.indigo,
+                                        child: IconButton(
+                                          padding: EdgeInsets.zero,
+                                          icon: const Icon(Icons.camera_alt,
+                                              size: 15, color: Colors.white),
+                                          tooltip: "Changer la photo",
+                                          onPressed: _pickPhoto,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Text(
+                                  "${e.nom} ${e.postNom} ${e.prenom}",
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.bold,
                                   ),
                                 ),
-                                IconButton(
-                                  icon: const Icon(Icons.close,
-                                      color: Colors.red, size: 20),
-                                  onPressed: () => _removeCustomField(entry.key),
+                                const SizedBox(height: 2),
+                                Text(
+                                  "${e.section} — ${e.classe}",
+                                  style: const TextStyle(
+                                    color: Colors.indigo,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  "ID : ${e.id}",
+                                  style: const TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 12.5,
+                                  ),
                                 ),
                               ],
                             ),
                           ),
+                          if (!editing)
+                            IconButton(
+                              icon: const Icon(Icons.chevron_right),
+                              tooltip: "Élève suivant",
+                              onPressed: !isLast ? () => _go(1) : null,
+                            )
+                          else
+                            const SizedBox(width: 8),
+                        ],
+                      ),
+                      if (editing && statusMessage != null) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          statusMessage!,
+                          style: const TextStyle(
+                              color: Colors.green,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600),
                         ),
                       ],
-                      const SizedBox(height: 8),
-                      OutlinedButton.icon(
-                        icon: const Icon(Icons.add_circle_outline),
-                        label: const Text("Ajouter une Question Personnalisée"),
-                        onPressed: _addCustomField,
-                      ),
+                      const SizedBox(height: 12),
+                      const Divider(),
+                      const SizedBox(height: 6),
+
+                      if (!editing) ...[
+                        // ----- Lecture : questions d'abord, champs de base ensuite -----
+                        ..._questions.map((q) {
+                          String v = '';
+                          e.customFields.forEach((k, val) {
+                            if (k.trim().toLowerCase() ==
+                                q.trim().toLowerCase()) {
+                              v = val;
+                            }
+                          });
+                          return _infoRow(q, v);
+                        }),
+                        _infoRow("Père", e.pereNom),
+                        _infoRow("Mère", e.mereNom),
+                        _infoRow("Adresse", e.adresse),
+                        _infoRow("Naissance", e.dateNaissance),
+                        if (!hasAnyExtraInfo)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 10),
+                            child: Text(
+                              "Aucune information additionnelle enregistrée pour cet élève.",
+                              style:
+                              TextStyle(color: Colors.grey, fontSize: 12.5),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                      ] else ...[
+                        // ----- Saisie : bouton d'ajout, puis questions, puis champs de base -----
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: OutlinedButton.icon(
+                              icon: const Icon(Icons.add_circle_outline),
+                              label: const Text(
+                                  "Ajouter une Question Personnalisée"),
+                              onPressed: _addCustomField,
+                            ),
+                          ),
+                        ),
+                        if (_questions.isNotEmpty) ...[
+                          _sectionLabel("Questions Personnalisées"),
+                          ..._questions.map(
+                                (q) => _editField(
+                              controller: _qCtrl[q]!,
+                              focus: _qFocus[q]!,
+                              label: q,
+                              onDelete: () => _deleteQuestion(q),
+                            ),
+                          ),
+                          const Divider(),
+                          _sectionLabel("Informations de base"),
+                        ],
+                        _editField(
+                          controller: pereCtrl,
+                          focus: pereFocus,
+                          label: "Nom du père",
+                          capitalization: TextCapitalization.words,
+                        ),
+                        _editField(
+                          controller: mereCtrl,
+                          focus: mereFocus,
+                          label: "Nom de la mère",
+                          capitalization: TextCapitalization.words,
+                        ),
+                        _editField(
+                          controller: adresseCtrl,
+                          focus: adresseFocus,
+                          label: "Adresse",
+                        ),
+                        _editField(
+                          controller: dateCtrl,
+                          focus: dateFocus,
+                          label: "Date de naissance",
+                          hint: "jj/mm/aaaa (tapez seulement les chiffres)",
+                          keyboardType: TextInputType.number,
+                          formatters: [_DateSlashFormatter()],
+                          suffix: IconButton(
+                            icon: const Icon(Icons.calendar_today, size: 18),
+                            tooltip: "Choisir dans le calendrier",
+                            onPressed: _pickDate,
+                          ),
+                        ),
+                        const Padding(
+                          padding: EdgeInsets.only(top: 2),
+                          child: Text(
+                            "Astuce : Ctrl+Entrée (ou Cmd+Entrée) enregistre et "
+                                "passe à l'élève suivant depuis n'importe quel champ.",
+                            style: TextStyle(color: Colors.grey, fontSize: 11.5),
+                          ),
+                        ),
+                      ],
                     ],
+                  ),
+                ),
+              ),
+
+              // ==================== ACTIONS ====================
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: OutlinedButton(
+                        onPressed: _close,
+                        child: const Text("Fermer"),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (editing) ...[
+                      Expanded(
+                        flex: 2,
+                        child: OutlinedButton(
+                          onPressed: isLast ? null : _skip,
+                          child: const Text("Passer"),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        flex: 4,
+                        child: ElevatedButton.icon(
+                          icon: Icon(isLast ? Icons.save : Icons.skip_next),
+                          label: Text(
+                              isLast ? "Enregistrer" : "Enregistrer et suivant"),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.indigo,
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: _saveAndNext,
+                        ),
+                      ),
+                    ] else
+                      Expanded(
+                        flex: 4,
+                        child: ElevatedButton.icon(
+                          icon: const Icon(Icons.edit),
+                          label: const Text("Modifier"),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.indigo,
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              editing = true;
+                              statusMessage = null;
+                            });
+                            _focusFirst();
+                          },
+                        ),
+                      ),
                   ],
                 ),
               ),
-            ),
-
-            // ==================== ACTIONS ====================
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text("Fermer"),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: editing
-                        ? ElevatedButton.icon(
-                      icon: saving
-                          ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white),
-                      )
-                          : const Icon(Icons.save),
-                      label: Text(saving ? "Enregistrement..." : "Enregistrer"),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.indigo,
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: saving ? null : _save,
-                    )
-                        : ElevatedButton.icon(
-                      icon: const Icon(Icons.edit),
-                      label: const Text("Modifier"),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.indigo,
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: () => setState(() => editing = true),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1430,29 +1872,8 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
 }
 
 // ==============================================================================
-// ⚡ NOUVEAU — PAGE "ÉLÈVES SUPPRIMÉS" (HISTORIQUE / ARCHIVE)
+// PAGE "ÉLÈVES SUPPRIMÉS" (HISTORIQUE / ARCHIVE)
 // ==============================================================================
-// Accessible depuis le bouton 🕘 dans l'AppBar du Registre des Élèves.
-// Liste tous les élèves qui ont été supprimés/exclus du registre actif
-// (widget.fraisScolaires.getElevesSupprimes()). L'argent déjà payé par ces
-// élèves reste comptabilisé dans la caisse de l'école (géré directement dans
-// FraisScolaires, aucune logique financière n'est dupliquée ici).
-//
-// Depuis cette page, on peut :
-//   - Consulter la date et le motif de suppression de chaque élève.
-//   - ⚡ NOUVEAU — Gérer / ANNULER les paiements d'un élève supprimé
-//     (bouton 💳) : annuler un paiement précis, ou tous ses paiements
-//     (scolarité + autres frais). L'argent annulé est alors RETIRÉ de la
-//     caisse de l'école (totaux globaux, par section, par classe, rapports).
-//     Protégé par mot de passe admin + confirmation, et enregistré dans le
-//     journal d'audit.
-//   - Supprimer DÉFINITIVEMENT un élève de l'archive (protégé par mot de
-//     passe admin + confirmation) : son historique nominatif disparaît,
-//     mais l'argent reste acquis à la caisse de l'école puisqu'il a déjà
-//     été comptabilisé au moment du paiement (sauf si on a annulé ses
-//     paiements avant).
-//   - Vider complètement l'archive (protégé par mot de passe admin +
-//     confirmation).
 class ElevesSupprimesScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const ElevesSupprimesScreen({super.key, required this.fraisScolaires});
@@ -1530,9 +1951,6 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
     return passwordOk == true;
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — OUVERTURE DE LA GESTION DES PAIEMENTS D'UN ÉLÈVE SUPPRIMÉ
-  // ==========================================================================
   Future<void> _openGestionPaiements(Eleve eleve) async {
     await showDialog(
       context: context,
@@ -1542,7 +1960,6 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
         verifyAdminPassword: _verifyAdminPassword,
       ),
     );
-    // Au retour, on rafraîchit la liste (le "Total déjà payé" a pu changer).
     if (mounted) setState(() {});
   }
 
@@ -1853,7 +2270,6 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
                           Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              // ⚡ NOUVEAU — gérer / annuler les paiements
                               IconButton(
                                 icon: const Icon(Icons.payments_outlined,
                                     color: Colors.orange, size: 26),
@@ -1884,28 +2300,8 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
 }
 
 // ==============================================================================
-// ⚡ NOUVEAU — BOÎTE DE DIALOGUE "PAIEMENTS D'UN ÉLÈVE SUPPRIMÉ"
+// BOÎTE DE DIALOGUE "PAIEMENTS D'UN ÉLÈVE SUPPRIMÉ"
 // ==============================================================================
-// Affiche tous les paiements d'un élève archivé :
-//   - les paiements de scolarité (eleve.transactions),
-//   - les paiements d'"autres frais" (autresFraisPaiementsByYear, toutes
-//     années confondues).
-//
-// Permet :
-//   - d'annuler UN paiement précis,
-//   - d'annuler TOUS les paiements de scolarité,
-//   - d'annuler TOUS les paiements d'autres frais.
-//
-// Chaque annulation :
-//   1. demande le mot de passe administrateur,
-//   2. demande une confirmation explicite,
-//   3. appelle les méthodes existantes de FraisScolaires
-//      (cancelTransaction / annulerPaiementAutreFrais) qui retirent
-//      l'argent de la caisse, ajoutent une ligne au journal d'audit et
-//      sauvegardent les données.
-// Comme tous les totaux de l'école additionnent aussi les élèves archivés,
-// l'argent annulé disparaît automatiquement du montant global, des totaux
-// par section/classe et des rapports.
 class _PaiementsEleveSupprimeDialog extends StatefulWidget {
   final Eleve eleve;
   final FraisScolaires fraisScolaires;
@@ -1939,7 +2335,6 @@ class _PaiementsEleveSupprimeDialogState
     return list;
   }
 
-  /// Paiements "autres frais" de cet élève, toutes années confondues.
   List<MapEntry<String, AutreFraisPaiement>> _autresPaiements() {
     final result = <MapEntry<String, AutreFraisPaiement>>[];
     fs.autresFraisPaiementsByYear.forEach((year, liste) {
@@ -2067,9 +2462,6 @@ class _PaiementsEleveSupprimeDialogState
         await fs.cancelTransaction(eleve: eleve, transaction: t);
       }
 
-      // Cas des anciens paiements sans historique de transactions : il reste
-      // de l'argent dans eleve.paid. On le remet à zéro et on l'enregistre
-      // dans le journal d'audit.
       final double reste = fs.getStudentTotalPaid(eleve);
       if (reste > 0.5) {
         eleve.paid.clear();

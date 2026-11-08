@@ -18,54 +18,148 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
   String selectedMois = '';
   // true = "Ont déjà payé" (en ordre) | false = "N'ont pas encore payé"
   bool enOrdre = true;
+
+  // ⚡ NOUVEAU — sélection de plusieurs mois (facultatif).
+  // multiMois = false : fonctionnement habituel, un seul mois.
+  bool multiMois = false;
+  final Set<String> moisSelection = {};
+  // true  = la condition doit être vraie pour TOUS les mois choisis
+  // false = il suffit qu'elle soit vraie pour AU MOINS UN mois
+  bool tousLesMois = true;
+
+  // Résultat d'un seul mois (comportement habituel)
   List<Eleve> resultats = [];
+  // ⚡ NOUVEAU — résultat sur plusieurs mois
+  List<OrdreEleveMulti> resultatsMulti = [];
+  // Ce que la dernière génération contenait (pour l'affichage et le PDF)
+  bool resultatEstMulti = false;
+  List<String> moisGeneres = [];
+  bool statutGenere = true;
+  bool conditionGeneree = true;
+
   bool listeGeneree = false;
 
   // ⚡ NOUVEAU — indique qu'un cahier de paiement est en cours de génération
   bool _generationCahier = false;
 
+  FraisScolaires get fs => widget.fraisScolaires;
+
   @override
   void initState() {
     super.initState();
-    if (widget.fraisScolaires.months.isNotEmpty) {
-      selectedMois = widget.fraisScolaires.months.first;
+    if (fs.months.isNotEmpty) {
+      selectedMois = fs.months.first;
     }
   }
 
   List<String> get _classesDisponibles {
     if (selectedSection != null) {
-      return widget.fraisScolaires
-          .getAllDisplayClassesForSection(selectedSection!);
+      return fs.getAllDisplayClassesForSection(selectedSection!);
     }
-    return widget.fraisScolaires.getAllDisplayClasses();
+    return fs.getAllDisplayClasses();
+  }
+
+  // --------------------------------------------------------------------------
+  // ⚡ NOUVEAU — outils de sélection des mois
+  // --------------------------------------------------------------------------
+  void _selectionnerJusquaCeMois() {
+    final String? courant = fs.currentSchoolMonthName;
+    final int idx = courant == null ? -1 : fs.months.indexOf(courant);
+    // Hors année scolaire (vacances) : on prend tous les mois.
+    final int fin = idx < 0 ? fs.months.length - 1 : idx;
+    setState(() {
+      moisSelection
+        ..clear()
+        ..addAll(fs.months.sublist(0, fin + 1));
+      listeGeneree = false;
+    });
+  }
+
+  String _texteCondition() {
+    return fs.libelleConditionOrdreMulti(
+      enOrdre: enOrdre,
+      tousLesMois: tousLesMois,
+    );
   }
 
   void _genererListe() {
+    if (multiMois) {
+      final List<String> choisis = fs.trierMoisScolaires(moisSelection);
+      if (choisis.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Choisissez au moins un mois."),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+
+      if (choisis.length >= 2) {
+        // ⚡ Plusieurs mois : nouvelle logique.
+        setState(() {
+          resultatsMulti = fs.getStudentsByOrderStatusMulti(
+            mois: choisis,
+            enOrdre: enOrdre,
+            tousLesMois: tousLesMois,
+            sectionFilter: selectedSection,
+            classFilter: selectedClasse,
+          );
+          resultatEstMulti = true;
+          moisGeneres = choisis;
+          statutGenere = enOrdre;
+          conditionGeneree = tousLesMois;
+          listeGeneree = true;
+        });
+        return;
+      }
+
+      // Un seul mois coché : même fonctionnement que d'habitude.
+      _genererListeUnMois(choisis.first);
+      return;
+    }
+
     if (selectedMois.isEmpty) return;
+    _genererListeUnMois(selectedMois);
+  }
+
+  void _genererListeUnMois(String mois) {
     setState(() {
       // ⚡ getStudentsByOrderStatus utilise déjà en interne
       // isStudentEnOrdrePourMois -> getRequiredForMonthForEleve, donc un
       // élève avec une exception de paiement personnalisée est
       // automatiquement classé "en ordre" / "pas en ordre" en fonction de
       // SON propre montant requis, et non celui de sa section/classe.
-      resultats = widget.fraisScolaires.getStudentsByOrderStatus(
-        mois: selectedMois,
+      resultats = fs.getStudentsByOrderStatus(
+        mois: mois,
         enOrdre: enOrdre,
         sectionFilter: selectedSection,
         classFilter: selectedClasse,
       );
+      resultatEstMulti = false;
+      moisGeneres = [mois];
+      statutGenere = enOrdre;
+      conditionGeneree = tousLesMois;
       listeGeneree = true;
     });
+  }
+
+  String _nomFichierParDefaut() {
+    final String base =
+    statutGenere ? "Liste_En_Ordre" : "Liste_Pas_En_Ordre";
+    if (!resultatEstMulti) {
+      return "${base}_${moisGeneres.isNotEmpty ? moisGeneres.first : selectedMois}";
+    }
+    if (moisGeneres.length <= 4) {
+      return "${base}_${moisGeneres.map(fs.libelleMoisCourt).join('-')}";
+    }
+    return "${base}_${moisGeneres.length}_mois";
   }
 
   Future<void> _genererPdf() async {
     if (!listeGeneree) return;
 
-    final controller = TextEditingController(
-      text: enOrdre
-          ? "Liste_En_Ordre_$selectedMois"
-          : "Liste_Pas_En_Ordre_$selectedMois",
-    );
+    final controller = TextEditingController(text: _nomFichierParDefaut());
 
     final filename = await showDialog<String>(
       context: context,
@@ -92,16 +186,28 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
 
     if (filename == null || filename.isEmpty) return;
 
-    // ⚡ generateOrderStatusPdf utilise déjà en interne
-    // getRequiredForMonthForEleve pour la colonne "Payé / Requis", donc
-    // le PDF reflète lui aussi correctement les montants personnalisés.
-    await widget.fraisScolaires.generateOrderStatusPdf(
-      filename: filename,
-      mois: selectedMois,
-      enOrdre: enOrdre,
-      sectionFilter: selectedSection,
-      classFilter: selectedClasse,
-    );
+    if (resultatEstMulti) {
+      // ⚡ NOUVEAU — PDF sur plusieurs mois (une colonne par mois).
+      await fs.generateOrderStatusMultiPdf(
+        filename: filename,
+        mois: moisGeneres,
+        enOrdre: statutGenere,
+        tousLesMois: conditionGeneree,
+        sectionFilter: selectedSection,
+        classFilter: selectedClasse,
+      );
+    } else {
+      // ⚡ generateOrderStatusPdf utilise déjà en interne
+      // getRequiredForMonthForEleve pour la colonne "Payé / Requis", donc
+      // le PDF reflète lui aussi correctement les montants personnalisés.
+      await fs.generateOrderStatusPdf(
+        filename: filename,
+        mois: moisGeneres.first,
+        enOrdre: statutGenere,
+        sectionFilter: selectedSection,
+        classFilter: selectedClasse,
+      );
+    }
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -177,7 +283,7 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
     setState(() => _generationCahier = true);
 
     final resultat = await genererCahierPaiementPdf(
-      fraisScolaires: widget.fraisScolaires,
+      fraisScolaires: fs,
       filename: filename,
       sectionFilter: selectedSection,
       classFilter: selectedClasse,
@@ -200,17 +306,273 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
     );
   }
 
+  // --------------------------------------------------------------------------
+  // ⚡ NOUVEAU — blocs d'affichage pour la sélection de plusieurs mois
+  // --------------------------------------------------------------------------
+  Widget _blocMultiMois() {
+    final List<String> choisis = fs.trierMoisScolaires(moisSelection);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 6,
+          runSpacing: 0,
+          children: fs.months.map((m) {
+            final bool sel = moisSelection.contains(m);
+            return FilterChip(
+              label: Text(m, style: const TextStyle(fontSize: 12)),
+              selected: sel,
+              selectedColor: Colors.indigo.shade100,
+              onSelected: (v) {
+                setState(() {
+                  if (v) {
+                    moisSelection.add(m);
+                  } else {
+                    moisSelection.remove(m);
+                  }
+                  listeGeneree = false;
+                });
+              },
+            );
+          }).toList(),
+        ),
+        Wrap(
+          spacing: 4,
+          children: [
+            TextButton(
+              onPressed: () => setState(() {
+                moisSelection
+                  ..clear()
+                  ..addAll(fs.months);
+                listeGeneree = false;
+              }),
+              child: const Text("Tout"),
+            ),
+            TextButton(
+              onPressed: _selectionnerJusquaCeMois,
+              child: const Text("Jusqu'à ce mois"),
+            ),
+            TextButton(
+              onPressed: () => setState(() {
+                moisSelection.clear();
+                listeGeneree = false;
+              }),
+              child: const Text("Aucun"),
+            ),
+          ],
+        ),
+        if (choisis.length >= 2) ...[
+          const SizedBox(height: 4),
+          const Text(
+            "Condition",
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: ChoiceChip(
+                  label: const Text("Tous les mois",
+                      style: TextStyle(fontSize: 12)),
+                  selected: tousLesMois,
+                  onSelected: (_) => setState(() {
+                    tousLesMois = true;
+                    listeGeneree = false;
+                  }),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ChoiceChip(
+                  label: const Text("Au moins un mois",
+                      style: TextStyle(fontSize: 12)),
+                  selected: !tousLesMois,
+                  onSelected: (_) => setState(() {
+                    tousLesMois = false;
+                    listeGeneree = false;
+                  }),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            "Seront listés : ${_texteCondition().toLowerCase()} "
+                "(${choisis.map(fs.libelleMoisCourt).join(', ')}).",
+            style: const TextStyle(fontSize: 12, color: Colors.indigo),
+          ),
+        ] else if (choisis.length == 1)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              "Un seul mois choisi (${choisis.first}) : la liste fonctionne "
+                  "comme d'habitude. Cochez un 2ᵉ mois pour comparer plusieurs "
+                  "mois.",
+              style: const TextStyle(fontSize: 12, color: Colors.indigo),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _puceMois(OrdreMoisDetail d) {
+    final bool ok = d.enOrdre;
+    final Color c = ok ? Colors.green.shade700 : Colors.red.shade700;
+    final String court = fs.libelleMoisCourt(d.mois);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.withOpacity(0.4)),
+      ),
+      child: Text(
+        ok ? "$court ✓" : "$court −${formatMontant(d.reste)}",
+        style: TextStyle(
+          fontSize: 11,
+          color: c,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  Widget _carteEleveMulti(int index, OrdreEleveMulti l) {
+    final Eleve e = l.eleve;
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: ListTile(
+        isThreeLine: true,
+        leading: CircleAvatar(
+          backgroundColor: statutGenere ? Colors.green : Colors.red,
+          child: Text(
+            "${index + 1}",
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                "${e.nom} ${e.postNom} ${e.prenom}",
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (e.montantMensuelPersonnalise != null)
+              const Padding(
+                padding: EdgeInsets.only(left: 4),
+                child: Icon(Icons.star, size: 16, color: Colors.indigo),
+              ),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("${e.section} - ${e.classe}"),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: l.details.map(_puceMois).toList(),
+            ),
+          ],
+        ),
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              "${l.totalPaye.toStringAsFixed(0)} / ${l.totalRequis.toStringAsFixed(0)} FC",
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+                color: statutGenere
+                    ? Colors.green.shade700
+                    : Colors.red.shade700,
+              ),
+            ),
+            if (l.totalReste > 0)
+              Text(
+                "Reste ${formatMontant(l.totalReste)} FC",
+                style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _carteEleveUnMois(int index, Eleve e) {
+    final String mois = moisGeneres.first;
+    final paye = e.paid[mois] ?? 0;
+    // ⚡ CORRIGÉ — utilise désormais
+    // getRequiredForMonthForEleve pour que le montant
+    // affiché soit bien celui de CET élève (montant
+    // personnalisé si exception, sinon montant normal
+    // de sa section/classe).
+    final requis = fs.getRequiredForMonthForEleve(e, mois);
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: statutGenere ? Colors.green : Colors.red,
+          child: Text(
+            "${index + 1}",
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                "${e.nom} ${e.postNom} ${e.prenom}",
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            // ⚡ NOUVEAU — petit badge si l'élève a une
+            // exception de paiement personnalisée, pour
+            // que ce soit visible directement dans la liste.
+            if (e.montantMensuelPersonnalise != null)
+              const Padding(
+                padding: EdgeInsets.only(left: 4),
+                child: Icon(Icons.star, size: 16, color: Colors.indigo),
+              ),
+          ],
+        ),
+        subtitle: Text("${e.section} - ${e.classe}"),
+        trailing: Text(
+          "${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)} FC",
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: statutGenere ? Colors.green.shade700 : Colors.red.shade700,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final sectionLabel = selectedSection ?? "Toutes les sections";
     final classeLabel = selectedClasse ?? "Toutes les classes";
+    final int nbResultats =
+    resultatEstMulti ? resultatsMulti.length : resultats.length;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text("Liste En Ordre / Pas En Ordre"),
         centerTitle: true,
         actions: [
-          if (listeGeneree && resultats.isNotEmpty)
+          if (listeGeneree && nbResultats > 0)
             IconButton(
               icon: const Icon(Icons.picture_as_pdf),
               tooltip: "Générer le PDF",
@@ -223,108 +585,158 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
         child: Column(
           children: [
             // ==================== FILTRES ====================
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButton<String>(
-                    isExpanded: true,
-                    hint: const Text("Toutes Sections"),
-                    value: selectedSection,
-                    items: [
-                      const DropdownMenuItem(
-                        value: null,
-                        child: Text("Toutes Sections"),
+            // Zone défilable : avec la sélection de plusieurs mois, les
+            // filtres peuvent devenir hauts sur un petit écran.
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.5,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            hint: const Text("Toutes Sections"),
+                            value: selectedSection,
+                            items: [
+                              const DropdownMenuItem(
+                                value: null,
+                                child: Text("Toutes Sections"),
+                              ),
+                              ...fs.config.sections.map((s) =>
+                                  DropdownMenuItem(value: s, child: Text(s))),
+                            ],
+                            onChanged: (val) {
+                              setState(() {
+                                selectedSection = val;
+                                selectedClasse = null;
+                                listeGeneree = false;
+                              });
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            hint: const Text("Toutes Classes"),
+                            value: selectedClasse,
+                            items: [
+                              const DropdownMenuItem(
+                                value: null,
+                                child: Text("Toutes Classes"),
+                              ),
+                              ..._classesDisponibles.map((c) =>
+                                  DropdownMenuItem(value: c, child: Text(c))),
+                            ],
+                            onChanged: (val) {
+                              setState(() {
+                                selectedClasse = val;
+                                listeGeneree = false;
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+
+                    // ⚡ NOUVEAU — interrupteur facultatif « plusieurs mois »
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      value: multiMois,
+                      onChanged: (v) {
+                        setState(() {
+                          multiMois = v;
+                          if (v && moisSelection.isEmpty &&
+                              selectedMois.isNotEmpty) {
+                            moisSelection.add(selectedMois);
+                          }
+                          listeGeneree = false;
+                        });
+                      },
+                      title: const Text("Choisir plusieurs mois"),
+                      subtitle: const Text(
+                        "Facultatif. Désactivé : un seul mois, comme avant.",
+                        style: TextStyle(fontSize: 11),
                       ),
-                      ...widget.fraisScolaires.config.sections
-                          .map((s) => DropdownMenuItem(value: s, child: Text(s))),
-                    ],
-                    onChanged: (val) {
-                      setState(() {
-                        selectedSection = val;
-                        selectedClasse = null;
-                        listeGeneree = false;
-                      });
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButton<String>(
-                    isExpanded: true,
-                    hint: const Text("Toutes Classes"),
-                    value: selectedClasse,
-                    items: [
-                      const DropdownMenuItem(
-                        value: null,
-                        child: Text("Toutes Classes"),
+                    ),
+
+                    if (!multiMois)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: DropdownButton<String>(
+                              isExpanded: true,
+                              hint: const Text("Mois"),
+                              value: selectedMois.isEmpty ? null : selectedMois,
+                              items: fs.months
+                                  .map((m) => DropdownMenuItem(
+                                  value: m, child: Text(m)))
+                                  .toList(),
+                              onChanged: (val) {
+                                if (val == null) return;
+                                setState(() {
+                                  selectedMois = val;
+                                  listeGeneree = false;
+                                });
+                              },
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: _blocMultiMois(),
                       ),
-                      ..._classesDisponibles
-                          .map((c) => DropdownMenuItem(value: c, child: Text(c))),
-                    ],
-                    onChanged: (val) {
-                      setState(() {
-                        selectedClasse = val;
-                        listeGeneree = false;
-                      });
-                    },
-                  ),
+
+                    const SizedBox(height: 12),
+                    // Statut de paiement
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Text("Ont déjà payé"),
+                            selected: enOrdre == true,
+                            onSelected: (_) {
+                              setState(() {
+                                enOrdre = true;
+                                // Par défaut : en ordre pour TOUS les mois.
+                                tousLesMois = true;
+                                listeGeneree = false;
+                              });
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Text("Pas encore payé"),
+                            selected: enOrdre == false,
+                            onSelected: (_) {
+                              setState(() {
+                                enOrdre = false;
+                                // Par défaut : il manque quelque chose sur AU
+                                // MOINS UN mois (liste complémentaire de
+                                // « Ont déjà payé »).
+                                tousLesMois = false;
+                                listeGeneree = false;
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButton<String>(
-                    isExpanded: true,
-                    hint: const Text("Mois"),
-                    value: selectedMois.isEmpty ? null : selectedMois,
-                    items: widget.fraisScolaires.months
-                        .map((m) => DropdownMenuItem(value: m, child: Text(m)))
-                        .toList(),
-                    onChanged: (val) {
-                      if (val == null) return;
-                      setState(() {
-                        selectedMois = val;
-                        listeGeneree = false;
-                      });
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            // Statut de paiement
-            Row(
-              children: [
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text("Ont déjà payé"),
-                    selected: enOrdre == true,
-                    onSelected: (_) {
-                      setState(() {
-                        enOrdre = true;
-                        listeGeneree = false;
-                      });
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text("Pas encore payé"),
-                    selected: enOrdre == false,
-                    onSelected: (_) {
-                      setState(() {
-                        enOrdre = false;
-                        listeGeneree = false;
-                      });
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
@@ -370,12 +782,12 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                 margin: const EdgeInsets.only(bottom: 12),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: enOrdre
+                  color: statutGenere
                       ? Colors.green.withOpacity(0.08)
                       : Colors.red.withOpacity(0.08),
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: enOrdre
+                    color: statutGenere
                         ? Colors.green.withOpacity(0.35)
                         : Colors.red.withOpacity(0.35),
                   ),
@@ -384,14 +796,33 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      enOrdre
-                          ? "Élèves qui ont déjà payé $selectedMois"
-                          : "Élèves qui n'ont pas encore payé $selectedMois",
+                      resultatEstMulti
+                          ? (statutGenere
+                          ? "Élèves qui ont déjà payé (${moisGeneres.length} mois)"
+                          : "Élèves qui n'ont pas encore payé (${moisGeneres.length} mois)")
+                          : (statutGenere
+                          ? "Élèves qui ont déjà payé ${moisGeneres.first}"
+                          : "Élèves qui n'ont pas encore payé ${moisGeneres.first}"),
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 15,
                       ),
                     ),
+                    if (resultatEstMulti) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        "Mois : ${moisGeneres.join(', ')}",
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "Condition : ${fs.libelleConditionOrdreMulti(enOrdre: statutGenere, tousLesMois: conditionGeneree)}",
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 4),
                     Text(
                       "Section : $sectionLabel  |  Classe : $classeLabel",
@@ -399,7 +830,7 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      "Total : ${resultats.length} élève(s)",
+                      "Total : $nbResultats élève(s)",
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 14,
@@ -419,7 +850,7 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                   style: TextStyle(color: Colors.grey),
                 ),
               )
-                  : resultats.isEmpty
+                  : nbResultats == 0
                   ? const Center(
                 child: Text(
                   "Aucun élève ne correspond à ces critères.",
@@ -427,70 +858,19 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                 ),
               )
                   : ListView.builder(
-                itemCount: resultats.length,
+                itemCount: nbResultats,
                 itemBuilder: (context, index) {
-                  final e = resultats[index];
-                  final paye = e.paid[selectedMois] ?? 0;
-                  // ⚡ CORRIGÉ — utilise désormais
-                  // getRequiredForMonthForEleve pour que le montant
-                  // affiché soit bien celui de CET élève (montant
-                  // personnalisé si exception, sinon montant normal
-                  // de sa section/classe).
-                  final requis = widget.fraisScolaires
-                      .getRequiredForMonthForEleve(e, selectedMois);
-
-                  return Card(
-                    margin: const EdgeInsets.symmetric(vertical: 6),
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor:
-                        enOrdre ? Colors.green : Colors.red,
-                        child: Text(
-                          "${index + 1}",
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      title: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              "${e.nom} ${e.postNom} ${e.prenom}",
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                          // ⚡ NOUVEAU — petit badge si l'élève a une
-                          // exception de paiement personnalisée, pour
-                          // que ce soit visible directement dans la liste.
-                          if (e.montantMensuelPersonnalise != null)
-                            const Padding(
-                              padding: EdgeInsets.only(left: 4),
-                              child: Icon(Icons.star,
-                                  size: 16, color: Colors.indigo),
-                            ),
-                        ],
-                      ),
-                      subtitle: Text("${e.section} - ${e.classe}"),
-                      trailing: Text(
-                        "${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)} FC",
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: enOrdre
-                              ? Colors.green.shade700
-                              : Colors.red.shade700,
-                        ),
-                      ),
-                    ),
-                  );
+                  if (resultatEstMulti) {
+                    return _carteEleveMulti(
+                        index, resultatsMulti[index]);
+                  }
+                  return _carteEleveUnMois(index, resultats[index]);
                 },
               ),
             ),
 
             // Bouton PDF en bas si liste générée
-            if (listeGeneree && resultats.isNotEmpty) ...[
+            if (listeGeneree && nbResultats > 0) ...[
               const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,

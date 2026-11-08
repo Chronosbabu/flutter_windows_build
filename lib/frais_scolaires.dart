@@ -17,7 +17,7 @@ import 'dart:math';
 part 'frais_scolaires_modeles.dart';
 part 'frais_scolaires_rapports.dart';
 part 'frais_scolaires_services.dart';
-
+part 'frais_scolaires_ordre.dart';
 const String serverUrl = "https://jsinf.onrender.com";
 
 class AutreFraisStatut {
