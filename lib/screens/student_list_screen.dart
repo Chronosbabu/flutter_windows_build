@@ -10,6 +10,8 @@ import 'package:path_provider/path_provider.dart';
 import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
+import '../services/registre_eleves_pdf.dart';
+import 'import_eleves_json.dart';
 
 class StudentListScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -24,24 +26,21 @@ class _StudentListScreenState extends State<StudentListScreen> {
   String? selectedSectionFilter;
   String? selectedClassFilter;
 
-  // Filtre : n'afficher que les élèves sans aucune information additionnelle
-  // (pratique pour la saisie rapide).
   bool onlyWithoutInfo = false;
 
-  // ====================================================================
-  // MODE PASSATION VERS LA NOUVELLE ANNÉE
-  // ====================================================================
+  bool showAdvancedFilters = false;
+  String? selectedSexeFilter;
+  String? selectedReligionFilter;
+  String? selectedProfessionFilter;
+  String? selectedProvinceFilter;
+
   bool promotionMode = false;
   String? targetPromotionYear;
   final Map<String, bool> passToNextYear = {};
   final Map<String, bool> monterClasse = {};
 
-  // ====================================================================
-  // MODE SUPPRESSION D'ÉLÈVE
-  // ====================================================================
   bool deletionMode = false;
 
-  // Logo de l'école (réutilisé sur la carte d'élève)
   Uint8List? _schoolLogoBytes;
 
   @override
@@ -69,7 +68,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
         e.customFields.values.any((v) => v.trim().isNotEmpty);
   }
 
-  List<Eleve> _filteredEleves() {
+  List<Eleve> _baseEleves() {
     final allEleves = widget.fraisScolaires.currentData.eleves;
     final q = searchQuery.toLowerCase();
     return allEleves.where((eleve) {
@@ -86,9 +85,127 @@ class _StudentListScreenState extends State<StudentListScreen> {
     }).toList();
   }
 
+  List<Eleve> _applyAdvancedFilters(List<Eleve> base) {
+    return base
+        .where((e) => RegistreEleves.correspond(
+      e,
+      filtreSexe: selectedSexeFilter,
+      filtreReligion: selectedReligionFilter,
+      filtreProfession: selectedProfessionFilter,
+      filtreProvince: selectedProvinceFilter,
+    ))
+        .toList();
+  }
+
+  List<Eleve> _filteredEleves() => _applyAdvancedFilters(_baseEleves());
+
+  int get _activeAdvancedCount {
+    int n = 0;
+    if (selectedSexeFilter != null) n++;
+    if (selectedReligionFilter != null) n++;
+    if (selectedProfessionFilter != null) n++;
+    if (selectedProvinceFilter != null) n++;
+    return n;
+  }
+
+  void _resetAdvancedFilters() {
+    setState(() {
+      selectedSexeFilter = null;
+      selectedReligionFilter = null;
+      selectedProfessionFilter = null;
+      selectedProvinceFilter = null;
+    });
+  }
+
+  String _libelleSexeFiltre(String cle) {
+    if (cle == 'M') return 'Garçons';
+    if (cle == 'F') return 'Filles';
+    return 'Sexe non précisé';
+  }
+
+  String _descriptionFiltres() {
+    final all = widget.fraisScolaires.currentData.eleves;
+    final parts = <String>[];
+    if (selectedSectionFilter != null) {
+      parts.add("Section : $selectedSectionFilter");
+    }
+    if (selectedClassFilter != null) {
+      parts.add("Classe : $selectedClassFilter");
+    }
+    if (selectedSexeFilter != null) {
+      parts.add("Sexe : ${_libelleSexeFiltre(selectedSexeFilter!)}");
+    }
+    if (selectedReligionFilter != null) {
+      parts.add(
+          "Religion : ${RegistreEleves.libelleDeCle(all, RegistreEleves.lireReligion, selectedReligionFilter!)}");
+    }
+    if (selectedProfessionFilter != null) {
+      parts.add(
+          "Profession : ${RegistreEleves.libelleDeCle(all, RegistreEleves.lireProfession, selectedProfessionFilter!)}");
+    }
+    if (selectedProvinceFilter != null) {
+      parts.add(
+          "Province : ${RegistreEleves.libelleDeCle(all, RegistreEleves.lireProvince, selectedProvinceFilter!)}");
+    }
+    if (searchQuery.trim().isNotEmpty) {
+      parts.add("Recherche : ${searchQuery.trim()}");
+    }
+    if (onlyWithoutInfo) {
+      parts.add("Élèves sans informations");
+    }
+    return parts.join(" | ");
+  }
+
+  List<DropdownMenuItem<String>> _itemsFromStats(
+      List<StatLigne> options,
+      String? selected,
+      String Function(Eleve) lire,
+      ) {
+    final items = options
+        .map((o) => DropdownMenuItem<String>(
+      value: o.cle,
+      child: Text(
+        "${o.libelle} (${o.nombre})",
+        overflow: TextOverflow.ellipsis,
+      ),
+    ))
+        .toList();
+    if (selected != null && !options.any((o) => o.cle == selected)) {
+      items.add(DropdownMenuItem<String>(
+        value: selected,
+        child: Text(
+          "${RegistreEleves.libelleDeCle(widget.fraisScolaires.currentData.eleves, lire, selected)} (0)",
+          overflow: TextOverflow.ellipsis,
+        ),
+      ));
+    }
+    return items;
+  }
+
+  Widget _buildAdvancedDropdown({
+    required String hint,
+    required String? value,
+    required List<DropdownMenuItem<String>> items,
+    required ValueChanged<String?> onChanged,
+  }) {
+    return DropdownButton<String>(
+      isExpanded: true,
+      hint: Text(hint),
+      value: value,
+      items: [
+        DropdownMenuItem<String>(value: null, child: Text(hint)),
+        ...items,
+      ],
+      onChanged: onChanged,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final filteredEleves = _filteredEleves();
+    final baseEleves = _baseEleves();
+    final filteredEleves = _applyAdvancedFilters(baseEleves);
+    final sexesFiltres = RegistreEleves.compterSexes(filteredEleves);
+    final sexesBase = RegistreEleves.compterSexes(baseEleves);
 
     final classOptions = selectedSectionFilter != null
         ? List<String>.from(
@@ -97,6 +214,13 @@ class _StudentListScreenState extends State<StudentListScreen> {
     if (selectedClassFilter != null && !classOptions.contains(selectedClassFilter)) {
       classOptions.add(selectedClassFilter!);
     }
+
+    final religionOptions =
+    RegistreEleves.statistiques(baseEleves, RegistreEleves.lireReligion);
+    final professionOptions =
+    RegistreEleves.statistiques(baseEleves, RegistreEleves.lireProfession);
+    final provinceOptions =
+    RegistreEleves.statistiques(baseEleves, RegistreEleves.lireProvince);
 
     return Scaffold(
       appBar: AppBar(
@@ -179,14 +303,113 @@ class _StudentListScreenState extends State<StudentListScreen> {
                 ),
               ],
             ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                icon: Icon(showAdvancedFilters
+                    ? Icons.expand_less
+                    : Icons.expand_more),
+                label: Text(
+                  _activeAdvancedCount > 0
+                      ? "Filtres avancés ($_activeAdvancedCount actif(s))"
+                      : "Filtres avancés (sexe, religion, profession, province)",
+                ),
+                onPressed: () =>
+                    setState(() => showAdvancedFilters = !showAdvancedFilters),
+              ),
+            ),
+            if (showAdvancedFilters) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildAdvancedDropdown(
+                      hint: "Tous les sexes",
+                      value: selectedSexeFilter,
+                      items: [
+                        DropdownMenuItem<String>(
+                            value: 'M',
+                            child: Text("Garçons (${sexesBase['M']})")),
+                        DropdownMenuItem<String>(
+                            value: 'F',
+                            child: Text("Filles (${sexesBase['F']})")),
+                        DropdownMenuItem<String>(
+                            value: RegistreEleves.sexeNonPrecise,
+                            child: Text(
+                                "Sexe non précisé (${sexesBase['?']})")),
+                      ],
+                      onChanged: (v) =>
+                          setState(() => selectedSexeFilter = v),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildAdvancedDropdown(
+                      hint: "Toutes religions",
+                      value: selectedReligionFilter,
+                      items: _itemsFromStats(religionOptions,
+                          selectedReligionFilter, RegistreEleves.lireReligion),
+                      onChanged: (v) =>
+                          setState(() => selectedReligionFilter = v),
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildAdvancedDropdown(
+                      hint: "Toutes professions",
+                      value: selectedProfessionFilter,
+                      items: _itemsFromStats(
+                          professionOptions,
+                          selectedProfessionFilter,
+                          RegistreEleves.lireProfession),
+                      onChanged: (v) =>
+                          setState(() => selectedProfessionFilter = v),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildAdvancedDropdown(
+                      hint: "Toutes provinces",
+                      value: selectedProvinceFilter,
+                      items: _itemsFromStats(provinceOptions,
+                          selectedProvinceFilter, RegistreEleves.lireProvince),
+                      onChanged: (v) =>
+                          setState(() => selectedProvinceFilter = v),
+                    ),
+                  ),
+                ],
+              ),
+              if (_activeAdvancedCount > 0)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    icon: const Icon(Icons.filter_alt_off, size: 18),
+                    label: const Text("Réinitialiser les filtres avancés"),
+                    onPressed: _resetAdvancedFilters,
+                  ),
+                ),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    "Total : ${filteredEleves.length} élève(s)",
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Total : ${filteredEleves.length} élève(s)",
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      Text(
+                        "Garçons : ${sexesFiltres['M']}  |  Filles : ${sexesFiltres['F']}"
+                            "${(sexesFiltres['?'] ?? 0) > 0 ? "  |  Non précisé : ${sexesFiltres['?']}" : ""}",
+                        style: const TextStyle(
+                            fontSize: 12.5, color: Colors.black54),
+                      ),
+                    ],
                   ),
                 ),
                 if (!promotionMode && !deletionMode)
@@ -218,7 +441,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     );
   }
 
-  // ==================== ACTIONS APPBAR ====================
   List<Widget> _buildAppBarActions() {
     if (promotionMode) {
       return [
@@ -246,11 +468,25 @@ class _StudentListScreenState extends State<StudentListScreen> {
     }
 
     return [
-      // Saisie rapide des informations additionnelles
+      IconButton(
+        icon: const Icon(Icons.bar_chart, color: Colors.lightBlueAccent),
+        tooltip: "Statistiques et comptage (sexe, religion, profession...)",
+        onPressed: _openStatistics,
+      ),
+      IconButton(
+        icon: const Icon(Icons.table_view, color: Colors.orangeAccent),
+        tooltip: "Générer le registre en PDF (mise en page du registre)",
+        onPressed: _openExportDialog,
+      ),
       IconButton(
         icon: const Icon(Icons.flash_on, color: Colors.amber),
         tooltip: "Saisie rapide des informations des élèves",
         onPressed: _openFastEntry,
+      ),
+      IconButton(
+        icon: const Icon(Icons.upload_file, color: Colors.lightGreenAccent),
+        tooltip: "Importer des informations depuis un fichier JSON",
+        onPressed: _importFromJsonFile,
       ),
       IconButton(
         icon: const Icon(Icons.move_up),
@@ -275,7 +511,300 @@ class _StudentListScreenState extends State<StudentListScreen> {
     ];
   }
 
-  // ==================== CARTE NORMALE ====================
+  Widget _statRow(String label, int n, int total, {VoidCallback? onTap}) {
+    final pct = total <= 0 ? "0 %" : "${(n * 100 / total).toStringAsFixed(1)} %";
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(label, style: const TextStyle(fontSize: 13.5)),
+            ),
+            Text(
+              "$n",
+              style: const TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 13.5),
+            ),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 58,
+              child: Text(
+                pct,
+                textAlign: TextAlign.right,
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ),
+            if (onTap != null)
+              const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statTitle(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 14, bottom: 4),
+      child: Text(
+        text,
+        style: const TextStyle(
+            fontWeight: FontWeight.bold, fontSize: 14, color: Colors.indigo),
+      ),
+    );
+  }
+
+  void _openStatistics() {
+    final eleves = _filteredEleves();
+    final total = eleves.length;
+    final sexes = RegistreEleves.compterSexes(eleves);
+    final religions =
+    RegistreEleves.statistiques(eleves, RegistreEleves.lireReligion);
+    final professions =
+    RegistreEleves.statistiques(eleves, RegistreEleves.lireProfession);
+    final provinces =
+    RegistreEleves.statistiques(eleves, RegistreEleves.lireProvince);
+    final groupes = RegistreEleves.grouper(widget.fraisScolaires, eleves);
+    final description = _descriptionFiltres();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Statistiques et comptage"),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  description.isEmpty
+                      ? "Tous les élèves affichés"
+                      : "Filtres : $description",
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  "Appuyez sur une ligne pour filtrer la liste.",
+                  style: TextStyle(fontSize: 11.5, color: Colors.grey),
+                ),
+                _statTitle("Effectif total : $total élève(s)"),
+                _statRow("Garçons", sexes['M'] ?? 0, total, onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    selectedSexeFilter = 'M';
+                    showAdvancedFilters = true;
+                  });
+                }),
+                _statRow("Filles", sexes['F'] ?? 0, total, onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    selectedSexeFilter = 'F';
+                    showAdvancedFilters = true;
+                  });
+                }),
+                if ((sexes['?'] ?? 0) > 0)
+                  _statRow("Sexe non précisé", sexes['?'] ?? 0, total,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        setState(() {
+                          selectedSexeFilter = RegistreEleves.sexeNonPrecise;
+                          showAdvancedFilters = true;
+                        });
+                      }),
+                _statTitle("Par classe"),
+                ...groupes.map((g) => _statRow(
+                    "${g.section} — ${g.classe}", g.eleves.length, total)),
+                _statTitle("Par religion"),
+                ...religions.map((l) => _statRow(l.libelle, l.nombre, total,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() {
+                        selectedReligionFilter = l.cle;
+                        showAdvancedFilters = true;
+                      });
+                    })),
+                _statTitle("Par profession des parents"),
+                ...professions.map((l) => _statRow(l.libelle, l.nombre, total,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() {
+                        selectedProfessionFilter = l.cle;
+                        showAdvancedFilters = true;
+                      });
+                    })),
+                _statTitle("Par province d'origine"),
+                ...provinces.map((l) => _statRow(l.libelle, l.nombre, total,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() {
+                        selectedProvinceFilter = l.cle;
+                        showAdvancedFilters = true;
+                      });
+                    })),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Fermer"),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.table_view),
+            label: const Text("Générer le PDF"),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _openExportDialog();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openExportDialog() async {
+    bool toutEcole = false;
+    bool unePageParClasse = true;
+    bool avecStats = true;
+    final filtrees = _filteredEleves();
+    final toute = widget.fraisScolaires.currentData.eleves;
+    final description = _descriptionFiltres();
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text("Générer le registre en PDF"),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  RadioListTile<bool>(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: false,
+                    groupValue: toutEcole,
+                    onChanged: (v) => setD(() => toutEcole = v ?? false),
+                    title: Text(
+                        "Selon les filtres actuels (${filtrees.length} élève(s))",
+                        style: const TextStyle(fontSize: 13.5)),
+                    subtitle: Text(
+                      description.isEmpty
+                          ? "Aucun filtre : tous les élèves affichés"
+                          : description,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  RadioListTile<bool>(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: true,
+                    groupValue: toutEcole,
+                    onChanged: (v) => setD(() => toutEcole = v ?? true),
+                    title: Text("Toute l'école (${toute.length} élève(s))",
+                        style: const TextStyle(fontSize: 13.5)),
+                    subtitle: const Text(
+                      "Ignore tous les filtres et la recherche",
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  const Divider(),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: unePageParClasse,
+                    onChanged: (v) =>
+                        setD(() => unePageParClasse = v ?? true),
+                    title: const Text("Une classe par page",
+                        style: TextStyle(fontSize: 13)),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: avecStats,
+                    onChanged: (v) => setD(() => avecStats = v ?? true),
+                    title: const Text(
+                        "Ajouter les statistiques à la fin (sexe, classe, religion, profession, province)",
+                        style: TextStyle(fontSize: 13)),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    "Colonnes : noms, post-noms et prénoms, sexe, noms des parents, "
+                        "date de naissance, province d'origine, école de provenance, "
+                        "numéro permanent, confession religieuse, profession du parent, "
+                        "adresse, date d'inscription, numéro de téléphone.",
+                    style: TextStyle(fontSize: 11.5, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler"),
+            ),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.picture_as_pdf),
+              label: const Text("Générer le PDF"),
+              onPressed: () => Navigator.pop(ctx, true),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (ok != true) return;
+
+    final liste = toutEcole ? List<Eleve>.from(toute) : _filteredEleves();
+    if (liste.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("Aucun élève ne correspond aux filtres choisis.")),
+      );
+      return;
+    }
+
+    final String filename = toutEcole
+        ? "Registre_Eleves_Toute_Ecole"
+        : "Registre_Eleves_${selectedSectionFilter ?? 'Toutes_Sections'}_${selectedClassFilter ?? 'Toutes_Classes'}";
+
+    final result = await RegistreEleves.genererPdf(
+      fs: widget.fraisScolaires,
+      eleves: liste,
+      filename: filename,
+      description: toutEcole ? "Toute l'école" : description,
+      unePageParClasse: unePageParClasse,
+      inclureStatistiques: avecStats,
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result['success'] == true
+              ? "✅ Registre PDF généré (${liste.length} élève(s))."
+              : "Erreur : ${result['error']}",
+        ),
+        backgroundColor: result['success'] == true ? null : Colors.red,
+      ),
+    );
+  }
+
+  Future<void> _importFromJsonFile() async {
+    await StudentJsonImporter.run(context, widget.fraisScolaires);
+    if (mounted) setState(() {});
+  }
+
   Widget _buildNormalCard(Eleve e) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
@@ -303,9 +832,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     );
   }
 
-  // ==========================================================================
-  // OUVERTURE DE LA CARTE D'IDENTITÉ / SAISIE RAPIDE
-  // ==========================================================================
   void _showStudentCard(Eleve eleve) {
     final list = _filteredEleves();
     int idx = list.indexWhere((x) => x.id == eleve.id);
@@ -346,9 +872,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     });
   }
 
-  // ==========================================================================
-  // OUVERTURE DE LA PAGE "ÉLÈVES SUPPRIMÉS"
-  // ==========================================================================
   void _openElevesSupprimesScreen() {
     Navigator.push(
       context,
@@ -360,10 +883,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
       if (mounted) setState(() {});
     });
   }
-
-  // ====================================================================
-  // MODE SUPPRESSION — bannière + carte
-  // ====================================================================
 
   Widget _buildDeletionBanner() {
     return Container(
@@ -434,7 +953,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     });
   }
 
-  // ==================== SUPPRESSION SÉCURISÉE D'UN ÉLÈVE ====================
   Future<void> _requestDeleteStudent(Eleve eleve) async {
     final appState = Provider.of<AppState>(context, listen: false);
 
@@ -588,10 +1106,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     }
   }
 
-  // ====================================================================
-  // MODE PASSATION — bannière + carte
-  // ====================================================================
-
   Widget _buildPromotionBanner() {
     return Container(
       width: double.infinity,
@@ -725,7 +1239,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     );
   }
 
-  // ==================== ACTIONS EN MASSE (PASSATION) ====================
   void _bulkSetPass(bool value) {
     setState(() {
       for (var e in widget.fraisScolaires.currentData.eleves) {
@@ -742,7 +1255,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     });
   }
 
-  // ==================== DÉMARRER LE MODE PASSATION ====================
   void _startPromotionMode() async {
     final years = widget.fraisScolaires.history.keys
         .where((y) => y != widget.fraisScolaires.currentYear)
@@ -836,7 +1348,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     });
   }
 
-  // ==================== VALIDER LA PASSATION ====================
   void _validatePromotion() async {
     if (targetPromotionYear == null) return;
 
@@ -892,7 +1403,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
     }
   }
 
-  // ==================== TÉLÉCHARGEMENT PDF ====================
   Future<void> _downloadCurrentListAsPdf() async {
     final String sectionText = selectedSectionFilter ?? "Toutes_Sections";
     final String classText = selectedClassFilter ?? "Toutes_Classes";
@@ -915,10 +1425,6 @@ class _StudentListScreenState extends State<StudentListScreen> {
   }
 }
 
-// ==============================================================================
-// FORMATEUR DE DATE : tapez seulement les chiffres (ex: 05032014), les "/"
-// s'ajoutent tout seuls → 05/03/2014
-// ==============================================================================
 class _DateSlashFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
@@ -939,25 +1445,6 @@ class _DateSlashFormatter extends TextInputFormatter {
   }
 }
 
-// ==============================================================================
-// CARTE D'IDENTITÉ D'ÉLÈVE + SAISIE RAPIDE EN SÉRIE
-// ==============================================================================
-// ORDRE DES CHAMPS :
-//   1) Les questions personnalisées de l'école, dans l'ordre exact où elles
-//      ont été ajoutées (la PREMIÈRE ajoutée est en PREMIÈRE position).
-//   2) Ensuite seulement les champs de base : père, mère, adresse, date de
-//      naissance.
-//
-// - Mode lecture : carte d'identité, flèches pour passer d'un élève à l'autre.
-// - Mode saisie : tous les champs sont affichés d'un coup.
-//   Entrée = champ suivant. Entrée sur le dernier champ = enregistre et passe
-//   à l'élève suivant. Ctrl+Entrée (ou Cmd+Entrée) = enregistre et passe à
-//   l'élève suivant depuis N'IMPORTE QUEL champ.
-// - Chaque question peut être supprimée avec la croix rouge (suppression pour
-//   toute l'école, après confirmation).
-// - Les questions ajoutées sont mémorisées pour toute l'école (config).
-// - L'écriture sur le disque est groupée (≈1 s après la dernière saisie, et
-//   toujours à la fermeture) pour que la saisie reste instantanée.
 class _StudentCardDialog extends StatefulWidget {
   final List<Eleve> eleves;
   final int startIndex;
@@ -995,8 +1482,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
   final adresseFocus = FocusNode();
   final dateFocus = FocusNode();
 
-  // Questions personnalisées, dans l'ordre d'ajout (la première ajoutée en
-  // première position).
   final List<String> _questions = [];
   final Map<String, TextEditingController> _qCtrl = {};
   final Map<String, FocusNode> _qFocus = {};
@@ -1047,9 +1532,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         : null;
     photoChanged = false;
 
-    // Questions que cet élève possède mais qui ne sont pas encore dans la
-    // liste de l'école (ex: créées depuis l'écran d'inscription) : on les
-    // ajoute à la fin de la liste et on les mémorise pour tous.
     for (final key in e.customFields.keys) {
       final k = key.trim();
       if (k.isEmpty) continue;
@@ -1069,8 +1551,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     }
   }
 
-  // Ordre de navigation : questions personnalisées d'abord, champs de base
-  // ensuite.
   List<FocusNode> _orderedNodes() => [
     ..._questions.map((q) => _qFocus[q]!),
     pereFocus,
@@ -1097,7 +1577,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     }
   }
 
-  // ---------- Date ----------
   DateTime? _parseDateStrict(String s) {
     final parts = s.trim().split('/');
     if (parts.length != 3) return null;
@@ -1132,7 +1611,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     dateFocus.requestFocus();
   }
 
-  // ---------- Photo ----------
   Future<void> _pickPhoto() async {
     const typeGroup = XTypeGroup(
       label: 'images',
@@ -1147,7 +1625,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     });
   }
 
-  // ---------- Nouvelle question personnalisée (mémorisée pour toute l'école) ----------
   Future<void> _addCustomField() async {
     final questionController = TextEditingController();
     final question = await showDialog<String>(
@@ -1204,7 +1681,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     });
   }
 
-  // ---------- Suppression d'une question personnalisée (pour toute l'école) ----------
   Future<void> _deleteQuestion(String q) async {
     final bool? ok = await showDialog<bool>(
       context: context,
@@ -1246,12 +1722,9 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     final fs = widget.fraisScolaires;
     final low = q.trim().toLowerCase();
 
-    // 1) On retire la question de la liste mémorisée de l'école.
     fs.config.customFieldQuestions
         .removeWhere((x) => x.trim().toLowerCase() == low);
 
-    // 2) On retire les réponses chez tous les élèves (sinon la question
-    //    reviendrait toute seule en lisant leurs anciennes réponses).
     void clean(Iterable<Eleve> list) {
       for (final e in list) {
         e.customFields.removeWhere((k, v) => k.trim().toLowerCase() == low);
@@ -1264,7 +1737,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     }
     clean(fs.elevesSupprimesData.eleves);
 
-    // 3) On retire le champ du formulaire.
     final ctrl = _qCtrl.remove(q);
     final foc = _qFocus.remove(q);
     setState(() {
@@ -1281,7 +1753,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     _focusFirst();
   }
 
-  // ---------- Enregistrement ----------
   void _applyToEleve(String dateOut) {
     final e = eleve;
     e.pereNom = pereCtrl.text.trim();
@@ -1423,7 +1894,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     super.dispose();
   }
 
-  // ---------- UI ----------
   Widget _infoRow(String label, String value) {
     if (value.trim().isEmpty) return const SizedBox.shrink();
     return Padding(
@@ -1537,7 +2007,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // ==================== EN-TÊTE ====================
               Container(
                 padding:
                 const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
@@ -1608,7 +2077,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                 ),
               ),
 
-              // ==================== CORPS ====================
               Flexible(
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.all(18),
@@ -1710,7 +2178,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                       const SizedBox(height: 6),
 
                       if (!editing) ...[
-                        // ----- Lecture : questions d'abord, champs de base ensuite -----
                         ..._questions.map((q) {
                           String v = '';
                           e.customFields.forEach((k, val) {
@@ -1736,7 +2203,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                             ),
                           ),
                       ] else ...[
-                        // ----- Saisie : bouton d'ajout, puis questions, puis champs de base -----
                         Align(
                           alignment: Alignment.centerLeft,
                           child: Padding(
@@ -1806,7 +2272,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                 ),
               ),
 
-              // ==================== ACTIONS ====================
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                 child: Row(
@@ -1871,9 +2336,6 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
   }
 }
 
-// ==============================================================================
-// PAGE "ÉLÈVES SUPPRIMÉS" (HISTORIQUE / ARCHIVE)
-// ==============================================================================
 class ElevesSupprimesScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const ElevesSupprimesScreen({super.key, required this.fraisScolaires});
@@ -2299,9 +2761,6 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
   }
 }
 
-// ==============================================================================
-// BOÎTE DE DIALOGUE "PAIEMENTS D'UN ÉLÈVE SUPPRIMÉ"
-// ==============================================================================
 class _PaiementsEleveSupprimeDialog extends StatefulWidget {
   final Eleve eleve;
   final FraisScolaires fraisScolaires;
@@ -2324,8 +2783,6 @@ class _PaiementsEleveSupprimeDialogState
 
   Eleve get eleve => widget.eleve;
   FraisScolaires get fs => widget.fraisScolaires;
-
-  // ---------- Données ----------
 
   List<Map<String, dynamic>> _transactionsTriees() {
     final list = List<Map<String, dynamic>>.from(eleve.transactions);
@@ -2350,8 +2807,6 @@ class _PaiementsEleveSupprimeDialogState
 
   double _totalAutres() => _autresPaiements()
       .fold(0.0, (sum, e) => sum + e.value.montant);
-
-  // ---------- Confirmation générique ----------
 
   Future<bool> _confirmer({
     required String titre,
@@ -2398,8 +2853,6 @@ class _PaiementsEleveSupprimeDialogState
     );
   }
 
-  // ---------- Annulation d'UN paiement de scolarité ----------
-
   Future<void> _annulerUneTransaction(Map<String, dynamic> t) async {
     if (busy) return;
     final double montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
@@ -2431,8 +2884,6 @@ class _PaiementsEleveSupprimeDialogState
     }
     if (mounted) setState(() => busy = false);
   }
-
-  // ---------- Annulation de TOUS les paiements de scolarité ----------
 
   Future<void> _annulerToutesTransactions() async {
     if (busy) return;
@@ -2486,8 +2937,6 @@ class _PaiementsEleveSupprimeDialogState
     if (mounted) setState(() => busy = false);
   }
 
-  // ---------- Annulation d'UN paiement "autres frais" ----------
-
   Future<void> _annulerUnAutrePaiement(
       String year, AutreFraisPaiement p) async {
     if (busy) return;
@@ -2521,8 +2970,6 @@ class _PaiementsEleveSupprimeDialogState
     }
     if (mounted) setState(() => busy = false);
   }
-
-  // ---------- Annulation de TOUS les paiements "autres frais" ----------
 
   Future<void> _annulerTousAutresPaiements() async {
     if (busy) return;
@@ -2562,8 +3009,6 @@ class _PaiementsEleveSupprimeDialogState
     if (mounted) setState(() => busy = false);
   }
 
-  // ---------- Interface ----------
-
   Widget _sectionTitle(String label, double total, VoidCallback? onCancelAll) {
     return Padding(
       padding: const EdgeInsets.only(top: 6, bottom: 6),
@@ -2601,7 +3046,6 @@ class _PaiementsEleveSupprimeDialogState
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // ---------- En-tête ----------
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(16),
@@ -2634,7 +3078,6 @@ class _PaiementsEleveSupprimeDialogState
               ),
             ),
 
-            // ---------- Corps ----------
             Flexible(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(14),
@@ -2660,7 +3103,6 @@ class _PaiementsEleveSupprimeDialogState
                     ),
                     const SizedBox(height: 10),
 
-                    // ----- Scolarité -----
                     _sectionTitle(
                       "Scolarité",
                       totalScolarite,
@@ -2712,7 +3154,6 @@ class _PaiementsEleveSupprimeDialogState
 
                     const Divider(height: 24),
 
-                    // ----- Autres frais -----
                     _sectionTitle(
                       "Autres frais",
                       totalAutres,
@@ -2759,7 +3200,6 @@ class _PaiementsEleveSupprimeDialogState
               ),
             ),
 
-            // ---------- Pied ----------
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
               child: Row(
