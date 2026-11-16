@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 import 'communique_screen.dart';
+// ⚡ NOUVEAU — messagerie école ⇄ parents
+import 'messages_envoyes_screen.dart';
+import 'messages_parents_screen.dart';
 
 class DisciplineRegistreScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -170,6 +173,34 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     }
   }
 
+  // ⚡ NOUVEAU — ouvre « Messages envoyés » (confirmation de lecture),
+  // pour toute l'école ou pour un seul élève.
+  void _openMessagesEnvoyes({Eleve? eleve}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MessagesEnvoyesScreen(
+          fraisScolaires: widget.fraisScolaires,
+          studentId:   eleve?.id,
+          studentName: eleve == null
+              ? null
+              : "${eleve.nom} ${eleve.prenom}".trim(),
+        ),
+      ),
+    );
+  }
+
+  // ⚡ NOUVEAU — ouvre la boîte de réception des messages des parents.
+  void _openMessagesParents() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            MessagesParentsScreen(fraisScolaires: widget.fraisScolaires),
+      ),
+    );
+  }
+
   void _showConvocationDialog(Eleve eleve) {
     final titleController = TextEditingController(
         text: "Convocation des parents");
@@ -179,6 +210,9 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
           "vous présenter à l'administration dans les meilleurs délais.",
     );
     bool sending = false;
+    // ⚡ NOUVEAU — message urgent : le parent est relancé par des
+    // notifications vibrantes tant qu'il n'a pas lu.
+    bool urgent = false;
 
     showDialog(
       context: context,
@@ -205,6 +239,42 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                     border: OutlineInputBorder(),
                   ),
                 ),
+                const SizedBox(height: 10),
+                Container(
+                  decoration: BoxDecoration(
+                    color: urgent
+                        ? const Color(0xFFFFEBEE)
+                        : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: urgent
+                          ? const Color(0xFFC62828)
+                          : Colors.grey.shade300,
+                    ),
+                  ),
+                  child: SwitchListTile(
+                    dense: true,
+                    contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 10),
+                    activeColor: const Color(0xFFC62828),
+                    title: const Text(
+                      "Message URGENT",
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      urgent
+                          ? "Le téléphone du parent vibrera par rappels "
+                          "successifs jusqu'à la lecture."
+                          : "Alerte renforcée si le parent ne lit pas "
+                          "(ex. élève malade).",
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    value: urgent,
+                    onChanged: sending
+                        ? null
+                        : (v) => setDialogState(() => urgent = v),
+                  ),
+                ),
               ],
             ),
           ),
@@ -225,6 +295,7 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                   studentId: eleve.id,
                   title:     titleController.text.trim(),
                   message:   messageController.text.trim(),
+                  urgent:    urgent,
                 );
                 if (ctx.mounted) Navigator.pop(ctx);
                 if (mounted) {
@@ -232,7 +303,10 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                     SnackBar(
                       content: Text(
                         result['success'] == true
-                            ? "✅ Convocation envoyée au parent"
+                            ? (urgent
+                            ? "✅ Convocation URGENTE envoyée — le parent "
+                            "sera relancé jusqu'à la lecture"
+                            : "✅ Convocation envoyée au parent")
                             : "⚠️ ${result['error'] ?? 'Échec de l\'envoi'}",
                       ),
                       backgroundColor: result['success'] == true
@@ -248,7 +322,7 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                   height: 18,
                   child: CircularProgressIndicator(
                       strokeWidth: 2, color: Colors.white))
-                  : const Text("Envoyer"),
+                  : Text(urgent ? "Envoyer URGENT" : "Envoyer"),
             ),
           ],
         ),
@@ -269,6 +343,18 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
         title: const Text("Registre de Discipline"),
         centerTitle: true,
         actions: [
+          // ⚡ NOUVEAU — messages envoyés + confirmation de lecture
+          IconButton(
+            icon: const Icon(Icons.mark_email_read_outlined),
+            tooltip: "Messages envoyés (lu / pas lu)",
+            onPressed: () => _openMessagesEnvoyes(),
+          ),
+          // ⚡ NOUVEAU — messages écrits par les parents
+          IconButton(
+            icon: const Icon(Icons.forum_outlined),
+            tooltip: "Messages des parents",
+            onPressed: _openMessagesParents,
+          ),
           IconButton(
             icon: const Icon(Icons.campaign),
             tooltip: "Lancer un communiqué",
@@ -394,11 +480,24 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                         fontSize: 12,
                       ),
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.campaign_outlined,
-                          color: Colors.orange),
-                      tooltip: "Convoquer le parent",
-                      onPressed: () => _showConvocationDialog(e),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // ⚡ NOUVEAU — messages envoyés à CET élève
+                        IconButton(
+                          icon: const Icon(
+                              Icons.mark_email_read_outlined,
+                              color: Colors.indigo),
+                          tooltip: "Messages envoyés au parent (lu / pas lu)",
+                          onPressed: () => _openMessagesEnvoyes(eleve: e),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.campaign_outlined,
+                              color: Colors.orange),
+                          tooltip: "Convoquer le parent",
+                          onPressed: () => _showConvocationDialog(e),
+                        ),
+                      ],
                     ),
                     onTap: () => _toggleAbsent(e.id),
                   ),

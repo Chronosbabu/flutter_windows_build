@@ -15,6 +15,7 @@ import '../frais_scolaires.dart';
 import '../models.dart';
 import '../services/epson_printer_service.dart';
 import '../services/student_import_service.dart';
+import '../services/parent_sync_service.dart';
 
 class PaiementEleveScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -24,15 +25,10 @@ class PaiementEleveScreen extends StatefulWidget {
   State<PaiementEleveScreen> createState() => _PaiementEleveScreenState();
 }
 
-// ⚡ Résultat de l'analyse du « paiement par coupure » (lecture seule).
 class _AnalyseCoupure {
-  // Montant réellement enregistrable (somme des mois couverts EN ENTIER).
   final double accepte;
-  // Montant saisi qui ne sera PAS enregistré (à garder par l'utilisateur).
   final double garde;
-  // Premier mois qui n'a pas pu être couvert en entier (si applicable).
   final String? moisIncomplet;
-  // Reste dû de ce mois.
   final double resteDuMoisIncomplet;
 
   const _AnalyseCoupure({
@@ -60,9 +56,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   static const String _receiptsLockedPrefKey = 'receipts_locked';
   bool _receiptsLocked = false;
 
-  // ⚡ NOUVEAU — Verrouillage du « paiement par coupure » (fonctionnalité
-  // optionnelle, cachée : 3 appuis rapides sur le titre de l'écran).
-  // Désactivé par défaut : seules les écoles qui le demandent l'activent.
   static const String _coupureLockedPrefKey = 'coupure_locked';
   bool _coupureLocked = false;
   int _titreTaps = 0;
@@ -85,6 +78,10 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     searchController.addListener(_filterEleves);
     _loadReceiptsLockState();
     _loadCoupureLockState();
+    ParentSyncService.instance.attach(
+      widget.fraisScolaires,
+      password: Provider.of<AppState>(context, listen: false).backupPassword,
+    );
     _fetchMobilePendingPayments();
     _flushPendingReceipts();
     _pendingRequestsPoller =
@@ -162,21 +159,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       }
     }
   }
-
-  // ==========================================================================
-  // ⚡ NOUVEAU — VERROUILLAGE DU PAIEMENT PAR COUPURE
-  // ==========================================================================
-  // Quand il est activé, un mois ne peut être enregistré qu'EN ENTIER :
-  //   - montant = reste dû du mois (ex. 60 000 FC) → enregistré normalement ;
-  //   - montant inférieur au reste dû du premier mois → refusé ;
-  //   - montant plus grand (ex. 110 000 FC) → réparti comme d'habitude :
-  //     les mois complets sont enregistrés (60 000 FC) et la partie qui ne
-  //     couvre pas un mois en entier (50 000 FC) N'EST PAS enregistrée ;
-  //     le logiciel demande à l'utilisateur de la garder jusqu'à ce que la
-  //     somme soit suffisante.
-  // Accès caché : 3 appuis rapides sur le titre « Paiements des Élèves ».
-  // L'état est mémorisé sur cet appareil (désactivé par défaut).
-  // ==========================================================================
 
   Future<void> _loadCoupureLockState() async {
     final prefs = await SharedPreferences.getInstance();
@@ -267,9 +249,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
   }
 
-  // Simule la répartition du paiement (même ordre que le fonctionnement
-  // normal) et calcule la part qui couvre des mois EN ENTIER.
-  // Ne modifie aucune donnée.
   _AnalyseCoupure _analyserCoupure(
       Eleve eleve, String mois, double amount, bool viaDeblocage) {
     final fs = widget.fraisScolaires;
@@ -302,7 +281,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     double resteIncomplet = 0;
 
     for (final m in ordre) {
-      // Le montant est épuisé : on s'arrête, rien n'est refusé ici.
       if (restant <= eps) break;
 
       final double requis = fs.getRequiredForMonthForEleve(eleve, m);
@@ -315,7 +293,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
         accepte += reste;
         if (restant < 0) restant = 0;
       } else {
-        // Ce mois ne peut pas être couvert en entier.
         moisIncomplet = m;
         resteIncomplet = reste;
         break;
@@ -797,6 +774,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
   Future<void> _pollPendingRequests() async {
     bool changed = false;
+    final Set<String> touched = {};
     for (final eleve in widget.fraisScolaires.currentData.eleves) {
       for (final t in eleve.transactions) {
         final reqId = t['pendingRequestId'];
@@ -809,6 +787,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               .applyApprovedRequest(t['pendingRequestType'] as String, eleve, t, status);
           t.remove('pendingRequestId');
           t.remove('pendingRequestType');
+          touched.add(eleve.id);
           changed = true;
         } else if (st == 'rejected') {
           t.remove('pendingRequestId');
@@ -819,6 +798,9 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
     if (changed) {
       await widget.fraisScolaires.saveData();
+      if (touched.isNotEmpty) {
+        await ParentSyncService.instance.markDirtyIds(touched);
+      }
       if (mounted) {
         setState(() {});
         _filterEleves();
@@ -873,6 +855,92 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     }
   }
 
+  Future<void> _modifierDatePaiement(
+      Eleve eleve, Map<String, dynamic> transaction, String mois) async {
+    final String ancienneStr = transaction['date']?.toString() ?? '';
+    final DateTime? ancienne = DateTime.tryParse(ancienneStr);
+    final DateTime maintenant = DateTime.now();
+    final DateTime aujourdhui =
+    DateTime(maintenant.year, maintenant.month, maintenant.day);
+    final DateTime premiere = DateTime(2000);
+    DateTime initiale = ancienne != null
+        ? DateTime(ancienne.year, ancienne.month, ancienne.day)
+        : aujourdhui;
+    if (initiale.isAfter(aujourdhui)) initiale = aujourdhui;
+    if (initiale.isBefore(premiere)) initiale = premiere;
+
+    final double montant = (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+
+    final DateTime? choisie = await showDatePicker(
+      context: context,
+      initialDate: initiale,
+      firstDate: premiere,
+      lastDate: aujourdhui,
+      helpText: "Date réelle du paiement de ${formatMontant(montant)} FC",
+    );
+    if (choisie == null || !mounted) return;
+
+    final String nouvelleStr =
+    DateTime(choisie.year, choisie.month, choisie.day).toString().split(' ')[0];
+    if (nouvelleStr == ancienneStr) return;
+
+    final bool? confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Modifier la date du paiement ?"),
+        content: Text(
+          "Élève : ${eleve.nom} ${eleve.postNom} ${eleve.prenom}\n"
+              "Mois : $mois\n"
+              "Montant : ${formatMontant(montant)} FC\n\n"
+              "Ancienne date : ${_formatDateIso(ancienneStr)}\n"
+              "Nouvelle date : ${_formatDate(choisie)}\n\n"
+              "Cette date sera utilisée partout : rapports, bilan financier, "
+              "reçus et application des parents.",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Modifier la date"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || !mounted) return;
+
+    final String? erreur = await widget.fraisScolaires.modifierDateTransaction(
+      eleve: eleve,
+      transaction: transaction,
+      nouvelleDate: choisie,
+    );
+    if (!mounted) return;
+
+    if (erreur != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(erreur),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 7),
+        ),
+      );
+      return;
+    }
+
+    unawaited(ParentSyncService.instance.markDirty(eleve));
+    setState(() {});
+    _filterEleves();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("📅 Date modifiée : ${_formatDate(choisie)}"),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
   void _showTransactionActionsSheet(
       Eleve eleve, Map<String, dynamic> transaction, String mois) {
     final pendingType = transaction['pendingRequestType'];
@@ -899,6 +967,14 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
       builder: (ctx) => SafeArea(
         child: Wrap(
           children: [
+            ListTile(
+              leading: const Icon(Icons.edit_calendar, color: Colors.teal),
+              title: const Text("Modifier la date de paiement"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _modifierDatePaiement(eleve, transaction, mois);
+              },
+            ),
             if (confirmed)
               ListTile(
                 leading: const Icon(Icons.print, color: Colors.indigo),
@@ -1113,10 +1189,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     return null;
   }
 
-  // ⚡ NOUVEAU — Texte affiché directement sur la carte de l'élève :
-  // liste des dates de paiement (sans doublon, de la plus ancienne à la plus
-  // récente, format jj/mm/aaaa). Lecture seule : ne modifie aucune donnée.
-  // Retourne une chaîne vide si l'élève n'a encore aucun paiement.
   String _datesPaiementsLabel(Eleve eleve) {
     final Set<String> dates = {};
     for (final t in eleve.transactions) {
@@ -1392,8 +1464,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     );
   }
 
-  // ⚡ NOUVEAU — ouvre la fenêtre de saisie groupée des anciens paiements.
-  // Rien ne change sur cet écran tant qu'on n'appuie pas sur le bouton.
   Future<void> _ouvrirSaisieGroupee() async {
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -1408,7 +1478,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
     _filterEleves();
   }
 
-  // ⚡ NOUVEAU — ouvre la grille type cahier (élèves × mois).
   Future<void> _ouvrirGrilleCahier() async {
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -1448,8 +1517,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        // ⚡ NOUVEAU — 3 appuis rapides sur le titre = verrouillage caché du
-        // paiement par coupure (aucun indice visuel sur l'écran).
         title: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _onTitreTap,
@@ -1466,13 +1533,11 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 : "Impression des reçus active — appuyer pour bloquer",
             onPressed: _toggleReceiptsLock,
           ),
-          // ⚡ NOUVEAU — grille type cahier (cocher les mois payés)
           IconButton(
             icon: const Icon(Icons.grid_on),
             tooltip: "Grille type cahier (cocher les mois payés)",
             onPressed: _ouvrirGrilleCahier,
           ),
-          // ⚡ NOUVEAU — bouton de saisie groupée des anciens paiements
           IconButton(
             icon: const Icon(Icons.playlist_add_check_circle),
             tooltip: "Saisie groupée des anciens paiements (cahier)",
@@ -1556,6 +1621,33 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 ],
               ),
             ),
+          ValueListenableBuilder<int>(
+            valueListenable: ParentSyncService.instance.stuckCount,
+            builder: (context, n, _) {
+              if (n <= 0) return const SizedBox.shrink();
+              return Container(
+                width: double.infinity,
+                color: Colors.orange.shade50,
+                padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.cloud_off, color: Colors.orange, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "$n élève(s) en attente d'envoi aux parents (pas de "
+                            "connexion). L'envoi reprendra automatiquement dès "
+                            "que internet reviendra.",
+                        style: const TextStyle(
+                            color: Colors.deepOrange, fontSize: 12.5),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
           Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -1869,7 +1961,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                               size: 20,
                               color: isFromParent ? Colors.green : Colors.indigo,
                             ),
-                            title: Text(date),
+                            title: Text(_formatDateIso(date)),
                             subtitle: isFromParent
                                 ? Text("Via ${t['network'] ?? 'Mobile Money'}",
                                 style:
@@ -1881,6 +1973,19 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                                 Text("${montant.toStringAsFixed(0)} FC",
                                     style: const TextStyle(fontWeight: FontWeight.bold)),
                                 const SizedBox(width: 4),
+                                if (pendingType == null)
+                                  IconButton(
+                                    icon: const Icon(Icons.edit_calendar,
+                                        color: Colors.teal, size: 20),
+                                    tooltip: "Modifier la date de paiement",
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(
+                                        minWidth: 32, minHeight: 32),
+                                    onPressed: () async {
+                                      await _modifierDatePaiement(eleve, t, mois);
+                                      setStateDialog(() {});
+                                    },
+                                  ),
                                 if (pendingType != null)
                                   const Padding(
                                     padding: EdgeInsets.only(left: 4),
@@ -2047,16 +2152,12 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
 
             final bool viaDeblocage = _paiementViaDeblocage(eleve, mois);
 
-            // ⚡ NOUVEAU — Verrouillage du paiement par coupure (si activé).
-            // Seule la part qui couvre des mois EN ENTIER est enregistrée ;
-            // le reste insuffisant n'est pas enregistré (à garder).
             double montantGarde = 0;
             if (_coupureLocked) {
               final _AnalyseCoupure analyse =
               _analyserCoupure(eleve, mois, amount, viaDeblocage);
 
               if (analyse.accepte <= 0.0001 && analyse.moisIncomplet != null) {
-                // Même le premier mois n'est pas couvert en entier : refus.
                 final String m = analyse.moisIncomplet!;
                 final double reste = analyse.resteDuMoisIncomplet;
                 await showDialog(
@@ -2094,7 +2195,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
               }
 
               if (analyse.garde > 0.0001 && analyse.accepte > 0.0001) {
-                // Une partie seulement est enregistrée : on réduit le montant.
                 amount = analyse.accepte;
                 montantGarde = analyse.garde;
               }
@@ -2165,6 +2265,7 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
             }
 
             await widget.fraisScolaires.saveData();
+            unawaited(ParentSyncService.instance.markDirty(eleve));
             if (ctx.mounted) Navigator.pop(ctx);
 
             if (mounted) {
@@ -2173,7 +2274,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
                 const SnackBar(content: Text("✅ Paiement enregistré avec succès")),
               );
 
-              // ⚡ Information : une partie du montant n'a pas été enregistrée.
               if (montantGarde > 0.0001) {
                 showDialog(
                   context: context,
@@ -2368,14 +2468,6 @@ class _PaiementEleveScreenState extends State<PaiementEleveScreen> {
   }
 }
 
-// ============================================================================
-// ⚡ NOUVEAU — OUTILS PARTAGÉS PAR LA SAISIE GROUPÉE ET LA GRILLE CAHIER
-// ============================================================================
-// Formats de dates + gestion des « lots saisis » (liste et annulation).
-// Chaque saisie groupée / grille crée un lot (marqueur lotSaisie sur chaque
-// paiement) : on peut ainsi retrouver et annuler un lot saisi par erreur.
-// ============================================================================
-
 String _deuxChiffres(int n) => n.toString().padLeft(2, '0');
 
 String _formatDate(DateTime d) =>
@@ -2394,7 +2486,6 @@ String _formatDateIso(String? iso) {
 class _LigneLot {
   final String mois;
   final double montant;
-  // 'ok' | 'solde' | 'gratuit' | 'bloque' | 'sans_montant' | 'coupure'
   final String statut;
   final bool plafonne;
   final bool deblocage;
@@ -2444,8 +2535,6 @@ class _InfoLot {
 }
 
 class _LotsSaisie {
-  // Délai pendant lequel un lot peut être annulé directement (au-delà, il faut
-  // passer par les demandes au promoteur, paiement par paiement).
   static const int delaiAnnulationHeures = 72;
 
   static List<_InfoLot> collecter(FraisScolaires fs) {
@@ -2478,6 +2567,7 @@ class _LotsSaisie {
 
   static Future<int> annuler(FraisScolaires fs, String lotId) async {
     int retires = 0;
+    final Set<String> touches = {};
     for (final e in fs.currentData.eleves) {
       final aRetirer = e.transactions
           .where((t) =>
@@ -2496,10 +2586,11 @@ class _LotsSaisie {
         fs.receiptQueue.removeWhere((r) => r['key'] == cle);
         retires++;
       }
-      // Même logique que l'annulation normale d'un paiement.
       fs.recalculerRepartitionMoisPourEleve(e);
+      touches.add(e.id);
     }
     await fs.saveData();
+    await ParentSyncService.instance.markDirtyIds(touches);
     return retires;
   }
 
@@ -2607,30 +2698,9 @@ class _LotsSaisie {
   }
 }
 
-// ============================================================================
-// ⚡ NOUVEAU — SAISIE GROUPÉE DES ANCIENS PAIEMENTS
-// ============================================================================
-// Permet d'enregistrer d'un coup les paiements déjà faits avant l'utilisation
-// de l'application (cahier) : on coche le(s) mois, on choisit le montant, on
-// sélectionne les élèves, puis on enregistre.
-//
-// Règles (identiques au fonctionnement normal) :
-//   - un mois ne peut être payé que si les mois précédents sont soldés
-//     (sauf si l'option « Autoriser… » est activée) ;
-//   - le montant appliqué ne dépasse jamais ce qui reste à payer pour le mois ;
-//   - les exceptions de montant par élève/mois sont respectées ;
-//   - chaque paiement crée une vraie transaction (mêmes champs que d'habitude).
-//   - ⚡ si le verrouillage du paiement par coupure est activé, un « montant
-//     unique » inférieur au reste dû d'un mois est refusé pour ce mois.
-//
-// Chaque paiement porte en plus les marqueurs « saisieGroupee » et « lotSaisie »
-// qui permettent de retrouver (et d'annuler) un lot saisi par erreur.
-// ============================================================================
-
 class SaisieGroupeeScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   final bool receiptsLocked;
-  // ⚡ NOUVEAU — verrouillage du paiement par coupure (désactivé par défaut)
   final bool coupureLocked;
 
   const SaisieGroupeeScreen({
@@ -2649,7 +2719,7 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
       _LotsSaisie.delaiAnnulationHeures;
 
   final Set<String> _moisCoches = {};
-  String _modeMontant = 'complet'; // 'complet' | 'fixe'
+  String _modeMontant = 'complet';
   final TextEditingController _montantCtrl = TextEditingController();
   final TextEditingController _rechercheCtrl = TextEditingController();
   DateTime _datePaiement = DateTime.now();
@@ -2679,9 +2749,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
     super.dispose();
   }
 
-  // --------------------------------------------------------------------------
-  // Utilitaires
-  // --------------------------------------------------------------------------
   String _fmtDate(DateTime d) => _formatDate(d);
 
   double? get _montantFixe {
@@ -2696,9 +2763,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
   List<String> _moisCochesOrdonnes() =>
       fs.months.where((m) => _moisCoches.contains(m)).toList();
 
-  // --------------------------------------------------------------------------
-  // Calcul du plan (aperçu = exactement ce qui sera enregistré)
-  // --------------------------------------------------------------------------
   _PlanEleve _planifier(Eleve e) {
     final Map<String, double> paidSim = Map<String, double>.from(e.paid);
     final List<_LigneLot> lignes = [];
@@ -2729,8 +2793,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
               montant = reste;
               plafonne = true;
             } else if (widget.coupureLocked && fixe + 0.0001 < reste) {
-              // ⚡ Paiement par coupure verrouillé : le mois doit être
-              // couvert en entier.
               refuseCoupure = true;
             } else {
               montant = fixe;
@@ -2795,7 +2857,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
     plans.where((p) => p.aEnregistrer).map((p) => p.eleve.id).toSet();
     setState(() {
       _plans = plans;
-      // On n'applique jamais qu'à ce qui est visible et enregistrable.
       _selection.retainAll(ids);
     });
   }
@@ -2838,9 +2899,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
         .showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
   }
 
-  // --------------------------------------------------------------------------
-  // Actions de l'interface
-  // --------------------------------------------------------------------------
   void _cocherJusquAuMoisCourant() {
     final String? courant = fs.currentSchoolMonthName;
     final int idx = courant == null ? -1 : fs.months.indexOf(courant);
@@ -2899,9 +2957,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
     );
   }
 
-  // --------------------------------------------------------------------------
-  // Enregistrement du lot
-  // --------------------------------------------------------------------------
   Future<void> _enregistrer() async {
     if (_enCours) return;
     if (_moisCoches.isEmpty) {
@@ -2984,7 +3039,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
 
       for (final sel in selectionnes) {
         final Eleve e = sel.eleve;
-        // Recalcul au moment de l'enregistrement (état le plus récent).
         final plan = _planifier(e);
         bool touche = false;
 
@@ -3014,7 +3068,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
 
         if (touche) {
           nbEleves++;
-          // Même nettoyage que le paiement normal.
           if (e.moisDebloque != null) {
             final String moisDeb = e.moisDebloque!;
             final double requisDeb = fs.getRequiredForMonthForEleve(e, moisDeb);
@@ -3029,8 +3082,9 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
         }
       }
 
-      // Sauvegarde AVANT toute impression : les paiements sont sécurisés.
       await fs.saveData();
+      unawaited(ParentSyncService.instance
+          .markDirtyMany(nouvelles.map((en) => en.key)));
 
       int nbImprimes = 0;
       if (imprimer) {
@@ -3090,9 +3144,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
     }
   }
 
-  // --------------------------------------------------------------------------
-  // Interface
-  // --------------------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
     final int nbSel = _selection.length;
@@ -3546,24 +3597,6 @@ class _SaisieGroupeeScreenState extends State<SaisieGroupeeScreen> {
   }
 }
 
-// ============================================================================
-// ⚡ NOUVEAU — GRILLE TYPE CAHIER (élèves × mois)
-// ============================================================================
-// Un tableau comme dans le cahier : une ligne par élève, une colonne par mois.
-//   - Appuyer sur une case la COCHE, et coche aussi tous les mois précédents
-//     non encore payés de cet élève (règle normale : on paie dans l'ordre).
-//     Appuyer sur une case cochée la décoche, ainsi que les mois suivants.
-//   - Appuyer sur le NOM D'UN MOIS (en-tête) coche (ou décoche) ce mois pour
-//     tous les élèves affichés.
-//   - Les cases vertes sont déjà soldées : elles ne se modifient pas.
-//   - Chaque case cochée est enregistrée pour le montant COMPLET restant du
-//     mois (exceptions de montant respectées) : le paiement par coupure n'est
-//     donc jamais possible ici.
-// Rien n'est enregistré tant qu'on n'appuie pas sur « Enregistrer ».
-// Les paiements créés portent les mêmes marqueurs de lot que la saisie
-// groupée : ils sont visibles et annulables dans « Lots saisis ».
-// ============================================================================
-
 class _ResumeGrille {
   final int eleves;
   final int paiements;
@@ -3592,7 +3625,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
   static const double _hauteurLigne = 54;
   static const double _hauteurEntete = 42;
 
-  // eleveId -> mois cochés (nouveaux paiements à enregistrer)
   final Map<String, Set<String>> _coches = {};
   final TextEditingController _rechercheCtrl = TextEditingController();
   String? _filtreSection;
@@ -3620,9 +3652,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
     super.dispose();
   }
 
-  // --------------------------------------------------------------------------
-  // Utilitaires
-  // --------------------------------------------------------------------------
   void _snack(String msg, {Color? color}) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
@@ -3637,7 +3666,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
 
   String _libelleMois(String m) => m.length >= 3 ? m.substring(0, 3) : m;
 
-  // 'gratuit' | 'solde' | 'coche' | 'partiel' | 'vide'
   String _statut(Eleve e, String mois) {
     final double requis = fs.getRequiredForMonthForEleve(e, mois);
     if (requis <= 0) return 'gratuit';
@@ -3648,9 +3676,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
     return 'vide';
   }
 
-  // --------------------------------------------------------------------------
-  // Liste des élèves affichés
-  // --------------------------------------------------------------------------
   void _recalc() {
     final String q = _rechercheCtrl.text.toLowerCase().trim();
     final List<Eleve> liste = [];
@@ -3680,9 +3705,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
     setState(() => _eleves = liste);
   }
 
-  // --------------------------------------------------------------------------
-  // Cocher / décocher
-  // --------------------------------------------------------------------------
   void _cocher(Eleve e, String mois) {
     final int idx = fs.months.indexOf(mois);
     if (idx < 0) return;
@@ -3758,9 +3780,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
     if (d != null && mounted) setState(() => _datePaiement = d);
   }
 
-  // --------------------------------------------------------------------------
-  // Calcul de ce qui sera enregistré (aperçu = enregistrement)
-  // --------------------------------------------------------------------------
   List<_LigneLot> _lignesPour(Eleve e) {
     final Set<String> set = _coches[e.id] ?? const <String>{};
     final Map<String, double> paidSim = Map<String, double>.from(e.paid);
@@ -3818,9 +3837,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
     return _ResumeGrille(nbEleves, nbPaiements, total);
   }
 
-  // --------------------------------------------------------------------------
-  // Enregistrement
-  // --------------------------------------------------------------------------
   Future<void> _enregistrer() async {
     if (_enCours) return;
 
@@ -3908,7 +3924,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
       double totalEnregistre = 0;
 
       for (final e in aTraiter) {
-        // Recalcul au dernier moment (état le plus récent).
         final lignes = _lignesPour(e)
             .where((l) => l.statut == 'ok' && l.montant > 0)
             .toList();
@@ -3935,7 +3950,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
 
         if (touche) {
           nbEleves++;
-          // Même nettoyage que le paiement normal.
           if (e.moisDebloque != null) {
             final String moisDeb = e.moisDebloque!;
             final double requisDeb = fs.getRequiredForMonthForEleve(e, moisDeb);
@@ -3950,8 +3964,9 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
         }
       }
 
-      // Sauvegarde AVANT toute impression : les paiements sont sécurisés.
       await fs.saveData();
+      unawaited(ParentSyncService.instance
+          .markDirtyMany(nouvelles.map((en) => en.key)));
 
       int nbImprimes = 0;
       if (imprimer) {
@@ -4007,9 +4022,6 @@ class _GrilleCahierScreenState extends State<GrilleCahierScreen> {
     }
   }
 
-  // --------------------------------------------------------------------------
-  // Interface
-  // --------------------------------------------------------------------------
   Widget _icone(String statut) {
     switch (statut) {
       case 'solde':

@@ -6,6 +6,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import '../frais_scolaires.dart';
 import '../models.dart';
+import '../utils/age_utils.dart';
 
 class StatLigne {
   final String cle;
@@ -94,6 +95,9 @@ class RegistreEleves {
   static String lireTelephone2(Eleve e) =>
       champ(e, ['Téléphone 2', 'Telephone 2']);
 
+  /// Âge calculé depuis la date de naissance ("12 ans"), ou '' si inconnu.
+  static String lireAge(Eleve e) => AgeUtils.libelle(e.dateNaissance);
+
   static String cleDe(String valeur) {
     final n = normaliser(valeur);
     return n.isEmpty ? cleVide : n;
@@ -147,6 +151,30 @@ class RegistreEleves {
       if (c != 0) return c;
       return a.libelle.toLowerCase().compareTo(b.libelle.toLowerCase());
     });
+    return liste;
+  }
+
+  /// Répartition par âge, triée du plus jeune au plus âgé.
+  /// Les élèves sans date de naissance valide sont comptés à part, en dernier.
+  static List<StatLigne> statistiquesAge(List<Eleve> eleves) {
+    final comptes = <int, int>{};
+    int sansAge = 0;
+    for (final e in eleves) {
+      final a = AgeUtils.calculerAge(e.dateNaissance);
+      if (a == null) {
+        sansAge++;
+      } else {
+        comptes[a] = (comptes[a] ?? 0) + 1;
+      }
+    }
+    final ages = comptes.keys.toList()..sort();
+    final liste = <StatLigne>[
+      for (final a in ages)
+        StatLigne('age_$a', AgeUtils.formaterAge(a), comptes[a] ?? 0),
+    ];
+    if (sansAge > 0) {
+      liste.add(StatLigne(cleVide, 'Âge non renseigné', sansAge));
+    }
     return liste;
   }
 
@@ -247,6 +275,7 @@ class RegistreEleves {
       'SEXE',
       'NOMS DES PARENTS\n(père / mère)',
       'DATE DE\nNAISSANCE',
+      'ÂGE',
       "PROVINCE\nD'ORIGINE",
       'ÉCOLE DE\nPROVENANCE',
       'NUMÉRO\nPERMANENT',
@@ -277,6 +306,7 @@ class RegistreEleves {
             _cell(lireSexe(e), centre: true),
             _cell(_deuxLignes(e.pereNom.trim(), e.mereNom.trim())),
             _cell(e.dateNaissance.trim(), centre: true),
+            _cell(lireAge(e), centre: true),
             _cell(lireProvince(e)),
             _cell(lireEcole(e)),
             _cell(lireMatricule(e)),
@@ -296,18 +326,19 @@ class RegistreEleves {
       defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
       columnWidths: const {
         0: pw.FlexColumnWidth(0.45),
-        1: pw.FlexColumnWidth(2.6),
+        1: pw.FlexColumnWidth(2.5),
         2: pw.FlexColumnWidth(0.5),
-        3: pw.FlexColumnWidth(2.0),
+        3: pw.FlexColumnWidth(1.9),
         4: pw.FlexColumnWidth(1.1),
-        5: pw.FlexColumnWidth(1.2),
-        6: pw.FlexColumnWidth(1.2),
-        7: pw.FlexColumnWidth(1.5),
-        8: pw.FlexColumnWidth(1.3),
+        5: pw.FlexColumnWidth(0.75),
+        6: pw.FlexColumnWidth(1.1),
+        7: pw.FlexColumnWidth(1.1),
+        8: pw.FlexColumnWidth(1.4),
         9: pw.FlexColumnWidth(1.2),
-        10: pw.FlexColumnWidth(1.7),
-        11: pw.FlexColumnWidth(1.1),
-        12: pw.FlexColumnWidth(1.2),
+        10: pw.FlexColumnWidth(1.1),
+        11: pw.FlexColumnWidth(1.6),
+        12: pw.FlexColumnWidth(1.1),
+        13: pw.FlexColumnWidth(1.2),
       },
       children: rows,
     );
@@ -494,6 +525,7 @@ class RegistreEleves {
         oddRowDecoration: const pw.BoxDecoration(color: PdfColors.indigo50),
       ),
       pw.SizedBox(height: 14),
+      ..._tableStat('Répartition par âge', statistiquesAge(eleves), total),
       ..._tableStat(
           'Répartition par religion', statistiques(eleves, lireReligion), total),
       ..._tableStat('Répartition par profession des parents',

@@ -24,6 +24,17 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
 
   bool isSending = false;
 
+  // ⚡ NOUVEAU — communiqué URGENT : les parents qui ne l'ont pas lu sont
+  // relancés par des notifications vibrantes jusqu'à la lecture.
+  bool urgent = false;
+
+  @override
+  void dispose() {
+    titleController.dispose();
+    messageController.dispose();
+    super.dispose();
+  }
+
   List<Eleve> get _allStudents => widget.fraisScolaires.currentData.eleves;
 
   List<Eleve> get _studentsForPicker {
@@ -94,17 +105,29 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Confirmer l'envoi"),
+        title: Text(urgent ? "Confirmer l'envoi URGENT" : "Confirmer l'envoi"),
         content: Text(
-          "Envoyer ce communiqué à environ $_estimatedRecipients parent(s) ?",
+          urgent
+              ? "Envoyer ce communiqué URGENT à environ "
+              "$_estimatedRecipients parent(s) ?\n\n"
+              "Les parents qui ne le lisent pas seront relancés par des "
+              "notifications vibrantes, de plus en plus insistantes, "
+              "jusqu'à ce qu'ils le lisent."
+              : "Envoyer ce communiqué à environ $_estimatedRecipients "
+              "parent(s) ?",
         ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text("Annuler")),
           ElevatedButton(
+            style: urgent
+                ? ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFC62828),
+                foregroundColor: Colors.white)
+                : null,
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("Envoyer"),
+            child: Text(urgent ? "Envoyer URGENT" : "Envoyer"),
           ),
         ],
       ),
@@ -119,6 +142,7 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
       classe:  selectedClasse,
       section: selectedSection,
       studentIds: selectedStudentIds.toList(),
+      urgent:  urgent,
     );
     if (!mounted) return;
     setState(() => isSending = false);
@@ -126,8 +150,12 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
     if (result['success'] == true) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content:
-          Text("✅ Communiqué envoyé à ${result['notified_count']} parent(s)"),
+          content: Text(
+            urgent
+                ? "✅ Communiqué URGENT envoyé à ${result['notified_count']} "
+                "parent(s) — relances automatiques jusqu'à la lecture"
+                : "✅ Communiqué envoyé à ${result['notified_count']} parent(s)",
+          ),
           backgroundColor: Colors.green,
         ),
       );
@@ -226,6 +254,43 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
     }
   }
 
+  // ⚡ NOUVEAU — carte de l'interrupteur « URGENT ».
+  Widget _buildUrgentSwitch() {
+    return Container(
+      decoration: BoxDecoration(
+        color: urgent ? const Color(0xFFFFEBEE) : Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: urgent ? const Color(0xFFC62828) : Colors.grey.shade300,
+          width: urgent ? 1.5 : 1,
+        ),
+      ),
+      child: SwitchListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+        activeColor: const Color(0xFFC62828),
+        secondary: Icon(
+          Icons.warning_amber_rounded,
+          color: urgent ? const Color(0xFFC62828) : Colors.grey,
+        ),
+        title: const Text(
+          "Communiqué URGENT",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        subtitle: Text(
+          urgent
+              ? "Les parents qui ne lisent pas ce message recevront des "
+              "notifications vibrantes répétées jusqu'à la lecture. "
+              "Vous verrez qui a lu dans « Messages envoyés »."
+              : "À activer pour une information importante (ex. fermeture "
+              "exceptionnelle de l'école).",
+          style: const TextStyle(fontSize: 12),
+        ),
+        value: urgent,
+        onChanged: isSending ? null : (v) => setState(() => urgent = v),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -255,6 +320,8 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
                 border: OutlineInputBorder(),
               ),
             ),
+            const SizedBox(height: 14),
+            _buildUrgentSwitch(),
             const SizedBox(height: 20),
             const Text("Destinataires",
                 style: TextStyle(fontWeight: FontWeight.bold)),
@@ -304,10 +371,17 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
                     height: 18,
                     child: CircularProgressIndicator(
                         strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.send),
-                label: Text(isSending ? "Envoi en cours..." : "Envoyer le communiqué"),
+                    : Icon(urgent ? Icons.warning_amber_rounded : Icons.send),
+                label: Text(
+                  isSending
+                      ? "Envoi en cours..."
+                      : (urgent
+                      ? "Envoyer le communiqué URGENT"
+                      : "Envoyer le communiqué"),
+                ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.indigo,
+                  backgroundColor:
+                  urgent ? const Color(0xFFC62828) : Colors.indigo,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),

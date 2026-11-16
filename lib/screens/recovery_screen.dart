@@ -102,7 +102,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         Uri.parse('$_serverUrl/school/verify_registration_id'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'registration_id': id}),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 40));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -146,7 +146,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         Uri.parse('$_serverUrl/school/get_info_by_reg_id'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'registration_id': regId}),
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 20));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -211,7 +211,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           'password':        password,
           'school_name':     _schoolName,
         }),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 40));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -262,11 +262,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   // FLUX 2 — Connexion avec code école + mot de passe
   // ====================================================================
   Future<void> _loginWithCodeAndPassword() async {
+    // ⚡ évite les doubles clics (Entrée + clic, ou clics répétés) qui
+    // lançaient plusieurs récupérations en même temps.
+    if (_isLoading) return;
+
     final code     = _sanitize(_codeController.text);
     final password = _passwordController.text.trim();
 
     if (code.isEmpty) {
       setState(() => _errorMsg = "Veuillez entrer le code de votre école.");
+      return;
+    }
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,40}$').hasMatch(code)) {
+      setState(() => _errorMsg =
+      "Code école invalide : utilisez uniquement des lettres, chiffres, "
+          "- et _ (sans espace).");
       return;
     }
     if (password.isEmpty) {
@@ -287,7 +297,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           'school_code': code,
           'password':    password,
         }),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 40));
 
       if (verifyResponse.statusCode == 200) {
         final vData = jsonDecode(verifyResponse.body);
@@ -337,6 +347,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         } else {
           setState(() => _errorMsg = "Mot de passe incorrect.");
         }
+      } else if (verifyResponse.statusCode == 401) {
+        // ⚡ CORRIGÉ — le serveur répond 401 pour un mauvais mot de passe :
+        // on affiche un message clair au lieu de « Erreur serveur (401) ».
+        setState(() => _errorMsg = "Mot de passe incorrect.");
       } else if (verifyResponse.statusCode == 404) {
         setState(() => _errorMsg =
         "Code école introuvable sur le serveur.\n"
@@ -363,9 +377,14 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
   Future<void> _restoreAllData(String code, String password) async {
     try {
+      // ⚡ CORRIGÉ — le mot de passe est envoyé dans l'en-tête
+      // X-Backup-Password (le serveur l'exige quand STRICT_AUTH est actif),
+      // et le délai est plus long (un serveur Render gratuit peut mettre
+      // du temps à se réveiller).
       final restoreResponse = await http.get(
         Uri.parse('$_serverUrl/restore?school_code=$code'),
-      ).timeout(const Duration(seconds: 20));
+        headers: {'X-Backup-Password': password},
+      ).timeout(const Duration(seconds: 60));
 
       if (restoreResponse.statusCode == 200) {
         final data       = jsonDecode(restoreResponse.body);
@@ -380,6 +399,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           final fraisScolaires = FraisScolaires();
           fraisScolaires.schoolCode = code;
           await fraisScolaires.loadData();
+          dernierAvertissementsFusion = <String>[];
           await fraisScolaires.mergeRestoredData(data);
           await fraisScolaires.saveData();
 
@@ -398,6 +418,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
           await _showReconnectedDialog(schoolName);
         }
+      } else if (restoreResponse.statusCode == 401) {
+        setState(() => _errorMsg = "Mot de passe incorrect.");
       } else if (restoreResponse.statusCode == 404) {
         setState(() => _errorMsg =
         "Aucune sauvegarde trouvée sur le serveur pour ce code.");
@@ -479,41 +501,77 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   }
 
   Future<void> _showReconnectedDialog(String schoolName) async {
+    // ⚡ NOUVEAU — avertissements éventuels de la fusion (collision d'ID...)
+    final List<String> avertissements =
+    List<String>.from(dernierAvertissementsFusion);
+
     await showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.cloud_done,
-                size: 64, color: Colors.green),
-            const SizedBox(height: 16),
-            const Text(
-              "Reconnexion réussie !",
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              schoolName,
-              style: const TextStyle(
-                fontSize: 16,
-                color: Colors.green,
-                fontWeight: FontWeight.w600,
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_done,
+                  size: 64, color: Colors.green),
+              const SizedBox(height: 16),
+              const Text(
+                "Reconnexion réussie !",
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
               ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              "Toutes vos données ont été récupérées\n"
-                  "depuis le serveur central EduPay.",
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey, fontSize: 13),
-            ),
-          ],
+              const SizedBox(height: 8),
+              Text(
+                schoolName,
+                style: const TextStyle(
+                  fontSize: 16,
+                  color: Colors.green,
+                  fontWeight: FontWeight.w600,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                "Toutes vos données ont été récupérées\n"
+                    "depuis le serveur central EduPay.",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              if (avertissements.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "À vérifier :",
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                            color: Colors.orange),
+                      ),
+                      const SizedBox(height: 4),
+                      ...avertissements.map((a) => Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: Text("• $a",
+                            style: const TextStyle(fontSize: 12)),
+                      )),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
         actions: [
           SizedBox(
@@ -582,6 +640,19 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               if (_mode == 'new_id')   _buildNewIdStep(),
               if (_mode == 'first_setup') _buildFirstSetupStep(),
               if (_mode == 'login')    _buildLoginStep(),
+
+              // ⚡ NOUVEAU — message d'attente pendant le chargement : le
+              // serveur gratuit peut mettre jusqu'à une minute à se réveiller.
+              if (_isLoading) ...[
+                const SizedBox(height: 16),
+                const Text(
+                  "⏳ Connexion au serveur en cours... Cela peut prendre "
+                      "jusqu'à une minute si le serveur était endormi. "
+                      "Ne cliquez pas plusieurs fois.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
 
               if (_errorMsg != null) ...[
                 const SizedBox(height: 16),

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
@@ -17,6 +18,10 @@ import 'autres_frais_screen.dart';
 // ⚡ NOUVEAU — Écran dédié à la génération de rapport PDF (remplace
 // l'ancienne boîte de dialogue) : filtres + gestion des signataires.
 import 'report_generation_screen.dart';
+// ⚡ NOUVEAU — Messagerie école ⇄ parents (confirmation de lecture +
+// réception des messages des parents)
+import 'messages_envoyes_screen.dart';
+import 'messages_parents_screen.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -35,11 +40,27 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   // ⚡ NOUVEAU — état du bouton SOS de sauvegarde rapide
   bool _sosBackupEnCours = false;
 
+  // ⚡ NOUVEAU — nombre de messages de parents non lus (pastille rouge)
+  int _parentUnread = 0;
+  bool _refreshingUnread = false;
+  Timer? _unreadTimer;
+
   @override
   void initState() {
     super.initState();
     fraisScolaires = FraisScolaires();
     _loadData();
+    // Actualisation automatique de la pastille « messages des parents ».
+    _unreadTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted || !_initialLoadDone) return;
+      _refreshParentUnread();
+    });
+  }
+
+  @override
+  void dispose() {
+    _unreadTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -61,6 +82,34 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
 
     _initialLoadDone = true;
     if (mounted) setState(() {});
+    _refreshParentUnread();
+  }
+
+  // ⚡ NOUVEAU — interroge le serveur pour la pastille rouge.
+  Future<void> _refreshParentUnread() async {
+    if (_refreshingUnread) return;
+    final code = fraisScolaires.schoolCode;
+    if (code == null || code.isEmpty) return;
+    _refreshingUnread = true;
+    try {
+      final n = await fraisScolaires.getParentUnreadTotal();
+      if (mounted && n != _parentUnread) {
+        setState(() => _parentUnread = n);
+      }
+    } catch (_) {
+      // hors-ligne : on garde la dernière valeur
+    } finally {
+      _refreshingUnread = false;
+    }
+  }
+
+  // ⚡ NOUVEAU — ouvre un écran puis rafraîchit la pastille au retour.
+  Future<void> _openAndRefresh(Widget screen) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => screen),
+    );
+    if (mounted) _refreshParentUnread();
   }
 
   // ============================================================
@@ -441,13 +490,28 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                 _buildCard(
                   Icons.rule_folder,
                   "Discipline",
-                      () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => DisciplineRegistreScreen(
-                          fraisScolaires: fraisScolaires),
-                    ),
+                      () => _openAndRefresh(
+                    DisciplineRegistreScreen(fraisScolaires: fraisScolaires),
                   ),
+                ),
+                // ⚡ NOUVEAU — tout ce que l'école a envoyé aux parents,
+                // avec la confirmation de lecture (lu à 14:32, pas lu...).
+                _buildCard(
+                  Icons.mark_email_read,
+                  "Messages envoyés",
+                      () => _openAndRefresh(
+                    MessagesEnvoyesScreen(fraisScolaires: fraisScolaires),
+                  ),
+                ),
+                // ⚡ NOUVEAU — messages écrits par les parents + réponses,
+                // avec la pastille rouge des messages non lus.
+                _buildCard(
+                  Icons.forum,
+                  "Messages des parents",
+                      () => _openAndRefresh(
+                    MessagesParentsScreen(fraisScolaires: fraisScolaires),
+                  ),
+                  badge: _parentUnread,
                 ),
               ],
             ),
@@ -457,29 +521,61 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     );
   }
 
-  Widget _buildCard(IconData icon, String label, VoidCallback onTap) {
+  Widget _buildCard(IconData icon, String label, VoidCallback onTap,
+      {int badge = 0}) {
     return GestureDetector(
       onTap: onTap,
-      child: Card(
-        elevation: 6,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 50, color: Colors.indigo),
-            const SizedBox(height: 12),
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: Card(
+              elevation: 6,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 50, color: Colors.indigo),
+                  const SizedBox(height: 12),
+                  Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
               ),
             ),
-          ],
-        ),
+          ),
+          if (badge > 0)
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Container(
+                constraints:
+                const BoxConstraints(minWidth: 26, minHeight: 26),
+                padding: const EdgeInsets.symmetric(horizontal: 7),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFC62828),
+                  borderRadius: BorderRadius.circular(13),
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+                child: Text(
+                  badge > 99 ? '99+' : '$badge',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

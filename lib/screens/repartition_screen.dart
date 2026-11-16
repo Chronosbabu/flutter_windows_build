@@ -1,8 +1,11 @@
+import 'dart:collection';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
 import '../app_state.dart';
+import '../models.dart';
 
 class RepartitionScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -15,15 +18,8 @@ class RepartitionScreen extends StatefulWidget {
 class _RepartitionScreenState extends State<RepartitionScreen> {
   FraisScolaires get fraisScolaires => widget.fraisScolaires;
 
-  // Période sélectionnée pour la répartition globale par
-  // administration : 'today', 'month' ou 'year'.
   String _periodeGlobale = 'year';
 
-  // ==========================================================================
-  // VÉRIFICATION MOT DE PASSE (même principe que Paramètres)
-  // Sécurise toute sortie de caisse (ajout d'une dépense) et toute
-  // suppression d'historique de dépenses.
-  // ==========================================================================
   Future<bool> _verifyBackupPassword() async {
     final appState = Provider.of<AppState>(context, listen: false);
     if (appState.backupPassword == null) {
@@ -76,9 +72,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     return isCorrect ?? false;
   }
 
-  // ==========================================================================
-  // Libellés / couleurs des types de dépenses
-  // ==========================================================================
   String _labelPortee(String portee) {
     switch (portee) {
       case kDepenseIndependante:
@@ -103,24 +96,11 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     }
   }
 
-  // ⚡ NOUVEAU — formatte une date (sans l'heure) au format jj/mm/aaaa,
-  // utilisé pour l'affichage du sélecteur de date dans le formulaire
-  // d'ajout d'une dépense.
   String _formatDateCourte(DateTime d) {
     String two(int n) => n.toString().padLeft(2, '0');
     return "${two(d.day)}/${two(d.month)}/${d.year}";
   }
 
-  // ==========================================================================
-  // Dialogue : ajouter une nouvelle dépense
-  //   1. Type : Globale / Indépendante / Mixte
-  //   2. Section(s) concernée(s) (+ classes, facultatif)
-  //   3. Rubrique (administration) sur laquelle l'argent sort
-  //   4. Motif + montant
-  //   5. Date (facultatif — aujourd'hui par défaut)
-  // SÉCURISÉ — demande le mot de passe de sauvegarde avant d'ouvrir le
-  // formulaire.
-  // ==========================================================================
   Future<void> _startAddDepense() async {
     if (!await _verifyBackupPassword()) return;
     await _openAddDepenseDialog();
@@ -135,10 +115,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final Set<String> sectionsMixte = {};
     final Set<String> classesSel = {};
     String? rubrique;
-    // ⚡ NOUVEAU — date optionnelle de la dépense. Si non renseignée
-    // (null), la date d'aujourd'hui sera utilisée automatiquement par
-    // `addDepense`. Utile lorsque le caissier enregistre aujourd'hui
-    // une dépense faite un autre jour (ex. hier).
     DateTime? dateSelectionnee;
 
     final sectionsDisponibles = fraisScolaires.config.sections;
@@ -184,10 +160,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             final classesOptions = classesProposees();
             final solde = soldeDisponible();
 
-            // ⚡ Détermine le numéro d'étape suivant, en fonction de la
-            // présence ou non des sections/classes (portée globale ou
-            // non), pour que la numérotation de la section "Date"
-            // s'enchaîne correctement avec "Motif et montant".
             final int numeroDate = portee == kDepenseGlobale ? 4 : 5;
 
             return AlertDialog(
@@ -254,7 +226,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                             fontSize: 11, color: Colors.black54),
                       ),
 
-                      // ---- Section(s) -----------------------------------
                       if (portee == kDepenseIndependante) ...[
                         const SizedBox(height: 14),
                         const Text("2. Section concernée",
@@ -306,7 +277,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                         ),
                       ],
 
-                      // ---- Classes (facultatif) -------------------------
                       if (portee != kDepenseGlobale &&
                           classesOptions.isNotEmpty) ...[
                         const SizedBox(height: 14),
@@ -342,7 +312,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                         ),
                       ],
 
-                      // ---- Rubrique -------------------------------------
                       const SizedBox(height: 14),
                       Text(
                           portee == kDepenseGlobale
@@ -400,7 +369,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                         ),
                       ],
 
-                      // ---- Motif + montant ------------------------------
                       const SizedBox(height: 14),
                       Text(
                           portee == kDepenseGlobale
@@ -441,11 +409,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                         ),
                       ],
 
-                      // ---- Date (facultatif) -----------------------------
-                      // ⚡ NOUVEAU — permet de préciser la date réelle de
-                      // la dépense si elle diffère du jour de saisie.
-                      // Laissé vide, le système prend automatiquement la
-                      // date d'aujourd'hui, exactement comme avant.
                       const SizedBox(height: 14),
                       Text(
                         "$numeroDate. Date (facultatif)",
@@ -569,7 +532,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                       return;
                     }
 
-                    // Avertissement si la sortie dépasse le solde disponible.
                     final soldeActuel = soldeDisponible();
                     if (soldeActuel != null && montant > soldeActuel) {
                       final continuer = await showDialog<bool>(
@@ -614,9 +576,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                       sections: sectionsFinales,
                       classes: classesSel.toList(),
                       rubrique: r,
-                      // ⚡ NOUVEAU — date optionnelle ; si l'utilisateur
-                      // n'a rien choisi, `addDepense` utilisera
-                      // automatiquement la date d'aujourd'hui.
                       date: dateSelectionnee,
                     );
 
@@ -633,10 +592,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     if (mounted) setState(() {});
   }
 
-  // ==========================================================================
-  // Confirmation de suppression d'une dépense (erreur de saisie, etc.)
-  // SÉCURISÉ — demande le mot de passe de sauvegarde après confirmation.
-  // ==========================================================================
   Future<bool> _confirmDeleteDepense(Depense depense) async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -666,16 +621,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     return true;
   }
 
-  // ==========================================================================
-  // ⚡ NOUVEAU — Modifier la date d'une dépense déjà enregistrée.
-  // Utile lorsque le caissier a oublié d'enregistrer une sortie de
-  // caisse le jour même et le fait plus tard : il peut corriger la date
-  // pour qu'elle reflète le jour réel de la dépense. La dépense
-  // apparaîtra alors dans le rapport journalier/mensuel/annuel
-  // correspondant à sa NOUVELLE date.
-  // SÉCURISÉ — demande le mot de passe de sauvegarde après le choix de
-  // la nouvelle date.
-  // ==========================================================================
   Future<bool> _editDepenseDate(Depense depense) async {
     final DateTime? picked = await showDatePicker(
       context: context,
@@ -688,9 +633,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     );
     if (picked == null) return false;
 
-    // On conserve l'heure d'origine et on ne change que le jour, le mois
-    // et l'année, pour rester cohérent avec le format "date + heure"
-    // utilisé dans dateFormatee.
     final newDate = DateTime(
       picked.year,
       picked.month,
@@ -704,10 +646,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     return true;
   }
 
-  // ==========================================================================
-  // Vider tout l'historique des dépenses de l'année en cours.
-  // Action irréversible : double protection (confirmation + mot de passe).
-  // ==========================================================================
   Future<bool> _confirmClearAllDepenses(int count) async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -745,9 +683,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     return true;
   }
 
-  // ==========================================================================
-  // Dialogue : historique complet des dépenses de l'année (filtrable par type)
-  // ==========================================================================
   void _openHistoriqueDialog() {
     String filtre = 'all';
     showDialog(
@@ -847,9 +782,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                                       color: couleur,
                                       fontWeight: FontWeight.bold),
                                 ),
-                                // ⚡ NOUVEAU — bouton pour modifier la
-                                // date de cette dépense, à côté du
-                                // bouton de suppression déjà existant.
                                 Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
@@ -919,10 +851,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     });
   }
 
-  // ==========================================================================
-  // Ouvre l'écran "Autres Répartitions" (par Option et par Section
-  // pédagogique).
-  // ==========================================================================
   void _openAutresRepartitions() {
     Navigator.push(
       context,
@@ -933,14 +861,20 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     );
   }
 
-  // ==========================================================================
-  // Ouvre l'écran "Courbe d'Évolution".
-  // ==========================================================================
   void _openEvolution() {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => _EvolutionScreen(fraisScolaires: fraisScolaires),
+      ),
+    );
+  }
+
+  void _openPreuves() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PreuvesPaiementScreen(fraisScolaires: fraisScolaires),
       ),
     );
   }
@@ -1036,8 +970,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final double depMixtes =
     fraisScolaires.getTotalDepensesParPortee(kDepenseMixte);
 
-    // Statistiques (collecté, dépenses par rubrique, reste) pour la période
-    // choisie dans la répartition globale par administration.
     final stats = fraisScolaires.computeDepensesStats(_periodeGlobale);
     final double collectePeriode = stats.totalCollecte;
     final double depensesPeriode = stats.totalDepenses;
@@ -1057,9 +989,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ---------------------------------------------------------------
-            // Carte Total (enrichie avec dépenses + solde net)
-            // ---------------------------------------------------------------
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -1107,9 +1036,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
 
             const SizedBox(height: 16),
 
-            // ---------------------------------------------------------------
-            // Boutons Dépenses / Historique
-            // ---------------------------------------------------------------
             Row(
               children: [
                 Expanded(
@@ -1165,12 +1091,23 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _openPreuves,
+                icon: const Icon(Icons.fact_check),
+                label: const Text("Preuves de Paiement (mois par mois)"),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  foregroundColor: Colors.deepPurple,
+                  side: const BorderSide(color: Colors.deepPurple),
+                ),
+              ),
+            ),
 
             const SizedBox(height: 20),
 
-            // ---------------------------------------------------------------
-            // Dépenses par catégorie (année en cours)
-            // ---------------------------------------------------------------
             if (totalDepenses > 0) ...[
               const Text("Dépenses par catégorie (Cette Année)",
                   style:
@@ -1197,9 +1134,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               const SizedBox(height: 16),
             ],
 
-            // ---------------------------------------------------------------
-            // Aperçu des dernières dépenses (max 3, sans surcharger l'écran)
-            // ---------------------------------------------------------------
             if (depensesApercu.isNotEmpty) ...[
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1234,9 +1168,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               const Divider(),
             ],
 
-            // ---------------------------------------------------------------
-            // Montant par classe (annuel, inchangé)
-            // ---------------------------------------------------------------
             const Text("Montant par Classe (Cette Année)",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ...totalsByClass.entries.map((entry) => ListTile(
@@ -1245,11 +1176,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
             )),
             const Divider(),
 
-            // ---------------------------------------------------------------
-            // Répartition GLOBALE aux administrations, avec choix de la
-            // période. Le reste de chaque administration tient compte des
-            // dépenses imputées à sa rubrique.
-            // ---------------------------------------------------------------
             const Text("Répartition Globale aux Administrations",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
@@ -1356,16 +1282,6 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
   }
 }
 
-// ==============================================================================
-// ÉCRAN "AUTRES RÉPARTITIONS"
-// Répartition par Option (ex: Primaire / Secondaire / Maternelle) et, à
-// l'intérieur d'une option, par Section pédagogique (ex: Électricité,
-// Commerciale...) ou "Éducation de Base" pour les classes sans section
-// (7ème/8ème dans le système éducatif de la RDC).
-// Sélecteur de période (Aujourd'hui / Ce mois / Cette année). Le reste de
-// chaque administration déduit les dépenses indépendantes et mixtes
-// rattachées à la section.
-// ==============================================================================
 class _AutresRepartitionsScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const _AutresRepartitionsScreen({required this.fraisScolaires});
@@ -1536,7 +1452,6 @@ class _AutresRepartitionsScreenState
     final sousSections =
     fraisScolaires.getSousSectionsForOptionPeriod(option, _periode);
 
-    // Statistiques de dépenses rattachées à cette section pour la période.
     final stats = fraisScolaires.computeDepensesStats(
       _periode,
       sectionFilter: option,
@@ -1692,12 +1607,6 @@ class _AutresRepartitionsScreenState
   }
 }
 
-// ==============================================================================
-// ÉCRAN "COURBE D'ÉVOLUTION"
-// Courbe mensuelle (Septembre → Juin) des montants collectés, comme un
-// graphique en ligne Excel classique. Filtrable par Option, Section
-// pédagogique (ou "Éducation de Base" pour 7ème/8ème) et Classe.
-// ==============================================================================
 class _EvolutionScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const _EvolutionScreen({required this.fraisScolaires});
@@ -1707,9 +1616,9 @@ class _EvolutionScreen extends StatefulWidget {
 }
 
 class _EvolutionScreenState extends State<_EvolutionScreen> {
-  String? selectedOption;      // null = toute l'école
-  String? selectedSousSection; // null = toutes les sections
-  String? selectedClasse;      // null = toutes les classes
+  String? selectedOption;
+  String? selectedSousSection;
+  String? selectedClasse;
   bool cumulatif = false;
 
   static const List<String> _moisCourts = [
@@ -1788,9 +1697,6 @@ class _EvolutionScreenState extends State<_EvolutionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ------------------------------------------------------------
-            // Filtres
-            // ------------------------------------------------------------
             const Text("Filtrer la courbe",
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
@@ -1867,9 +1773,6 @@ class _EvolutionScreenState extends State<_EvolutionScreen> {
 
             const Divider(height: 32),
 
-            // ------------------------------------------------------------
-            // Résumé
-            // ------------------------------------------------------------
             Text(
               scopeLabel,
               style: const TextStyle(
@@ -1882,9 +1785,6 @@ class _EvolutionScreenState extends State<_EvolutionScreen> {
             ),
             const SizedBox(height: 20),
 
-            // ------------------------------------------------------------
-            // Courbe
-            // ------------------------------------------------------------
             if (total == 0)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 40),
@@ -2000,6 +1900,918 @@ class _EvolutionScreenState extends State<_EvolutionScreen> {
                   ),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PaiementPreuve {
+  final Eleve eleve;
+  final Map<String, dynamic> transaction;
+  final bool archive;
+
+  const _PaiementPreuve({
+    required this.eleve,
+    required this.transaction,
+    required this.archive,
+  });
+
+  String get date => transaction['date']?.toString().trim() ?? '';
+
+  double get montant => (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+
+  String get nomComplet =>
+      '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+}
+
+class _JourPreuve {
+  final String date;
+  final List<_PaiementPreuve> paiements;
+
+  const _JourPreuve({required this.date, required this.paiements});
+
+  double get total => paiements.fold(0.0, (s, p) => s + p.montant);
+
+  int get nbEleves => paiements.map((p) => p.eleve.id).toSet().length;
+}
+
+class _EcartEleve {
+  final Eleve eleve;
+  final bool archive;
+  final double paye;
+  final double justifie;
+
+  const _EcartEleve({
+    required this.eleve,
+    required this.archive,
+    required this.paye,
+    required this.justifie,
+  });
+
+  double get difference => paye - justifie;
+
+  String get nomComplet =>
+      '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+}
+
+class _MoisPreuve {
+  final String mois;
+  final double paye;
+  final double justifie;
+  final double attendu;
+  final double reste;
+  final List<_JourPreuve> jours;
+  final List<_EcartEleve> ecarts;
+
+  const _MoisPreuve({
+    required this.mois,
+    required this.paye,
+    required this.justifie,
+    required this.attendu,
+    required this.reste,
+    required this.jours,
+    required this.ecarts,
+  });
+
+  int get nbPaiements => jours.fold(0, (s, j) => s + j.paiements.length);
+
+  int get nbJours => jours.length;
+
+  double get sansDetail => paye - justifie;
+
+  bool get aEcart => sansDetail.abs() > 0.5;
+}
+
+class _PreuvesCalcul {
+  static final RegExp _iso = RegExp(r'^\d{4}-\d{2}-\d{2}$');
+
+  static bool dateValide(String d) => _iso.hasMatch(d);
+
+  static String _deux(int n) => n.toString().padLeft(2, '0');
+
+  static String affDate(String iso) {
+    if (iso.isEmpty) return 'Date inconnue';
+    if (dateValide(iso)) {
+      final p = iso.split('-');
+      return '${p[2]}/${p[1]}/${p[0]}';
+    }
+    return iso;
+  }
+
+  static String affDateHeure(DateTime d) =>
+      '${_deux(d.day)}/${_deux(d.month)}/${d.year} ${_deux(d.hour)}:${_deux(d.minute)}';
+
+  static String affDateHeureIso(String? iso) {
+    final d = DateTime.tryParse(iso ?? '');
+    if (d == null) return iso ?? '';
+    return affDateHeure(d);
+  }
+
+  static List<MapEntry<Eleve, bool>> eleves(
+      FraisScolaires fs, {
+        String? section,
+        String? classe,
+        required bool archives,
+      }) {
+    final result = <MapEntry<Eleve, bool>>[];
+    void ajouter(Eleve e, bool arch) {
+      if (section != null && e.section != section) return;
+      if (classe != null && e.classe != classe) return;
+      result.add(MapEntry(e, arch));
+    }
+
+    for (final e in fs.currentData.eleves) {
+      ajouter(e, false);
+    }
+    if (archives) {
+      for (final e in fs.elevesSupprimesData.eleves) {
+        ajouter(e, true);
+      }
+    }
+    return result;
+  }
+
+  static List<_MoisPreuve> calculer(
+      FraisScolaires fs, List<MapEntry<Eleve, bool>> eleves) {
+    final result = <_MoisPreuve>[];
+    for (final mois in fs.months) {
+      double paye = 0;
+      double justifie = 0;
+      double attendu = 0;
+      double reste = 0;
+      final Map<String, List<_PaiementPreuve>> parDate = {};
+      final List<_EcartEleve> ecarts = [];
+
+      for (final entry in eleves) {
+        final Eleve e = entry.key;
+        final bool archive = entry.value;
+        final double payeEleve = e.paid[mois] ?? 0.0;
+        final double requis = fs.getRequiredForMonthForEleve(e, mois);
+        double justifieEleve = 0;
+
+        for (final t in e.transactions) {
+          if (t['mois']?.toString() != mois) continue;
+          final p = _PaiementPreuve(eleve: e, transaction: t, archive: archive);
+          justifieEleve += p.montant;
+          parDate.putIfAbsent(p.date, () => <_PaiementPreuve>[]).add(p);
+        }
+
+        paye += payeEleve;
+        justifie += justifieEleve;
+        attendu += requis;
+        final double manque = requis - payeEleve;
+        if (manque > 0) reste += manque;
+
+        if ((payeEleve - justifieEleve).abs() > 0.5) {
+          ecarts.add(_EcartEleve(
+            eleve: e,
+            archive: archive,
+            paye: payeEleve,
+            justifie: justifieEleve,
+          ));
+        }
+      }
+
+      final dates = parDate.keys.toList();
+      dates.sort((a, b) {
+        final va = dateValide(a);
+        final vb = dateValide(b);
+        if (va && !vb) return -1;
+        if (!va && vb) return 1;
+        return a.compareTo(b);
+      });
+
+      final jours = <_JourPreuve>[];
+      for (final d in dates) {
+        final liste = parDate[d]!;
+        liste.sort((a, b) {
+          final c = a.eleve.classe.compareTo(b.eleve.classe);
+          if (c != 0) return c;
+          return a.nomComplet.toLowerCase().compareTo(b.nomComplet.toLowerCase());
+        });
+        jours.add(_JourPreuve(date: d, paiements: liste));
+      }
+
+      ecarts.sort((a, b) =>
+          a.nomComplet.toLowerCase().compareTo(b.nomComplet.toLowerCase()));
+
+      result.add(_MoisPreuve(
+        mois: mois,
+        paye: paye,
+        justifie: justifie,
+        attendu: attendu,
+        reste: reste,
+        jours: jours,
+        ecarts: ecarts,
+      ));
+    }
+    return result;
+  }
+
+  static List<_PaiementPreuve> moisInconnus(
+      FraisScolaires fs, List<MapEntry<Eleve, bool>> eleves) {
+    final result = <_PaiementPreuve>[];
+    for (final entry in eleves) {
+      for (final t in entry.key.transactions) {
+        final String m = t['mois']?.toString() ?? '';
+        if (!fs.months.contains(m)) {
+          result.add(_PaiementPreuve(
+              eleve: entry.key, transaction: t, archive: entry.value));
+        }
+      }
+    }
+    return result;
+  }
+
+  static List<String> notes(_PaiementPreuve p) {
+    final t = p.transaction;
+    final result = <String>[];
+    if (p.archive) result.add('Élève supprimé (archivé)');
+    if (t['saisieGroupee'] == true) {
+      result.add('Ancien paiement du cahier (saisie groupée, lot ${t['lotSaisie'] ?? ''})');
+    } else if (t['from_parent'] == true) {
+      result.add('Paiement mobile (${t['network'] ?? 'Mobile Money'})');
+    } else if (t['receiptConfirmed'] == true) {
+      result.add('Reçu imprimé');
+    } else {
+      result.add('Reçu non imprimé ou en attente');
+    }
+    final String dateOriginale = t['dateOriginale']?.toString() ?? '';
+    if (dateOriginale.isNotEmpty) {
+      final String quand = t['dateModifieeLe']?.toString() ?? '';
+      result.add('Date corrigée : ancienne date ${affDate(dateOriginale)}'
+          '${quand.isNotEmpty ? ' (corrigée le ${affDateHeureIso(quand)})' : ''}');
+    }
+    final String modifiePar = t['modifiePar']?.toString() ?? '';
+    if (modifiePar.isNotEmpty) {
+      final String le = t['modifieLe']?.toString() ?? '';
+      result.add('Montant modifié par $modifiePar'
+          '${le.isNotEmpty ? ' le ${affDate(le)}' : ''}');
+    }
+    if (t['excedent'] == true) {
+      result.add('Excédent placé sur le dernier mois');
+    }
+    if (t['moisDebloque'] == true) {
+      result.add('Mois déverrouillé');
+    }
+    final String id = t['id']?.toString() ?? '';
+    if (id.isNotEmpty) result.add('Réf : $id');
+    return result;
+  }
+}
+
+class _PreuvesTexte {
+  static void _blocMois(StringBuffer b, _MoisPreuve m) {
+    b.writeln('=== ${m.mois.toUpperCase()} ===');
+    b.writeln('Total payé : ${formatMontant(m.paye)} FC');
+    b.writeln('Somme des paiements datés : ${formatMontant(m.justifie)} FC');
+    if (m.aEcart) {
+      b.writeln('Écart (montant sans détail de date) : '
+          '${formatMontant(m.sansDetail)} FC');
+    }
+    b.writeln('Nombre de paiements : ${m.nbPaiements} sur ${m.nbJours} jour(s)');
+    for (final j in m.jours) {
+      b.writeln('');
+      b.writeln('${_PreuvesCalcul.affDate(j.date)} — '
+          '${j.paiements.length} paiement(s) — ${formatMontant(j.total)} FC');
+      for (final p in j.paiements) {
+        b.writeln('  • ${p.nomComplet} (${p.eleve.classe}, ${p.eleve.section}) : '
+            '${formatMontant(p.montant)} FC');
+        for (final n in _PreuvesCalcul.notes(p)) {
+          b.writeln('      - $n');
+        }
+      }
+    }
+    if (m.ecarts.isNotEmpty) {
+      b.writeln('');
+      b.writeln('Élèves dont le montant du mois n\'a pas le même détail :');
+      for (final e in m.ecarts) {
+        b.writeln('  • ${e.nomComplet} (${e.eleve.classe}) : enregistré '
+            '${formatMontant(e.paye)} FC, paiements datés '
+            '${formatMontant(e.justifie)} FC, écart '
+            '${formatMontant(e.difference)} FC');
+      }
+    }
+    b.writeln('');
+  }
+
+  static void _entete(StringBuffer b, FraisScolaires fs, String titre,
+      String portee, bool archives) {
+    b.writeln(titre);
+    b.writeln(fs.config.schoolName);
+    b.writeln('Année scolaire : ${fs.currentYear}');
+    b.writeln('Portée : $portee');
+    b.writeln(archives
+        ? 'Élèves supprimés (archivés) : inclus'
+        : 'Élèves supprimés (archivés) : non inclus');
+    b.writeln('Généré le ${_PreuvesCalcul.affDateHeure(DateTime.now())}');
+    b.writeln('');
+  }
+
+  static String mois(FraisScolaires fs, String portee, bool archives,
+      _MoisPreuve m) {
+    final b = StringBuffer();
+    _entete(b, fs, 'PREUVES DE PAIEMENT — ${m.mois}', portee, archives);
+    _blocMois(b, m);
+    return b.toString();
+  }
+
+  static String annee(FraisScolaires fs, String portee, bool archives,
+      List<_MoisPreuve> liste) {
+    final b = StringBuffer();
+    _entete(b, fs, 'PREUVES DE PAIEMENT — TOUS LES MOIS', portee, archives);
+    double total = 0;
+    for (final m in liste) {
+      total += m.paye;
+    }
+    b.writeln('Total payé sur l\'année : ${formatMontant(total)} FC');
+    b.writeln('');
+    for (final m in liste) {
+      _blocMois(b, m);
+    }
+    return b.toString();
+  }
+}
+
+class _PreuvesPaiementScreen extends StatefulWidget {
+  final FraisScolaires fraisScolaires;
+  const _PreuvesPaiementScreen({required this.fraisScolaires});
+
+  @override
+  State<_PreuvesPaiementScreen> createState() =>
+      _PreuvesPaiementScreenState();
+}
+
+class _PreuvesPaiementScreenState extends State<_PreuvesPaiementScreen> {
+  String? _section;
+  String? _classe;
+  bool _archives = true;
+
+  FraisScolaires get fs => widget.fraisScolaires;
+
+  String get _portee {
+    if (_section == null && _classe == null) return "Toute l'école";
+    final parts = <String>[];
+    if (_section != null) parts.add("Section : $_section");
+    if (_classe != null) parts.add("Classe : $_classe");
+    return parts.join(' — ');
+  }
+
+  List<String> _sectionsDisponibles() {
+    final set = LinkedHashSet<String>.from(fs.config.sections);
+    for (final e in fs.currentData.eleves) {
+      if (e.section.trim().isNotEmpty) set.add(e.section);
+    }
+    if (_archives) {
+      for (final e in fs.elevesSupprimesData.eleves) {
+        if (e.section.trim().isNotEmpty) set.add(e.section);
+      }
+    }
+    return set.toList();
+  }
+
+  List<String> _classesDisponibles() {
+    final set = LinkedHashSet<String>();
+    set.addAll(_section != null
+        ? fs.getAllDisplayClassesForSection(_section!)
+        : fs.getAllDisplayClasses());
+    final tous = <Eleve>[
+      ...fs.currentData.eleves,
+      if (_archives) ...fs.elevesSupprimesData.eleves,
+    ];
+    for (final e in tous) {
+      if (_section != null && e.section != _section) continue;
+      if (e.classe.trim().isNotEmpty) set.add(e.classe);
+    }
+    return set.toList();
+  }
+
+  void _copier(String texte, String message) {
+    Clipboard.setData(ClipboardData(text: texte));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.green),
+    );
+  }
+
+  Widget _ligneResume(String label, double valeur, Color couleur,
+      {bool gras = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: gras ? FontWeight.bold : FontWeight.normal)),
+          ),
+          Text("${formatMontant(valeur)} FC",
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: couleur)),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sections = _sectionsDisponibles();
+    if (_section != null && !sections.contains(_section)) {
+      sections.add(_section!);
+    }
+    final classes = _classesDisponibles();
+    if (_classe != null && !classes.contains(_classe)) {
+      classes.add(_classe!);
+    }
+
+    final eleves = _PreuvesCalcul.eleves(
+      fs,
+      section: _section,
+      classe: _classe,
+      archives: _archives,
+    );
+    final liste = _PreuvesCalcul.calculer(fs, eleves);
+    final inconnus = _PreuvesCalcul.moisInconnus(fs, eleves);
+
+    double totalPaye = 0;
+    double totalJustifie = 0;
+    double totalAttendu = 0;
+    double totalReste = 0;
+    for (final m in liste) {
+      totalPaye += m.paye;
+      totalJustifie += m.justifie;
+      totalAttendu += m.attendu;
+      totalReste += m.reste;
+    }
+    final double totalSansDetail = totalPaye - totalJustifie;
+    final String? moisCourant = fs.currentSchoolMonthName;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Preuves de Paiement"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.copy_all),
+            tooltip: "Copier le relevé de tous les mois",
+            onPressed: () => _copier(
+              _PreuvesTexte.annee(fs, _portee, _archives, liste),
+              "Relevé de tous les mois copié. Vous pouvez le coller dans "
+                  "un message ou un document.",
+            ),
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.deepPurple.withAlpha(15),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                "Choisissez toute l'école, une section ou une classe. "
+                    "Appuyez ensuite sur un mois pour voir chaque jour où "
+                    "l'argent est entré, avec le nom de chaque élève, le "
+                    "montant et la référence du paiement.",
+                style: TextStyle(fontSize: 12, color: Colors.deepPurple),
+              ),
+            ),
+            const SizedBox(height: 14),
+            DropdownButtonFormField<String?>(
+              value: _section,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: "Section",
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: [
+                const DropdownMenuItem<String?>(
+                    value: null, child: Text("Toutes les sections")),
+                ...sections.map((s) =>
+                    DropdownMenuItem<String?>(value: s, child: Text(s))),
+              ],
+              onChanged: (v) {
+                setState(() {
+                  _section = v;
+                  if (_classe != null &&
+                      !_classesDisponibles().contains(_classe)) {
+                    _classe = null;
+                  }
+                });
+              },
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String?>(
+              value: _classe,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: "Classe",
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: [
+                const DropdownMenuItem<String?>(
+                    value: null, child: Text("Toutes les classes")),
+                ...classes.map((c) =>
+                    DropdownMenuItem<String?>(value: c, child: Text(c))),
+              ],
+              onChanged: (v) => setState(() => _classe = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _archives,
+              onChanged: (v) {
+                setState(() {
+                  _archives = v;
+                  if (_section != null &&
+                      !_sectionsDisponibles().contains(_section)) {
+                    _section = null;
+                  }
+                  if (_classe != null &&
+                      !_classesDisponibles().contains(_classe)) {
+                    _classe = null;
+                  }
+                });
+              },
+              title: const Text("Inclure les élèves supprimés (archivés)",
+                  style: TextStyle(fontSize: 13)),
+              subtitle: const Text(
+                "Les totaux de l'application les comptent aussi. Gardez cette "
+                    "option activée pour retrouver exactement les mêmes totaux.",
+                style: TextStyle(fontSize: 11),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Card(
+              color: Colors.deepPurple.withAlpha(15),
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "$_portee — ${eleves.length} élève(s)",
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    _ligneResume("Total payé sur l'année", totalPaye,
+                        Colors.green.shade700,
+                        gras: true),
+                    _ligneResume("Justifié par des paiements datés",
+                        totalJustifie, Colors.indigo),
+                    if (totalSansDetail.abs() > 0.5)
+                      _ligneResume("Sans détail de date (écart)",
+                          totalSansDetail, Colors.orange.shade800),
+                    const Divider(height: 18),
+                    _ligneResume("Montant attendu sur l'année", totalAttendu,
+                        Colors.black87),
+                    _ligneResume("Reste à payer", totalReste, Colors.red),
+                  ],
+                ),
+              ),
+            ),
+            if (inconnus.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withAlpha(30),
+                  border: Border.all(color: Colors.orange),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  "Attention : ${inconnus.length} paiement(s) portent un "
+                      "mois inconnu (hors calendrier scolaire), pour "
+                      "${formatMontant(inconnus.fold(0.0, (s, p) => s + p.montant))} FC. "
+                      "Ils n'apparaissent dans aucun mois ci-dessous.",
+                  style: const TextStyle(fontSize: 12, color: Colors.deepOrange),
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            const Text("Mois de l'année",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            ...liste.map((m) {
+              final bool aDesPaiements = m.paye > 0 || m.nbPaiements > 0;
+              return Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: Icon(
+                    aDesPaiements ? Icons.check_circle : Icons.remove_circle_outline,
+                    color: aDesPaiements ? Colors.green : Colors.grey,
+                  ),
+                  title: Text(
+                    m.mois == moisCourant ? "${m.mois} (mois actuel)" : m.mois,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    m.nbPaiements == 0
+                        ? "Aucun paiement daté pour ce mois"
+                        : "${m.nbPaiements} paiement(s) • ${m.nbJours} jour(s)"
+                        "${m.aEcart ? '\n⚠ Écart de ${formatMontant(m.sansDetail)} FC sans détail de date' : ''}",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: m.aEcart ? Colors.deepOrange : null,
+                    ),
+                  ),
+                  isThreeLine: m.aEcart && m.nbPaiements > 0,
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        "${formatMontant(m.paye)} FC",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(Icons.arrow_forward_ios, size: 14),
+                    ],
+                  ),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => _PreuvesMoisScreen(
+                          fraisScolaires: fs,
+                          mois: m,
+                          portee: _portee,
+                          archives: _archives,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PreuvesMoisScreen extends StatelessWidget {
+  final FraisScolaires fraisScolaires;
+  final _MoisPreuve mois;
+  final String portee;
+  final bool archives;
+
+  const _PreuvesMoisScreen({
+    required this.fraisScolaires,
+    required this.mois,
+    required this.portee,
+    required this.archives,
+  });
+
+  Widget _ligne(String label, String valeur, Color couleur,
+      {bool gras = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: gras ? FontWeight.bold : FontWeight.normal)),
+          ),
+          Text(valeur,
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: couleur)),
+        ],
+      ),
+    );
+  }
+
+  Widget _jour(_JourPreuve j) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ExpansionTile(
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                _PreuvesCalcul.affDate(j.date),
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            Text(
+              "${formatMontant(j.total)} FC",
+              style: TextStyle(
+                  fontWeight: FontWeight.bold, color: Colors.green.shade700),
+            ),
+          ],
+        ),
+        subtitle: Text(
+          "${j.paiements.length} paiement(s) • ${j.nbEleves} élève(s)",
+          style: const TextStyle(fontSize: 12),
+        ),
+        children: j.paiements.map((p) {
+          final notes = _PreuvesCalcul.notes(p);
+          return ListTile(
+            dense: true,
+            isThreeLine: true,
+            title: Text(p.nomComplet,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            subtitle: Text(
+              "${p.eleve.classe} • ${p.eleve.section}\n${notes.join('\n')}",
+              style: const TextStyle(fontSize: 11),
+            ),
+            trailing: Text(
+              "${formatMontant(p.montant)} FC",
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fs = fraisScolaires;
+    final m = mois;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Preuves — ${m.mois}"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.copy_all),
+            tooltip: "Copier le relevé de ce mois",
+            onPressed: () {
+              Clipboard.setData(ClipboardData(
+                  text: _PreuvesTexte.mois(fs, portee, archives, m)));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text("Relevé du mois copié. Vous pouvez le coller "
+                      "dans un message ou un document."),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Card(
+              color: Colors.deepPurple.withAlpha(15),
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "${m.mois} — $portee",
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      "Année scolaire ${fs.currentYear}",
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.black54),
+                    ),
+                    const SizedBox(height: 8),
+                    _ligne("Total payé pour ce mois",
+                        "${formatMontant(m.paye)} FC", Colors.green.shade700,
+                        gras: true),
+                    _ligne("Somme des paiements datés",
+                        "${formatMontant(m.justifie)} FC", Colors.indigo),
+                    if (m.aEcart)
+                      _ligne("Écart sans détail de date",
+                          "${formatMontant(m.sansDetail)} FC",
+                          Colors.orange.shade800),
+                    _ligne("Nombre de paiements", "${m.nbPaiements}",
+                        Colors.black87),
+                    _ligne("Nombre de jours", "${m.nbJours}", Colors.black87),
+                    const Divider(height: 18),
+                    _ligne("Montant attendu pour ce mois",
+                        "${formatMontant(m.attendu)} FC", Colors.black87),
+                    _ligne("Reste à payer pour ce mois",
+                        "${formatMontant(m.reste)} FC", Colors.red),
+                  ],
+                ),
+              ),
+            ),
+            if (m.aEcart) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withAlpha(30),
+                  border: Border.all(color: Colors.orange),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  m.sansDetail > 0
+                      ? "Le montant enregistré pour ce mois "
+                      "(${formatMontant(m.paye)} FC) est plus grand que la "
+                      "somme des paiements datés (${formatMontant(m.justifie)} FC). "
+                      "Il manque le détail de ${formatMontant(m.sansDetail)} FC : "
+                      "ce sont de très anciens paiements enregistrés sans "
+                      "historique. La liste des élèves concernés est en bas de la page."
+                      : "La somme des paiements datés (${formatMontant(m.justifie)} FC) "
+                      "est plus grande que le montant enregistré pour ce mois "
+                      "(${formatMontant(m.paye)} FC). La liste des élèves "
+                      "concernés est en bas de la page.",
+                  style: const TextStyle(fontSize: 12, color: Colors.deepOrange),
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            const Text("Jour par jour",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            if (m.jours.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: Text(
+                    "Aucun paiement daté pour ce mois.",
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              )
+            else
+              ...m.jours.map(_jour),
+            if (m.jours.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text("Total de tous les jours",
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    Text(
+                      "${formatMontant(m.justifie)} FC",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green.shade700),
+                    ),
+                  ],
+                ),
+              ),
+            if (m.ecarts.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Text("Élèves avec un écart",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              const Text(
+                "Pour ces élèves, le montant enregistré pour le mois n'est "
+                    "pas égal à la somme de leurs paiements datés.",
+                style: TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+              const SizedBox(height: 8),
+              ...m.ecarts.map((e) => Card(
+                margin: const EdgeInsets.only(bottom: 6),
+                child: ListTile(
+                  dense: true,
+                  isThreeLine: true,
+                  title: Text(e.nomComplet,
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: Text(
+                    "${e.eleve.classe} • ${e.eleve.section}"
+                        "${e.archive ? ' • élève supprimé (archivé)' : ''}\n"
+                        "Enregistré : ${formatMontant(e.paye)} FC • "
+                        "Paiements datés : ${formatMontant(e.justifie)} FC",
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  trailing: Text(
+                    "${formatMontant(e.difference)} FC",
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange.shade800),
+                  ),
+                ),
+              )),
+            ],
           ],
         ),
       ),

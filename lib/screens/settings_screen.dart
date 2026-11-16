@@ -70,6 +70,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _showBackupReminder = true;
 
+  // ⚡⚡⚡ NOUVEAU — synchronisation serveur.
+  // _syncEnCours : bloque les doubles clics sur les boutons Synchroniser /
+  // Sauvegarder / Récupérer pendant qu'une opération est en cours.
+  // _syncMode : quelle opération est en cours ('sync', 'backup', 'restore')
+  // pour afficher la roue de chargement sur le bon bouton.
+  bool _syncEnCours = false;
+  String? _syncMode;
+
   @override
   void initState() {
     super.initState();
@@ -387,7 +395,249 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ==========================================================================
+  // ⚡⚡⚡ SYNCHRONISATION SERVEUR (Synchroniser / Sauvegarder / Récupérer)
+  // --------------------------------------------------------------------------
+  // Les trois boutons passent par _actionServeur :
+  //  - un seul traitement à la fois (doubles clics bloqués, boutons grisés) ;
+  //  - les refus de protection du serveur (409) sont expliqués clairement ;
+  //  - les avertissements de fusion (collision d'ID, configuration modifiée
+  //    sur deux PC, répartition recalculée...) sont affichés à l'utilisateur.
+  // ==========================================================================
+
+  Future<void> _afficherAvertissementsFusion() async {
+    final List<String> avertissements =
+    List<String>.from(dernierAvertissementsFusion);
+    if (avertissements.isEmpty || !mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.info_outline, color: Colors.orange),
+            SizedBox(width: 8),
+            Expanded(child: Text("À vérifier après la fusion")),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: avertissements
+                  .map((a) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text("• $a",
+                    style: const TextStyle(fontSize: 13)),
+              ))
+                  .toList(),
+            ),
+          ),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("J'ai compris"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _afficherRefusServeur(Map<String, dynamic> result) async {
+    if (!mounted) return;
+    final String code = (result['code'] ?? '').toString();
+    final String erreur = (result['error'] ?? 'Erreur inconnue').toString();
+
+    String titre = "Sauvegarde refusée";
+    String conseil = "";
+    if (code == 'DATA_LOSS_GUARD') {
+      titre = "Sauvegarde bloquée pour protéger vos données";
+      conseil = "\n\nCe que vous devez faire : cliquez d'abord sur "
+          "« Récupérer depuis le Serveur » (ou « Synchroniser »), vérifiez "
+          "vos élèves et vos montants, puis sauvegardez.";
+    } else if (code == 'STALE_REVISION') {
+      titre = "Le serveur a une version plus récente";
+      conseil = "\n\nCliquez sur « Synchroniser » : l'application va "
+          "récupérer, fusionner puis envoyer.";
+    } else if (code == 'LOCAL_UNREADABLE') {
+      titre = "Données de cet ordinateur illisibles";
+    } else if (code == 'BASE_REVISION_REQUIRED') {
+      titre = "Mise à jour de l'application nécessaire";
+    }
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.shield_outlined, color: Colors.orange),
+            const SizedBox(width: 8),
+            Expanded(child: Text(titre, style: const TextStyle(fontSize: 17))),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Text("$erreur$conseil"),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("OK"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// mode : 'sync' (récupérer + fusionner + envoyer), 'backup' (envoyer),
+  /// 'restore' (récupérer + fusionner).
+  Future<void> _actionServeur(String mode) async {
+    final appState = Provider.of<AppState>(context, listen: false);
+    if (appState.schoolCode == null || appState.backupPassword == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Définissez le code et le mot de passe")),
+      );
+      return;
+    }
+    if (_syncEnCours || widget.fraisScolaires.synchronisationEnCours) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                "Une synchronisation est déjà en cours — patientez, ne "
+                    "cliquez pas plusieurs fois.")),
+      );
+      return;
+    }
+
+    setState(() {
+      _syncEnCours = true;
+      _syncMode = mode;
+    });
+    dernierAvertissementsFusion = <String>[];
+
+    Map<String, dynamic> result;
+    try {
+      if (mode == 'sync') {
+        result = await widget.fraisScolaires
+            .syncWithServer(appState.schoolCode!, appState.backupPassword!);
+      } else if (mode == 'backup') {
+        result = await widget.fraisScolaires
+            .backupToServer(appState.schoolCode!, appState.backupPassword!);
+      } else {
+        result = await widget.fraisScolaires
+            .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
+      }
+    } catch (e) {
+      result = {'success': false, 'error': 'Erreur inattendue : $e'};
+    } finally {
+      if (mounted) {
+        setState(() {
+          _syncEnCours = false;
+          _syncMode = null;
+        });
+      }
+    }
+
+    if (!mounted) return;
+    final bool success = result['success'] == true;
+
+    // l'écran reflète les données (éventuellement) fusionnées
+    if (success) {
+      setState(() {
+        selectedYear = widget.fraisScolaires.currentYear;
+        nameController.text = widget.fraisScolaires.config.schoolName;
+      });
+    }
+
+    if (success) {
+      String message;
+      if (mode == 'restore') {
+        message = "✅ Données récupérées et fusionnées";
+      } else if (mode == 'sync') {
+        message = "✅ Synchronisation réussie — données récupérées, fusionnées "
+            "puis envoyées au serveur";
+      } else {
+        message = "✅ Sauvegarde réussie — résumé promoteur mis à jour, "
+            "et les parents peuvent maintenant accéder aux données";
+      }
+      if (mode != 'restore' && result['summarySent'] == false) {
+        message += "\n⚠️ Le résumé du promoteur n'a pas pu être envoyé : "
+            "réessayez dans un instant.";
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      await _afficherAvertissementsFusion();
+      return;
+    }
+
+    if (result['busy'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result['error']?.toString() ?? 'Patientez...')),
+      );
+      return;
+    }
+
+    // Refus de protection du serveur : explication détaillée.
+    if (result['conflict'] == true || result['code'] != null) {
+      await _afficherRefusServeur(result);
+      await _afficherAvertissementsFusion();
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(mode == 'restore'
+            ? "❌ Échec : ${result['error'] ?? 'mot de passe incorrect ou aucune donnée'}"
+            : "❌ Erreur de sauvegarde : ${result['error'] ?? 'inconnue'}"),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 6),
+      ),
+    );
+    await _afficherAvertissementsFusion();
+  }
+
+  Widget _boutonServeur({
+    required String mode,
+    required IconData icone,
+    required String libelle,
+    Color? couleur,
+  }) {
+    final bool cetteOperation = _syncEnCours && _syncMode == mode;
+    return ElevatedButton.icon(
+      icon: cetteOperation
+          ? const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+          : Icon(icone),
+      label: Text(cetteOperation ? "En cours... patientez" : libelle),
+      style: couleur == null
+          ? null
+          : ElevatedButton.styleFrom(
+        backgroundColor: couleur,
+        foregroundColor: Colors.white,
+      ),
+      onPressed: _syncEnCours ? null : () => _actionServeur(mode),
+    );
+  }
+
   void _deconnexion() async {
+    if (_syncEnCours || widget.fraisScolaires.synchronisationEnCours) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                "Une synchronisation est en cours — attendez qu'elle se "
+                    "termine avant de vous déconnecter.")),
+      );
+      return;
+    }
+
     final action = await showDialog<String>(
       context: context,
       barrierDismissible: false,
@@ -404,6 +654,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               "locales de votre PC (élèves, paiements, configuration).\n\n"
               "Pour ne pas perdre vos données, vous devez absolument les "
               "sauvegarder sur le serveur avant de vous déconnecter.\n\n"
+              "(Une copie de sécurité est conservée sur cet ordinateur.)\n\n"
               "Que voulez-vous faire ?",
         ),
         actions: [
@@ -452,8 +703,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
         );
       }
 
-      final backupResult = await widget.fraisScolaires
-          .backupToServer(appState.schoolCode!, appState.backupPassword!);
+      if (mounted) setState(() => _syncEnCours = true);
+      Map<String, dynamic> backupResult;
+      try {
+        backupResult = await widget.fraisScolaires
+            .backupToServer(appState.schoolCode!, appState.backupPassword!);
+      } catch (e) {
+        backupResult = {'success': false, 'error': 'Erreur inattendue : $e'};
+      } finally {
+        if (mounted) setState(() => _syncEnCours = false);
+      }
       final bool backupSuccess = backupResult['success'] == true;
 
       if (!backupSuccess) {
@@ -466,7 +725,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               content: Text(
                 "La sauvegarde sur le serveur a échoué :\n$errMsg\n\n"
                     "Voulez-vous quand même vous déconnecter ?\n"
-                    "(Vos données locales seront perdues)",
+                    "(Vos données ne seront plus sur cet ordinateur ; une copie "
+                    "de sécurité locale sera seulement conservée.)",
               ),
               actions: [
                 TextButton(
@@ -2908,6 +3168,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             const SizedBox(height: 10),
+            // ⚡⚡⚡ NOUVEAU — règles d'utilisation quand plusieurs ordinateurs
+            // travaillent sur la même école.
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue.shade200),
+              ),
+              child: const Text(
+                "ℹ️ Si plusieurs ordinateurs utilisent la même école :\n"
+                    "• Avant de commencer à travailler sur un ordinateur, "
+                    "cliquez sur « Synchroniser ».\n"
+                    "• Quand vous terminez, cliquez de nouveau sur "
+                    "« Synchroniser ».\n"
+                    "• Cliquez UNE seule fois sur un bouton et attendez la "
+                    "fin (le bouton affiche « En cours... »).\n"
+                    "• Évitez de saisir des paiements sur deux ordinateurs "
+                    "en même temps.",
+                style: TextStyle(fontSize: 12, color: Colors.blueGrey),
+              ),
+            ),
+            const SizedBox(height: 10),
             if (appState.schoolCode == null)
               ElevatedButton.icon(
                 icon: const Icon(Icons.lock),
@@ -2940,65 +3223,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
             const SizedBox(height: 15),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.cloud_upload),
-              label: const Text("Sauvegarder sur le Serveur"),
-              onPressed: () async {
-                if (appState.schoolCode == null || appState.backupPassword == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Définissez le code et le mot de passe")),
-                  );
-                  return;
-                }
-                final result = await widget.fraisScolaires
-                    .backupToServer(appState.schoolCode!, appState.backupPassword!);
-                final bool success = result['success'] == true;
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(success
-                          ? "✅ Sauvegarde réussie — résumé promoteur mis à jour, "
-                          "et les parents peuvent maintenant accéder aux données"
-                          : "❌ Erreur de sauvegarde : ${result['error'] ?? 'inconnue'}"),
-                      backgroundColor: success ? Colors.green : Colors.red,
-                      duration: Duration(seconds: success ? 3 : 6),
-                    ),
-                  );
-                }
-              },
+            // ⚡⚡⚡ NOUVEAU — bouton unique recommandé : récupérer + fusionner
+            // + envoyer, avec blocage des doubles clics.
+            _boutonServeur(
+              mode: 'sync',
+              icone: Icons.sync,
+              libelle: "Synchroniser (recommandé)",
+              couleur: Colors.indigo,
             ),
             const SizedBox(height: 10),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.cloud_download),
-              label: const Text("Récupérer depuis le Serveur"),
-              onPressed: () async {
-                if (appState.schoolCode == null || appState.backupPassword == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Définissez le code et le mot de passe")),
-                  );
-                  return;
-                }
-                final result = await widget.fraisScolaires
-                    .restoreFromServer(appState.schoolCode!, appState.backupPassword!);
-                final bool success = result['success'] == true;
-                if (success && mounted) {
-                  setState(() {
-                    selectedYear = widget.fraisScolaires.currentYear;
-                    nameController.text = widget.fraisScolaires.config.schoolName;
-                  });
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("✅ Données récupérées et fusionnées")),
-                  );
-                } else if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                          "❌ Échec : ${result['error'] ?? 'mot de passe incorrect ou aucune donnée'}"),
-                      duration: const Duration(seconds: 6),
-                    ),
-                  );
-                }
-              },
+            _boutonServeur(
+              mode: 'backup',
+              icone: Icons.cloud_upload,
+              libelle: "Sauvegarder sur le Serveur",
+            ),
+            const SizedBox(height: 10),
+            _boutonServeur(
+              mode: 'restore',
+              icone: Icons.cloud_download,
+              libelle: "Récupérer depuis le Serveur",
             ),
             const Divider(),
             const Text("Imprimante de Reçus (Epson TM-T20III — USB)",
@@ -3142,7 +3385,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 minimumSize: const Size(double.infinity, 52),
               ),
-              onPressed: _deconnexion,
+              onPressed: _syncEnCours ? null : _deconnexion,
             ),
             const SizedBox(height: 20),
           ],
@@ -3500,24 +3743,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  void _setSchoolCode(BuildContext context, AppState appState) {
+  // ⚡⚡⚡ CORRIGÉ — changer le code école est dangereux : si le nouveau code
+  // est celui d'une AUTRE école, la prochaine sauvegarde écraserait ses
+  // données. Désormais : mot de passe demandé + avertissement + code validé
+  // (lettres, chiffres, "-" et "_" uniquement, comme le serveur l'exige).
+  void _setSchoolCode(BuildContext context, AppState appState) async {
+    if (appState.schoolCode != null) {
+      if (!await _verifyBackupPassword()) return;
+      if (!mounted) return;
+      final continuer = await showDialog<bool>(
+        context: this.context,
+        builder: (ctx) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.red),
+              SizedBox(width: 8),
+              Expanded(child: Text("Changer le code école ?")),
+            ],
+          ),
+          content: Text(
+            "Le code actuel est \"${appState.schoolCode}\".\n\n"
+                "⚠️ Changer le code relie cet ordinateur à une AUTRE "
+                "sauvegarde sur le serveur. Si le nouveau code est celui "
+                "d'une autre école, vos prochaines sauvegardes pourraient "
+                "remplacer ses données.\n\n"
+                "Ne changez ce code que si vous êtes absolument sûr.",
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text("Annuler")),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Je comprends, continuer"),
+            ),
+          ],
+        ),
+      );
+      if (continuer != true) return;
+    }
+    if (!mounted) return;
+
     final codeController = TextEditingController();
     showDialog(
-      context: context,
+      context: this.context,
       builder: (ctx) => AlertDialog(
         title: const Text("Code de Récupération"),
         content: TextField(
           controller: codeController,
-          decoration: const InputDecoration(labelText: "Code unique (ex: MAPENDO)"),
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(
+            labelText: "Code unique (ex: MAPENDO)",
+            helperText: "Lettres, chiffres, - et _ uniquement",
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
           ElevatedButton(
             onPressed: () {
-              if (codeController.text.trim().isNotEmpty) {
-                appState.setSchoolCode(codeController.text.trim());
-                Navigator.pop(ctx);
+              final code = codeController.text.trim().toUpperCase();
+              if (code.isEmpty) return;
+              if (!RegExp(r'^[A-Za-z0-9_-]{2,40}$').hasMatch(code)) {
+                ScaffoldMessenger.of(this.context).showSnackBar(
+                  const SnackBar(
+                      content: Text(
+                          "Code invalide : utilisez uniquement des lettres, "
+                              "chiffres, - et _ (2 à 40 caractères, sans espace)")),
+                );
+                return;
               }
+              appState.setSchoolCode(code);
+              Navigator.pop(ctx);
             },
             child: const Text("Enregistrer"),
           ),

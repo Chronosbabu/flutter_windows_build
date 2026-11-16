@@ -11,6 +11,7 @@ import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
 import '../services/registre_eleves_pdf.dart';
+import '../utils/age_utils.dart';
 import 'import_eleves_json.dart';
 
 class StudentListScreen extends StatefulWidget {
@@ -470,7 +471,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
     return [
       IconButton(
         icon: const Icon(Icons.bar_chart, color: Colors.lightBlueAccent),
-        tooltip: "Statistiques et comptage (sexe, religion, profession...)",
+        tooltip: "Statistiques et comptage (sexe, âge, religion, profession...)",
         onPressed: _openStatistics,
       ),
       IconButton(
@@ -568,6 +569,19 @@ class _StudentListScreenState extends State<StudentListScreen> {
     final groupes = RegistreEleves.grouper(widget.fraisScolaires, eleves);
     final description = _descriptionFiltres();
 
+    // Répartition par âge (calculé depuis la date de naissance)
+    final Map<int, int> parAge = {};
+    int sansAge = 0;
+    for (final e in eleves) {
+      final a = AgeUtils.calculerAge(e.dateNaissance);
+      if (a == null) {
+        sansAge++;
+      } else {
+        parAge[a] = (parAge[a] ?? 0) + 1;
+      }
+    }
+    final agesTries = parAge.keys.toList()..sort();
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -616,6 +630,11 @@ class _StudentListScreenState extends State<StudentListScreen> {
                 _statTitle("Par classe"),
                 ...groupes.map((g) => _statRow(
                     "${g.section} — ${g.classe}", g.eleves.length, total)),
+                _statTitle("Par âge"),
+                ...agesTries.map((a) =>
+                    _statRow(AgeUtils.formaterAge(a), parAge[a] ?? 0, total)),
+                if (sansAge > 0)
+                  _statRow("Âge non renseigné", sansAge, total),
                 _statTitle("Par religion"),
                 ...religions.map((l) => _statRow(l.libelle, l.nombre, total,
                     onTap: () {
@@ -806,6 +825,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
   }
 
   Widget _buildNormalCard(Eleve e) {
+    final String age = AgeUtils.libelle(e.dateNaissance);
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
       child: ListTile(
@@ -822,7 +842,8 @@ class _StudentListScreenState extends State<StudentListScreen> {
               : null,
         ),
         title: Text("${e.nom} ${e.postNom} ${e.prenom}"),
-        subtitle: Text("${e.section} - ${e.classe}"),
+        subtitle: Text(
+            "${e.section} - ${e.classe}${age.isNotEmpty ? "  |  Âge : $age" : ""}"),
         trailing: Text(
           e.id,
           style: const TextStyle(
@@ -912,6 +933,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
   }
 
   Widget _buildDeletionCard(Eleve e) {
+    final String age = AgeUtils.libelle(e.dateNaissance);
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
       child: ListTile(
@@ -929,7 +951,8 @@ class _StudentListScreenState extends State<StudentListScreen> {
               : null,
         ),
         title: Text("${e.nom} ${e.postNom} ${e.prenom}"),
-        subtitle: Text("${e.section} - ${e.classe}  |  ID : ${e.id}"),
+        subtitle: Text(
+            "${e.section} - ${e.classe}  |  ID : ${e.id}${age.isNotEmpty ? "  |  Âge : $age" : ""}"),
         trailing: IconButton(
           icon: const Icon(Icons.delete, color: Colors.red, size: 28),
           tooltip: "Supprimer cet élève",
@@ -1169,6 +1192,7 @@ class _StudentListScreenState extends State<StudentListScreen> {
     final String classeApercu = passe
         ? (monte ? widget.fraisScolaires.computePromotedClasse(e) : e.classe)
         : "—";
+    final String age = AgeUtils.libelle(e.dateNaissance);
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
@@ -1192,7 +1216,8 @@ class _StudentListScreenState extends State<StudentListScreen> {
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   Text(
-                    "${e.section} - ${e.classe}  →  $classeApercu",
+                    "${e.section} - ${e.classe}  →  $classeApercu"
+                        "${age.isNotEmpty ? "  |  Âge : $age" : ""}",
                     style: TextStyle(
                       fontSize: 12.5,
                       color: passe ? Colors.indigo : Colors.red,
@@ -1933,6 +1958,7 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
     String? hint,
     Widget? suffix,
     VoidCallback? onDelete,
+    ValueChanged<String>? onChanged,
   }) {
     final Widget? suffixWidget = onDelete != null
         ? IconButton(
@@ -1950,6 +1976,7 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         textCapitalization: capitalization,
         keyboardType: keyboardType,
         inputFormatters: formatters,
+        onChanged: onChanged,
         onSubmitted: (_) => _next(focus),
         decoration: InputDecoration(
           labelText: label,
@@ -1988,6 +2015,11 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         e.customFields.values.any((v) => v.trim().isNotEmpty);
 
     final bool isLast = index >= total - 1;
+
+    // Âge : en mode consultation on utilise la date enregistrée,
+    // en mode saisie on suit en direct la date en cours de frappe.
+    final String ageEnregistre = AgeUtils.libelle(e.dateNaissance);
+    final String ageSaisie = AgeUtils.libelle(dateCtrl.text);
 
     return CallbackShortcuts(
       bindings: {
@@ -2150,6 +2182,17 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                                     fontSize: 12.5,
                                   ),
                                 ),
+                                if (ageEnregistre.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    "Âge : $ageEnregistre",
+                                    style: const TextStyle(
+                                      color: Colors.indigo,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           ),
@@ -2192,6 +2235,7 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                         _infoRow("Mère", e.mereNom),
                         _infoRow("Adresse", e.adresse),
                         _infoRow("Naissance", e.dateNaissance),
+                        _infoRow("Âge", ageEnregistre),
                         if (!hasAnyExtraInfo)
                           const Padding(
                             padding: EdgeInsets.symmetric(vertical: 10),
@@ -2252,12 +2296,29 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                           hint: "jj/mm/aaaa (tapez seulement les chiffres)",
                           keyboardType: TextInputType.number,
                           formatters: [_DateSlashFormatter()],
+                          onChanged: (_) => setState(() {}),
                           suffix: IconButton(
                             icon: const Icon(Icons.calendar_today, size: 18),
                             tooltip: "Choisir dans le calendrier",
                             onPressed: _pickDate,
                           ),
                         ),
+                        if (ageSaisie.isNotEmpty)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding:
+                              const EdgeInsets.only(bottom: 8, left: 4),
+                              child: Text(
+                                "Âge calculé : $ageSaisie",
+                                style: const TextStyle(
+                                  color: Colors.indigo,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                            ),
+                          ),
                         const Padding(
                           padding: EdgeInsets.only(top: 2),
                           child: Text(
@@ -2661,6 +2722,7 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
                       .getDateSuppressionEleve(e.id);
                   final String? motif = widget.fraisScolaires
                       .getMotifSuppressionEleve(e.id);
+                  final String age = AgeUtils.libelle(e.dateNaissance);
 
                   return Card(
                     margin: const EdgeInsets.symmetric(vertical: 6),
@@ -2701,7 +2763,8 @@ class _ElevesSupprimesScreenState extends State<ElevesSupprimesScreen> {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  "${e.section} - ${e.classe}  |  ID : ${e.id}",
+                                  "${e.section} - ${e.classe}  |  ID : ${e.id}"
+                                      "${age.isNotEmpty ? "  |  Âge : $age" : ""}",
                                   style: const TextStyle(
                                       fontSize: 12.5, color: Colors.black54),
                                 ),
@@ -3038,6 +3101,7 @@ class _PaiementsEleveSupprimeDialogState
     final autres = _autresPaiements();
     final double totalScolarite = fs.getStudentTotalPaid(eleve);
     final double totalAutres = _totalAutres();
+    final String age = AgeUtils.libelle(eleve.dateNaissance);
 
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -3070,7 +3134,8 @@ class _PaiementsEleveSupprimeDialogState
                         fontSize: 16),
                   ),
                   Text(
-                    "${eleve.section} - ${eleve.classe}  |  ID : ${eleve.id}",
+                    "${eleve.section} - ${eleve.classe}  |  ID : ${eleve.id}"
+                        "${age.isNotEmpty ? "  |  Âge : $age" : ""}",
                     style:
                     const TextStyle(color: Colors.white70, fontSize: 12),
                   ),

@@ -18,6 +18,7 @@ part 'frais_scolaires_modeles.dart';
 part 'frais_scolaires_rapports.dart';
 part 'frais_scolaires_services.dart';
 part 'frais_scolaires_ordre.dart';
+part 'frais_scolaires_messagerie.dart';
 const String serverUrl = "https://jsinf.onrender.com";
 
 class AutreFraisStatut {
@@ -57,9 +58,6 @@ class FraisScolaires {
   List<AutreFrais> autresFrais = [];
   Map<String, List<AutreFraisPaiement>> autresFraisPaiementsByYear = {};
   Set<String> paiementsAutresFraisAnnules = {};
-  // ⚡ NOUVEAU — identifiants des "autres frais" supprimés (pierres tombales).
-  // Sans cette liste, un frais supprimé sur le PC revenait à chaque
-  // "Récupérer" car la fusion avec le serveur ré-ajoutait tout ce qui manquait.
   Set<String> autresFraisSupprimesIds = {};
   List<AutreFraisAdministration> autresFraisAdministrations = [];
   List<AdminAuditLog> adminAuditLog = [];
@@ -184,6 +182,94 @@ class FraisScolaires {
     ));
 
     await saveData();
+  }
+
+  String _affichageDateIso(String iso) {
+    final p = iso.split('-');
+    if (p.length == 3 && p[0].length == 4) return '${p[2]}/${p[1]}/${p[0]}';
+    return iso;
+  }
+
+  bool _estDateIso(String s) => RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(s);
+
+  Future<String?> modifierDateTransaction({
+    required Eleve eleve,
+    required Map<String, dynamic> transaction,
+    required DateTime nouvelleDate,
+  }) async {
+    if (!eleve.transactions.any((t) => identical(t, transaction))) {
+      return "Ce paiement est introuvable. Fermez la fenêtre, rafraîchissez "
+          "la liste puis réessayez.";
+    }
+
+    final DateTime maintenant = DateTime.now();
+    final DateTime aujourdhui =
+    DateTime(maintenant.year, maintenant.month, maintenant.day);
+    final DateTime jour =
+    DateTime(nouvelleDate.year, nouvelleDate.month, nouvelleDate.day);
+    if (jour.isAfter(aujourdhui)) {
+      return "La date d'un paiement ne peut pas être dans le futur.";
+    }
+    if (jour.year < 2000) {
+      return "Date invalide.";
+    }
+
+    final String nouvelleStr = jour.toString().split(' ')[0];
+    final String ancienneStr = transaction['date']?.toString() ?? '';
+    if (nouvelleStr == ancienneStr) return null;
+
+    final String mois = transaction['mois']?.toString() ?? '';
+    final int idxMois = months.indexOf(mois);
+    final bool moisFixe = transaction['moisDebloque'] == true;
+
+    if (!moisFixe && idxMois >= 0) {
+      for (final t in eleve.transactions) {
+        if (identical(t, transaction)) continue;
+        if (t['moisDebloque'] == true) continue;
+        final String autreMois = t['mois']?.toString() ?? '';
+        final int i = months.indexOf(autreMois);
+        if (i < 0 || i == idxMois) continue;
+        final String d = t['date']?.toString() ?? '';
+        if (!_estDateIso(d)) continue;
+        if (i < idxMois && d.compareTo(nouvelleStr) > 0) {
+          return "Impossible : le mois \"$autreMois\" (mois précédent) a été "
+              "payé le ${_affichageDateIso(d)}. Le paiement de \"$mois\" ne "
+              "peut pas être daté avant cette date. Choisissez le "
+              "${_affichageDateIso(d)} ou une date plus tard.";
+        }
+        if (i > idxMois && d.compareTo(nouvelleStr) < 0) {
+          return "Impossible : le mois \"$autreMois\" (mois suivant) a été "
+              "payé le ${_affichageDateIso(d)}. Le paiement de \"$mois\" ne "
+              "peut pas être daté après cette date. Choisissez le "
+              "${_affichageDateIso(d)} ou une date plus tôt.";
+        }
+      }
+    }
+
+    final double montant = (transaction['amount'] as num?)?.toDouble() ?? 0.0;
+
+    transaction['date'] = nouvelleStr;
+    transaction['dateModifieeLe'] = DateTime.now().toIso8601String();
+    if (ancienneStr.isNotEmpty) {
+      transaction.putIfAbsent('dateOriginale', () => ancienneStr);
+    }
+
+    _rafraichirRecusEnAttentePourEleve(eleve);
+
+    adminAuditLog.add(AdminAuditLog(
+      id: 'AUD${DateTime.now().microsecondsSinceEpoch}',
+      action: 'modification',
+      eleveId: eleve.id,
+      eleveNomComplet: '${eleve.nom} ${eleve.postNom} ${eleve.prenom}',
+      classe: eleve.classe,
+      mois: '$mois (date : ${_affichageDateIso(ancienneStr)} → '
+          '${_affichageDateIso(nouvelleStr)})',
+      montantAvant: montant,
+      montantApres: montant,
+    ));
+
+    await saveData();
+    return null;
   }
 
   List<AdminAuditLog> getAdminAuditLog() {
@@ -2530,6 +2616,11 @@ class FraisScolaires {
           .toString()
           .compareTo((b.value['date'] ?? '').toString());
       if (parDate != 0) return parDate;
+      final int ma = months.indexOf(a.value['mois']?.toString() ?? '');
+      final int mb = months.indexOf(b.value['mois']?.toString() ?? '');
+      final int ia = ma < 0 ? months.length : ma;
+      final int ib = mb < 0 ? months.length : mb;
+      if (ia != ib) return ia.compareTo(ib);
       return a.key.compareTo(b.key);
     });
 

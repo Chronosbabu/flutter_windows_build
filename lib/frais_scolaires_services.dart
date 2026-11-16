@@ -1,15 +1,19 @@
 part of frais_scolaires;
 
-// ⚡ NOUVEAU — Nom du type de "autres frais" qui possède les administrations /
-// rubriques (liste "autresFraisAdministrations"). Seul ce type affichera une
-// répartition par administration chez le promoteur ; les autres types
-// n'affichent que leurs montants. Comparaison insensible aux majuscules et
-// aux apostrophes. Si ce nom ne correspond à aucun type MAIS qu'il n'existe
-// qu'un seul type de frais, c'est ce type unique qui est utilisé.
-// Mettez ici le nom EXACT de votre type de frais (ex : "Frais de l'État").
 const String kTypeFraisAvecAdministrations = "Frais de l'État";
 
+int? _syncServerRevision;
+Map<String, Set<String>> _syncBase = <String, Set<String>>{};
+String? _syncBaseConfigJson;
+bool _syncBusy = false;
+bool _localLoadFailed = false;
+Future<void> _saveChain = Future<void>.value();
+
+List<String> dernierAvertissementsFusion = <String>[];
+
 extension FraisScolairesServices on FraisScolaires {
+  bool get synchronisationEnCours => _syncBusy;
+
   Future<Map<String, dynamic>> createPromoterRequest({
     required String type,
     required Eleve eleve,
@@ -134,9 +138,6 @@ extension FraisScolairesServices on FraisScolaires {
     final double moneyTodayPrincipal =
     moneyTodayBySection.values.fold(0.0, (sum, v) => sum + v);
 
-    // ⚡ CORRECTION — seuls les paiements dont le frais EXISTE encore comptent.
-    // Avant, les paiements d'un frais supprimé restaient dans les totaux et
-    // apparaissaient chez le promoteur ("Frais supprimés / non classés").
     final Set<String> idsFraisExistants = autresFrais.map((f) => f.id).toSet();
     final List<AutreFraisPaiement> paiementsValides =
     (autresFraisPaiementsByYear[currentYear] ?? <AutreFraisPaiement>[])
@@ -203,11 +204,6 @@ extension FraisScolairesServices on FraisScolaires {
       studentsByClass[key] = (studentsByClass[key] ?? 0) + 1;
     }
 
-    // ⚡ NOUVEAU — détail SÉPARÉ par type de frais additionnel.
-    // Les frais portant le même nom sont regroupés (comme dans les rapports).
-    // Seul le type qui possède les administrations reçoit une répartition ;
-    // les autres types n'ont que leurs montants. Rien n'est modifié dans les
-    // données : on ne fait que lire.
     final List<AutreFraisPaiement> tousPaiementsAutresFrais =
     List<AutreFraisPaiement>.from(paiementsValides);
 
@@ -280,9 +276,6 @@ extension FraisScolairesServices on FraisScolaires {
       autresFraisParType.add(stat);
     }
 
-    // Les administrations des autres frais appartiennent à UN seul type :
-    // la répartition globale ne porte donc que sur ce type. Si aucun type
-    // propriétaire n'est identifié, on garde l'ancien calcul (sur le total).
     final Map<String, double> afAdminJour = statProprietaire != null
         ? Map<String, double>.from(statProprietaire['adminToday'] as Map)
         : autresFraisAdminDistToday;
@@ -342,10 +335,6 @@ extension FraisScolairesServices on FraisScolaires {
     };
   }
 
-  /// Envoie le résumé au serveur. Retourne true SEULEMENT si le serveur a
-  /// bien répondu 200 (avant, les erreurs étaient avalées sans rien dire et
-  /// le promoteur gardait d'anciennes données). Une 2ᵉ tentative est faite
-  /// car le serveur Render peut mettre du temps à se réveiller.
   Future<bool> pushPromoterSummary() async {
     if (schoolCode == null || schoolCode!.isEmpty) return false;
     for (int essai = 1; essai <= 2; essai++) {
@@ -664,6 +653,18 @@ extension FraisScolairesServices on FraisScolaires {
         }
       }
     }
+    for (final eleve in elevesSupprimesData.eleves) {
+      if (corrections.containsKey(eleve.id)) {
+        eleve.id = corrections[eleve.id] as String;
+      }
+    }
+    final Map<String, String> remap =
+    corrections.map((k, v) => MapEntry(k, v.toString()));
+    for (final liste in autresFraisPaiementsByYear.values) {
+      for (final p in liste) {
+        _syncRemapperEleveIdPaiement(p, remap);
+      }
+    }
   }
 
   Map<String, dynamic> exportSnapshotForClients() {
@@ -964,174 +965,287 @@ extension FraisScolairesServices on FraisScolaires {
     await saveData();
   }
 
+  String _syncHorodatage() => DateTime.now()
+      .toIso8601String()
+      .replaceAll(':', '-')
+      .replaceAll('.', '-');
+
+  Future<void> _creerCopieSecuriteLocale(String raison) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final src = File('${dir.path}/school_fees_data.json');
+      if (!await src.exists()) return;
+      await src.copy(
+          '${dir.path}/school_fees_data.safety_${_syncHorodatage()}_$raison.json');
+      final copies = await _listerCopiesSecurite(dir);
+      for (int i = 0; i < copies.length - 10; i++) {
+        try {
+          await copies[i].delete();
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  Future<List<File>> _listerCopiesSecurite(Directory dir) async {
+    final copies = <File>[];
+    await for (final f in dir.list()) {
+      if (f is File) {
+        final nom = f.uri.pathSegments.last;
+        if (nom.startsWith('school_fees_data.safety_')) copies.add(f);
+      }
+    }
+    copies.sort((a, b) => a.path.compareTo(b.path));
+    return copies;
+  }
+
+  void _resetEtatEnMemoire() {
+    config      = SchoolConfig(schoolName: "EduPay School RDC");
+    currentData = SchoolYearData(eleves: []);
+    currentYear = '2025-2026';
+    history     = {};
+    _localIdCounter = 0;
+    lastSelectedClassFilter   = null;
+    lastSelectedSectionFilter = null;
+    lastReportCity = null;
+    schoolCode  = null;
+    depensesByYear = {};
+    autresFrais = [];
+    autresFraisPaiementsByYear = {};
+    paiementsAutresFraisAnnules = {};
+    autresFraisSupprimesIds = {};
+    autresFraisAdministrations = [];
+    adminAuditLog = [];
+    signataires = [];
+    optionsSections = {};
+    localAccessKeys = [];
+    localPendingPayments = [];
+    localPendingRegistrations = [];
+    localPendingAutresFraisPayments = [];
+    localAttendance = {};
+    localCommunicationsLog = [];
+    printedReceiptKeys = [];
+    receiptQueue = [];
+    elevesSupprimesData = SchoolYearData(eleves: []);
+    dateSuppressionEleves = {};
+    motifSuppressionEleves = {};
+    _syncServerRevision = null;
+    _syncBase = <String, Set<String>>{};
+    _syncBaseConfigJson = null;
+  }
+
+  Future<void> _appliquerDonneesLocales(Map<String, dynamic> data) async {
+    config       = SchoolConfig.fromJson(data['config'] ?? {});
+    currentYear  = data['currentYear'] ?? '2025-2026';
+    lastSelectedClassFilter   = data['lastSelectedClassFilter'];
+    lastSelectedSectionFilter = data['lastSelectedSectionFilter'];
+    lastReportCity = data['lastReportCity'] as String?;
+    schoolCode = data['schoolCode'] as String?;
+    if (data['adminAuditLog'] != null) {
+      adminAuditLog = (data['adminAuditLog'] as List<dynamic>)
+          .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    if (data['signataires'] != null) {
+      signataires = (data['signataires'] as List<dynamic>)
+          .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    if (data['optionsSections'] != null) {
+      optionsSections = _parseOptionsSections(data['optionsSections']);
+      _nettoyerOptions();
+    }
+
+    if (data['history'] != null) {
+      history = (data['history'] as Map<String, dynamic>).map(
+            (key, value) =>
+            MapEntry(key, SchoolYearData.fromJson(value)),
+      );
+    }
+    if (data['depensesByYear'] != null) {
+      depensesByYear =
+          (data['depensesByYear'] as Map<String, dynamic>).map(
+                (key, value) => MapEntry(
+              key,
+              (value as List<dynamic>)
+                  .map((e) => Depense.fromJson(e as Map<String, dynamic>))
+                  .toList(),
+            ),
+          );
+    }
+    if (data['autresFrais'] != null) {
+      autresFrais = (data['autresFrais'] as List<dynamic>)
+          .map((e) => AutreFrais.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    if (data['autresFraisPaiementsByYear'] != null) {
+      autresFraisPaiementsByYear = (data['autresFraisPaiementsByYear']
+      as Map<String, dynamic>)
+          .map(
+            (key, value) => MapEntry(
+          key,
+          (value as List<dynamic>)
+              .map((e) => AutreFraisPaiement.fromJson(
+              e as Map<String, dynamic>))
+              .toList(),
+        ),
+      );
+    }
+    if (data['paiementsAutresFraisAnnules'] != null) {
+      paiementsAutresFraisAnnules =
+          (data['paiementsAutresFraisAnnules'] as List<dynamic>)
+              .map((e) => e.toString())
+              .toSet();
+    }
+    if (data['autresFraisSupprimesIds'] != null) {
+      autresFraisSupprimesIds =
+          (data['autresFraisSupprimesIds'] as List<dynamic>)
+              .map((e) => e.toString())
+              .toSet();
+    }
+    if (data['autresFraisAdministrations'] != null) {
+      autresFraisAdministrations =
+          (data['autresFraisAdministrations'] as List<dynamic>)
+              .map((e) => AutreFraisAdministration.fromJson(
+              e as Map<String, dynamic>))
+              .toList();
+    }
+
+    if (history.containsKey(currentYear)) {
+      currentData = history[currentYear]!;
+    } else {
+      currentData          = SchoolYearData(eleves: []);
+      history[currentYear] = currentData;
+    }
+
+    if (data['localIdCounter'] != null) {
+      _localIdCounter = data['localIdCounter'] as int;
+    } else {
+      _localIdCounter = _inferCounterFromExistingIds();
+    }
+    if (data['localAccessKeys'] != null) {
+      localAccessKeys = (data['localAccessKeys'] as List<dynamic>)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    if (data['localPendingPayments'] != null) {
+      localPendingPayments =
+          (data['localPendingPayments'] as List<dynamic>)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+    }
+    if (data['localPendingRegistrations'] != null) {
+      localPendingRegistrations =
+          (data['localPendingRegistrations'] as List<dynamic>)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+    }
+    if (data['localPendingAutresFraisPayments'] != null) {
+      localPendingAutresFraisPayments =
+          (data['localPendingAutresFraisPayments'] as List<dynamic>)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+    }
+    if (data['localAttendance'] != null) {
+      localAttendance =
+          (data['localAttendance'] as Map<String, dynamic>).map(
+                (key, value) => MapEntry(
+              key,
+              (value as List<dynamic>).map((e) => e.toString()).toList(),
+            ),
+          );
+    }
+    if (data['localCommunicationsLog'] != null) {
+      localCommunicationsLog =
+          (data['localCommunicationsLog'] as List<dynamic>)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+    }
+    if (data['printedReceiptKeys'] != null) {
+      printedReceiptKeys = (data['printedReceiptKeys'] as List<dynamic>)
+          .map((e) => e.toString())
+          .toList();
+    }
+    if (data['receiptQueue'] != null) {
+      receiptQueue = (data['receiptQueue'] as List<dynamic>)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    if (data['elevesSupprimesData'] != null) {
+      elevesSupprimesData =
+          SchoolYearData.fromJson(data['elevesSupprimesData']);
+    }
+    if (data['dateSuppressionEleves'] != null) {
+      dateSuppressionEleves =
+          (data['dateSuppressionEleves'] as Map<String, dynamic>)
+              .map((key, value) => MapEntry(key, value.toString()));
+    }
+    if (data['motifSuppressionEleves'] != null) {
+      motifSuppressionEleves =
+          (data['motifSuppressionEleves'] as Map<String, dynamic>)
+              .map((key, value) => MapEntry(key, value.toString()));
+    }
+
+    final dynamic rev = data['serverRevision'];
+    _syncServerRevision = rev is num ? rev.toInt() : null;
+    _syncBase = <String, Set<String>>{};
+    final dynamic base = data['syncBase'];
+    if (base is Map) {
+      base.forEach((k, v) {
+        if (v is List) {
+          _syncBase[k.toString()] = v.map((e) => e.toString()).toSet();
+        }
+      });
+    }
+    _syncBaseConfigJson = data['syncBaseConfig'] as String?;
+
+    await _assignMissingIds();
+  }
+
   Future<void> loadData() async {
     final dir       = await getApplicationDocumentsDirectory();
     _dataFilePath   = '${dir.path}/school_fees_data.json';
     final file      = File(_dataFilePath!);
 
-    if (await file.exists()) {
-      try {
-        final jsonStr = await file.readAsString();
-        final data    = json.decode(jsonStr) as Map<String, dynamic>;
-
-        config       = SchoolConfig.fromJson(data['config'] ?? {});
-        currentYear  = data['currentYear'] ?? '2025-2026';
-        lastSelectedClassFilter   = data['lastSelectedClassFilter'];
-        lastSelectedSectionFilter = data['lastSelectedSectionFilter'];
-        lastReportCity = data['lastReportCity'] as String?;
-        schoolCode = data['schoolCode'] as String?;
-        if (data['adminAuditLog'] != null) {
-          adminAuditLog = (data['adminAuditLog'] as List<dynamic>)
-              .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
-              .toList();
-        }
-        if (data['signataires'] != null) {
-          signataires = (data['signataires'] as List<dynamic>)
-              .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
-              .toList();
-        }
-        if (data['optionsSections'] != null) {
-          optionsSections = _parseOptionsSections(data['optionsSections']);
-          _nettoyerOptions();
-        }
-
-        if (data['history'] != null) {
-          history = (data['history'] as Map<String, dynamic>).map(
-                (key, value) =>
-                MapEntry(key, SchoolYearData.fromJson(value)),
-          );
-        }
-        if (data['depensesByYear'] != null) {
-          depensesByYear =
-              (data['depensesByYear'] as Map<String, dynamic>).map(
-                    (key, value) => MapEntry(
-                  key,
-                  (value as List<dynamic>)
-                      .map((e) => Depense.fromJson(e as Map<String, dynamic>))
-                      .toList(),
-                ),
-              );
-        }
-        if (data['autresFrais'] != null) {
-          autresFrais = (data['autresFrais'] as List<dynamic>)
-              .map((e) => AutreFrais.fromJson(e as Map<String, dynamic>))
-              .toList();
-        }
-        if (data['autresFraisPaiementsByYear'] != null) {
-          autresFraisPaiementsByYear = (data['autresFraisPaiementsByYear']
-          as Map<String, dynamic>)
-              .map(
-                (key, value) => MapEntry(
-              key,
-              (value as List<dynamic>)
-                  .map((e) => AutreFraisPaiement.fromJson(
-                  e as Map<String, dynamic>))
-                  .toList(),
-            ),
-          );
-        }
-        if (data['paiementsAutresFraisAnnules'] != null) {
-          paiementsAutresFraisAnnules =
-              (data['paiementsAutresFraisAnnules'] as List<dynamic>)
-                  .map((e) => e.toString())
-                  .toSet();
-        }
-        if (data['autresFraisSupprimesIds'] != null) {
-          autresFraisSupprimesIds =
-              (data['autresFraisSupprimesIds'] as List<dynamic>)
-                  .map((e) => e.toString())
-                  .toSet();
-        }
-        if (data['autresFraisAdministrations'] != null) {
-          autresFraisAdministrations =
-              (data['autresFraisAdministrations'] as List<dynamic>)
-                  .map((e) => AutreFraisAdministration.fromJson(
-                  e as Map<String, dynamic>))
-                  .toList();
-        }
-
-        if (history.containsKey(currentYear)) {
-          currentData = history[currentYear]!;
-        } else {
-          currentData          = SchoolYearData(eleves: []);
-          history[currentYear] = currentData;
-        }
-
-        if (data['localIdCounter'] != null) {
-          _localIdCounter = data['localIdCounter'] as int;
-        } else {
-          _localIdCounter = _inferCounterFromExistingIds();
-        }
-        if (data['localAccessKeys'] != null) {
-          localAccessKeys = (data['localAccessKeys'] as List<dynamic>)
-              .map((e) => Map<String, dynamic>.from(e as Map))
-              .toList();
-        }
-        if (data['localPendingPayments'] != null) {
-          localPendingPayments =
-              (data['localPendingPayments'] as List<dynamic>)
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList();
-        }
-        if (data['localPendingRegistrations'] != null) {
-          localPendingRegistrations =
-              (data['localPendingRegistrations'] as List<dynamic>)
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList();
-        }
-        if (data['localPendingAutresFraisPayments'] != null) {
-          localPendingAutresFraisPayments =
-              (data['localPendingAutresFraisPayments'] as List<dynamic>)
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList();
-        }
-        if (data['localAttendance'] != null) {
-          localAttendance =
-              (data['localAttendance'] as Map<String, dynamic>).map(
-                    (key, value) => MapEntry(
-                  key,
-                  (value as List<dynamic>).map((e) => e.toString()).toList(),
-                ),
-              );
-        }
-        if (data['localCommunicationsLog'] != null) {
-          localCommunicationsLog =
-              (data['localCommunicationsLog'] as List<dynamic>)
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList();
-        }
-        if (data['printedReceiptKeys'] != null) {
-          printedReceiptKeys = (data['printedReceiptKeys'] as List<dynamic>)
-              .map((e) => e.toString())
-              .toList();
-        }
-        if (data['receiptQueue'] != null) {
-          receiptQueue = (data['receiptQueue'] as List<dynamic>)
-              .map((e) => Map<String, dynamic>.from(e as Map))
-              .toList();
-        }
-        if (data['elevesSupprimesData'] != null) {
-          elevesSupprimesData =
-              SchoolYearData.fromJson(data['elevesSupprimesData']);
-        }
-        if (data['dateSuppressionEleves'] != null) {
-          dateSuppressionEleves =
-              (data['dateSuppressionEleves'] as Map<String, dynamic>)
-                  .map((key, value) => MapEntry(key, value.toString()));
-        }
-        if (data['motifSuppressionEleves'] != null) {
-          motifSuppressionEleves =
-              (data['motifSuppressionEleves'] as Map<String, dynamic>)
-                  .map((key, value) => MapEntry(key, value.toString()));
-        }
-
-        await _assignMissingIds();
-      } catch (_) {
-        _initDefaultData();
-      }
-    } else {
+    if (!await file.exists()) {
       _initDefaultData();
+      return;
     }
+
+    try {
+      final jsonStr = await file.readAsString();
+      final data    = json.decode(jsonStr) as Map<String, dynamic>;
+      await _appliquerDonneesLocales(data);
+      _localLoadFailed = false;
+      return;
+    } catch (_) {}
+
+    try {
+      await file.rename(
+          '${dir.path}/school_fees_data.corrupt_${_syncHorodatage()}.json');
+    } catch (_) {}
+
+    final candidats = <File>[File('${dir.path}/school_fees_data.json.tmp')];
+    try {
+      final copies = await _listerCopiesSecurite(dir);
+      candidats.addAll(copies.reversed);
+    } catch (_) {}
+
+    for (final c in candidats) {
+      try {
+        if (!await c.exists()) continue;
+        final data = json.decode(await c.readAsString()) as Map<String, dynamic>;
+        _resetEtatEnMemoire();
+        await _appliquerDonneesLocales(data);
+        _localLoadFailed = true;
+        await saveData();
+        return;
+      } catch (_) {
+        continue;
+      }
+    }
+
+    _initDefaultData();
+    _localLoadFailed = true;
   }
 
   int _inferCounterFromExistingIds() {
@@ -1166,16 +1280,13 @@ extension FraisScolairesServices on FraisScolaires {
     currentData          = SchoolYearData(eleves: []);
     history[currentYear] = currentData;
     _localIdCounter      = 0;
+    _syncServerRevision  = null;
+    _syncBase            = <String, Set<String>>{};
+    _syncBaseConfigJson  = null;
   }
 
-  Future<void> saveData() async {
-    if (_dataFilePath == null) {
-      final dir     = await getApplicationDocumentsDirectory();
-      _dataFilePath = '${dir.path}/school_fees_data.json';
-    }
-    history[currentYear] = currentData;
-    final file = File(_dataFilePath!);
-    final data = {
+  Map<String, dynamic> _construireJsonLocal() {
+    return {
       'config':                  config.toJson(),
       'currentYear':             currentYear,
       'localIdCounter':          _localIdCounter,
@@ -1212,8 +1323,37 @@ extension FraisScolairesServices on FraisScolaires {
       'elevesSupprimesData': elevesSupprimesData.toJson(),
       'dateSuppressionEleves': dateSuppressionEleves,
       'motifSuppressionEleves': motifSuppressionEleves,
+      'serverRevision': _syncServerRevision,
+      'syncBase': _syncBase.map((k, v) => MapEntry(k, v.toList())),
+      'syncBaseConfig': _syncBaseConfigJson,
     };
-    await file.writeAsString(json.encode(data));
+  }
+
+  Future<void> saveData() {
+    if (_dataFilePath != null) {
+      history[currentYear] = currentData;
+    }
+    _saveChain = _saveChain.catchError((_) {}).then((_) => _ecrireFichierLocal());
+    return _saveChain;
+  }
+
+  Future<void> _ecrireFichierLocal() async {
+    if (_dataFilePath == null) {
+      final dir     = await getApplicationDocumentsDirectory();
+      _dataFilePath = '${dir.path}/school_fees_data.json';
+    }
+    history[currentYear] = currentData;
+    final String encoded = json.encode(_construireJsonLocal());
+    final String chemin = _dataFilePath!;
+    final tmp = File('$chemin.tmp');
+    await tmp.writeAsString(encoded, flush: true);
+    try {
+      await tmp.rename(chemin);
+    } on FileSystemException {
+      final cible = File(chemin);
+      if (await cible.exists()) await cible.delete();
+      await tmp.rename(chemin);
+    }
   }
 
   Future<void> clearLocalData() async {
@@ -1221,39 +1361,14 @@ extension FraisScolairesServices on FraisScolaires {
       final dir     = await getApplicationDocumentsDirectory();
       _dataFilePath = '${dir.path}/school_fees_data.json';
     }
+    await _saveChain.catchError((_) {});
+    await _creerCopieSecuriteLocale('avant_deconnexion');
     final file = File(_dataFilePath!);
     if (await file.exists()) {
       await file.delete();
     }
-    config      = SchoolConfig(schoolName: "EduPay School RDC");
-    currentData = SchoolYearData(eleves: []);
-    currentYear = '2025-2026';
-    history     = {};
-    _localIdCounter = 0;
-    lastSelectedClassFilter   = null;
-    lastSelectedSectionFilter = null;
-    lastReportCity = null;
-    schoolCode  = null;
-    depensesByYear = {};
-    autresFrais = [];
-    autresFraisPaiementsByYear = {};
-    paiementsAutresFraisAnnules = {};
-    autresFraisSupprimesIds = {};
-    autresFraisAdministrations = [];
-    adminAuditLog = [];
-    signataires = [];
-    optionsSections = {};
-    localAccessKeys = [];
-    localPendingPayments = [];
-    localPendingRegistrations = [];
-    localPendingAutresFraisPayments = [];
-    localAttendance = {};
-    localCommunicationsLog = [];
-    printedReceiptKeys = [];
-    receiptQueue = [];
-    elevesSupprimesData = SchoolYearData(eleves: []);
-    dateSuppressionEleves = {};
-    motifSuppressionEleves = {};
+    _resetEtatEnMemoire();
+    _localLoadFailed = false;
   }
 
   Future<void> changeYear(String newYear) async {
@@ -1269,8 +1384,75 @@ extension FraisScolairesServices on FraisScolaires {
     await saveData();
   }
 
+  Map<String, dynamic> _syncOccupe() => {
+    'success': false,
+    'busy': true,
+    'error': 'Une synchronisation est déjà en cours. Patientez quelques '
+        'secondes (ne cliquez pas plusieurs fois).',
+  };
+
   Future<Map<String, dynamic>> backupToServer(
+      String schoolCodeParam, String password,
+      {bool force = false}) async {
+    if (_syncBusy) return _syncOccupe();
+    _syncBusy = true;
+    try {
+      if (_localLoadFailed && !force) {
+        return {
+          'success': false,
+          'error': "Les données de cet ordinateur n'ont pas pu être lues "
+              "correctement. Cliquez d'abord sur « Récupérer depuis le "
+              "Serveur », puis sauvegardez.",
+          'code': 'LOCAL_UNREADABLE',
+        };
+      }
+
+      if (_syncServerRevision == null && !force) {
+        final r = await _restoreInternal(schoolCodeParam, password);
+        if (r['success'] != true && r['notFound'] != true) return r;
+      }
+
+      var res = await _backupInternal(schoolCodeParam, password, force: force);
+
+      if (res['success'] != true && res['code'] == 'STALE_REVISION') {
+        final r = await _restoreInternal(schoolCodeParam, password);
+        if (r['success'] != true) return r;
+        res = await _backupInternal(schoolCodeParam, password);
+      }
+      return res;
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
+  Future<Map<String, dynamic>> restoreFromServer(
       String schoolCodeParam, String password) async {
+    if (_syncBusy) return _syncOccupe();
+    _syncBusy = true;
+    try {
+      return await _restoreInternal(schoolCodeParam, password);
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
+  Future<Map<String, dynamic>> syncWithServer(
+      String schoolCodeParam, String password) async {
+    if (_syncBusy) return _syncOccupe();
+    _syncBusy = true;
+    try {
+      final r = await _restoreInternal(schoolCodeParam, password);
+      if (r['success'] != true && r['notFound'] != true) return r;
+      final b = await _backupInternal(schoolCodeParam, password);
+      return {...b, 'restored': r['success'] == true};
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
+  Future<Map<String, dynamic>> _backupInternal(
+      String schoolCodeParam, String password,
+      {bool force = false}) async {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
       schoolCode = normalizedCode;
@@ -1308,17 +1490,21 @@ extension FraisScolairesServices on FraisScolaires {
         'backup_password': password,
       };
 
+      final Map<String, dynamic> corps = {
+        'school_code': normalizedCode,
+        'data': data,
+        'promoter_summary': computePromoterSummary(),
+      };
+      if (_syncServerRevision != null) {
+        corps['base_revision'] = _syncServerRevision;
+      }
+      if (force) corps['force'] = true;
+
       final response = await http
           .post(
         Uri.parse('$serverUrl/backup'),
         headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'school_code': normalizedCode,
-          'data': data,
-          // ⚡ NOUVEAU — le résumé promoteur part dans la MÊME requête que la
-          // sauvegarde : plus de 2ᵉ appel qui peut échouer en silence.
-          'promoter_summary': computePromoterSummary(),
-        }),
+        body: json.encode(corps),
       )
           .timeout(const Duration(seconds: 60));
 
@@ -1328,13 +1514,42 @@ extension FraisScolairesServices on FraisScolaires {
             responseData['corrections'] as Map<String, dynamic>? ?? {};
         if (corrections.isNotEmpty) {
           _applyIdCorrections(corrections);
-          await saveData();
         }
-        // Si le serveur (ancienne version) n'a pas enregistré le résumé avec
-        // la sauvegarde, on l'envoie séparément et on rapporte le résultat.
+
+        final dynamic rev = responseData['revision'];
+        if (rev is num) _syncServerRevision = rev.toInt();
+        _syncBase = _syncIdsDepuisEtatLocal();
+        _syncBaseConfigJson = _syncCanon(config.toJson());
+        _localLoadFailed = false;
+        await saveData();
+
         bool summaryOk = responseData['summary_saved'] == true;
         if (!summaryOk) summaryOk = await pushPromoterSummary();
-        return {'success': true, 'summarySent': summaryOk};
+        return {
+          'success': true,
+          'summarySent': summaryOk,
+          'revision': _syncServerRevision,
+        };
+      }
+
+      if (response.statusCode == 409) {
+        String msg = 'Le serveur a refusé la sauvegarde pour protéger vos '
+            'données (statut 409).';
+        String? code;
+        try {
+          final b = json.decode(response.body);
+          msg = b['error']?.toString() ?? msg;
+          code = b['code']?.toString();
+        } catch (_) {}
+        return {
+          'success': false,
+          'error': msg,
+          'code': code,
+          'conflict': true,
+        };
+      }
+      if (response.statusCode == 401) {
+        return {'success': false, 'error': 'Mot de passe incorrect'};
       }
       return {
         'success': false,
@@ -1357,13 +1572,16 @@ extension FraisScolairesServices on FraisScolaires {
     }
   }
 
-  Future<Map<String, dynamic>> restoreFromServer(
+  Future<Map<String, dynamic>> _restoreInternal(
       String schoolCodeParam, String password) async {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
       final response = await http
-          .get(Uri.parse('$serverUrl/restore?school_code=$normalizedCode'))
-          .timeout(const Duration(seconds: 20));
+          .get(
+        Uri.parse('$serverUrl/restore?school_code=$normalizedCode'),
+        headers: {'X-Backup-Password': password},
+      )
+          .timeout(const Duration(seconds: 45));
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -1371,14 +1589,22 @@ extension FraisScolairesServices on FraisScolaires {
             data['backup_password'] != password) {
           return {'success': false, 'error': 'Mot de passe incorrect'};
         }
+        await _creerCopieSecuriteLocale('avant_recuperation');
         schoolCode = normalizedCode;
         await mergeRestoredData(data);
         await saveData();
-        return {'success': true};
+        return {
+          'success': true,
+          'warnings': List<String>.from(dernierAvertissementsFusion),
+        };
+      }
+      if (response.statusCode == 401) {
+        return {'success': false, 'error': 'Mot de passe incorrect'};
       }
       if (response.statusCode == 404) {
         return {
           'success': false,
+          'notFound': true,
           'error':
           'Aucune sauvegarde trouvée pour le code "$normalizedCode". '
               'Vérifiez que ce code est exactement celui utilisé lors '
@@ -1406,7 +1632,8 @@ extension FraisScolairesServices on FraisScolaires {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
       final response = await http
-          .get(Uri.parse('$serverUrl/restore?school_code=$normalizedCode'))
+          .get(Uri.parse(
+          '$serverUrl/restore?school_code=$normalizedCode&exists_only=1'))
           .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -1425,21 +1652,260 @@ extension FraisScolairesServices on FraisScolaires {
     }
   }
 
+  String _syncCanon(dynamic v) {
+    if (v is Map) {
+      final keys = v.keys.map((k) => k.toString()).toList()..sort();
+      return '{${keys.map((k) => '${json.encode(k)}:${_syncCanon(v[k])}').join(',')}}';
+    }
+    if (v is List) {
+      return '[${v.map(_syncCanon).join(',')}]';
+    }
+    return json.encode(v);
+  }
+
+  Map<String, Set<String>> _syncIdsDepuisEtatLocal() {
+    final eleves = <String>{};
+    final tx = <String>{};
+    final dep = <String>{};
+    final sig = <String>{};
+    final adm = <String>{};
+    for (final y in history.values) {
+      for (final e in y.eleves) {
+        if (e.id.isNotEmpty) eleves.add(e.id);
+        for (final t in e.transactions) {
+          final tid = t['id']?.toString().trim() ?? '';
+          if (tid.isNotEmpty) tx.add(tid);
+        }
+      }
+    }
+    for (final liste in depensesByYear.values) {
+      for (final d in liste) {
+        final id = d.id.toString();
+        if (id.isNotEmpty) dep.add(id);
+      }
+    }
+    for (final s in signataires) {
+      final id = s.id.toString();
+      if (id.isNotEmpty) sig.add(id);
+    }
+    for (final a in autresFraisAdministrations) {
+      final id = a.id.toString();
+      if (id.isNotEmpty) adm.add(id);
+    }
+    return {
+      'eleves': eleves,
+      'tx': tx,
+      'depenses': dep,
+      'signataires': sig,
+      'admins': adm,
+    };
+  }
+
+  Map<String, Set<String>> _syncIdsDepuisServeur(Map<String, dynamic> d) {
+    final eleves = <String>{};
+    final tx = <String>{};
+    final dep = <String>{};
+    final sig = <String>{};
+    final adm = <String>{};
+
+    final h = d['history'];
+    if (h is Map) {
+      for (final y in h.values) {
+        if (y is Map && y['eleves'] is List) {
+          for (final e in (y['eleves'] as List)) {
+            if (e is! Map) continue;
+            final id = e['id']?.toString() ?? '';
+            if (id.isNotEmpty) eleves.add(id);
+            final t = e['transactions'];
+            if (t is List) {
+              for (final x in t) {
+                if (x is Map) {
+                  final tid = x['id']?.toString().trim() ?? '';
+                  if (tid.isNotEmpty) tx.add(tid);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    final dp = d['depensesByYear'];
+    if (dp is Map) {
+      for (final l in dp.values) {
+        if (l is List) {
+          for (final x in l) {
+            if (x is Map) {
+              final id = x['id']?.toString() ?? '';
+              if (id.isNotEmpty) dep.add(id);
+            }
+          }
+        }
+      }
+    }
+    final sg = d['signataires'];
+    if (sg is List) {
+      for (final x in sg) {
+        if (x is Map) {
+          final id = x['id']?.toString() ?? '';
+          if (id.isNotEmpty) sig.add(id);
+        }
+      }
+    }
+    final ad = d['autresFraisAdministrations'];
+    if (ad is List) {
+      for (final x in ad) {
+        if (x is Map) {
+          final id = x['id']?.toString() ?? '';
+          if (id.isNotEmpty) adm.add(id);
+        }
+      }
+    }
+    return {
+      'eleves': eleves,
+      'tx': tx,
+      'depenses': dep,
+      'signataires': sig,
+      'admins': adm,
+    };
+  }
+
+  String _syncNorm(String s) =>
+      s.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  String _cleNomEleve(Eleve e) =>
+      "${_syncNorm(e.nom)}_${_syncNorm(e.postNom)}_${_syncNorm(e.prenom)}";
+
+  Set<String> _syncJetonsNom(Eleve e) {
+    return '${e.nom} ${e.postNom} ${e.prenom}'
+        .trim()
+        .toLowerCase()
+        .split(RegExp(r'\s+'))
+        .where((t) => t.isNotEmpty)
+        .toSet();
+  }
+
+  bool _syncMemeIdentite(Eleve a, Eleve b) {
+    final ja = _syncJetonsNom(a);
+    final jb = _syncJetonsNom(b);
+    if (ja.isEmpty || jb.isEmpty) return true;
+    return ja.containsAll(jb) || jb.containsAll(ja);
+  }
+
+  bool _syncVide(dynamic v) => v == null || v.toString().trim().isEmpty;
+
+  void _syncCopierInfosEleve(Eleve l, Eleve s) {
+    final dynamic dl = l;
+    final dynamic ds = s;
+    try {
+      if (_syncVide(dl.pereNom) && !_syncVide(ds.pereNom)) {
+        dl.pereNom = ds.pereNom;
+      }
+    } catch (_) {}
+    try {
+      if (_syncVide(dl.mereNom) && !_syncVide(ds.mereNom)) {
+        dl.mereNom = ds.mereNom;
+      }
+    } catch (_) {}
+    try {
+      if (_syncVide(dl.adresse) && !_syncVide(ds.adresse)) {
+        dl.adresse = ds.adresse;
+      }
+    } catch (_) {}
+    try {
+      if (_syncVide(dl.dateNaissance) && !_syncVide(ds.dateNaissance)) {
+        dl.dateNaissance = ds.dateNaissance;
+      }
+    } catch (_) {}
+    try {
+      if (_syncVide(dl.photoBase64) && !_syncVide(ds.photoBase64)) {
+        dl.photoBase64 = ds.photoBase64;
+      }
+    } catch (_) {}
+    try {
+      final dynamic cs = ds.customFields;
+      final dynamic cl = dl.customFields;
+      if (cs is Map && cl is Map) {
+        cs.forEach((k, v) {
+          if (!cl.containsKey(k) || _syncVide(cl[k])) cl[k] = v;
+        });
+      }
+    } catch (_) {}
+  }
+
+  void _syncRemapperEleveIdPaiement(
+      AutreFraisPaiement p, Map<String, String> remap) {
+    if (remap.isEmpty) return;
+    try {
+      final dynamic d = p;
+      final String ancien = d.eleveId.toString();
+      if (remap.containsKey(ancien)) d.eleveId = remap[ancien];
+    } catch (_) {}
+  }
+
+  List<T> _syncFusionnerListeParId<T>({
+    required List<T> locale,
+    required List<T> serveur,
+    required String Function(T) idDe,
+    required Set<String> base,
+  }) {
+    final idsLocaux =
+    locale.map(idDe).where((i) => i.isNotEmpty).toSet();
+    final idsServeur =
+    serveur.map(idDe).where((i) => i.isNotEmpty).toSet();
+    final bool localVide = locale.isEmpty;
+    final resultat = <T>[];
+    for (final l in locale) {
+      final id = idDe(l);
+      if (id.isNotEmpty && base.contains(id) && !idsServeur.contains(id)) {
+        continue;
+      }
+      resultat.add(l);
+    }
+    for (final s in serveur) {
+      final id = idDe(s);
+      if (id.isEmpty || idsLocaux.contains(id)) continue;
+      if (!localVide && base.contains(id)) continue;
+      resultat.add(s);
+    }
+    return resultat;
+  }
+
   String _signatureTransaction(Map<String, dynamic> t) {
     final double montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
     return '${t['date'] ?? ''}|${t['mois'] ?? ''}|${montant.toStringAsFixed(2)}';
   }
 
+  void _syncAppliquerDateSiPlusRecente(
+      Map<String, dynamic> cible, Map<String, dynamic> source) {
+    final DateTime? dateSource =
+    DateTime.tryParse(source['dateModifieeLe']?.toString() ?? '');
+    if (dateSource == null) return;
+    final DateTime? dateCible =
+    DateTime.tryParse(cible['dateModifieeLe']?.toString() ?? '');
+    if (dateCible != null && !dateSource.isAfter(dateCible)) return;
+    if (source['date'] != null) cible['date'] = source['date'];
+    cible['dateModifieeLe'] = source['dateModifieeLe'];
+    if (source['dateOriginale'] != null) {
+      cible['dateOriginale'] = source['dateOriginale'];
+    }
+  }
+
   List<Map<String, dynamic>> _fusionnerTransactionsSansDoublons(
       List<Map<String, dynamic>> locales,
-      List<Map<String, dynamic>> serveur,
-      ) {
+      List<Map<String, dynamic>> serveur, {
+        Set<String>? base,
+      }) {
+    final Set<String> b = base ?? <String>{};
+    String idDe(Map<String, dynamic> t) => t['id']?.toString().trim() ?? '';
+    final idsLocaux = locales.map(idDe).where((i) => i.isNotEmpty).toSet();
+    final idsServeur = serveur.map(idDe).where((i) => i.isNotEmpty).toSet();
+
     final Map<String, Map<String, dynamic>> parId = {};
     final Set<String> signaturesAvecIdLegacy = {};
     final List<Map<String, dynamic>> sansId = [];
 
     void classer(Map<String, dynamic> t) {
-      final String tid = t['id']?.toString().trim() ?? '';
+      final String tid = idDe(t);
       if (tid.isNotEmpty) {
         if (!parId.containsKey(tid)) {
           parId[tid] = t;
@@ -1452,10 +1918,22 @@ extension FraisScolairesServices on FraisScolaires {
       }
     }
 
-    for (final t in serveur) {
+    for (final t in locales) {
+      final id = idDe(t);
+      if (id.isNotEmpty && b.contains(id) && !idsServeur.contains(id)) {
+        continue;
+      }
       classer(Map<String, dynamic>.from(t));
     }
-    for (final t in locales) {
+    for (final t in serveur) {
+      final id = idDe(t);
+      if (id.isNotEmpty && b.contains(id) && !idsLocaux.contains(id)) {
+        continue;
+      }
+      if (id.isNotEmpty && parId.containsKey(id)) {
+        _syncAppliquerDateSiPlusRecente(parId[id]!, t);
+        continue;
+      }
       classer(Map<String, dynamic>.from(t));
     }
 
@@ -1475,8 +1953,111 @@ extension FraisScolairesServices on FraisScolaires {
     return resultat;
   }
 
+  bool _syncFusionnerEleve(
+      Eleve localEleve, Eleve serverEleve, Set<String> baseTx) {
+    if (localEleve.id.isEmpty && serverEleve.id.isNotEmpty) {
+      localEleve.id = serverEleve.id;
+    }
+    if (serverEleve.classe.isNotEmpty) localEleve.classe = serverEleve.classe;
+    if (serverEleve.section.isNotEmpty) {
+      localEleve.section = serverEleve.section;
+    }
+    localEleve.montantMensuelPersonnalise =
+        serverEleve.montantMensuelPersonnalise ??
+            localEleve.montantMensuelPersonnalise;
+    if (serverEleve.exceptionsMoisPersonnalisees.isNotEmpty) {
+      serverEleve.exceptionsMoisPersonnalisees.forEach((m, v) {
+        localEleve.exceptionsMoisPersonnalisees.putIfAbsent(m, () => v);
+      });
+    }
+    localEleve.moisDebloque ??= serverEleve.moisDebloque;
+
+    _syncCopierInfosEleve(localEleve, serverEleve);
+
+    final List<Map<String, dynamic>> txLocales =
+    List<Map<String, dynamic>>.from(localEleve.transactions);
+    final List<Map<String, dynamic>> txServeur =
+    List<Map<String, dynamic>>.from(serverEleve.transactions);
+
+    final Set<String> moisAvecTx = {};
+    for (final t in [...txLocales, ...txServeur]) {
+      final m = t['mois']?.toString() ?? '';
+      if (m.isNotEmpty) moisAvecTx.add(m);
+    }
+
+    final Map<String, double> paidAvantFusion =
+    Map<String, double>.from(localEleve.paid);
+    serverEleve.paid.forEach((m, v) {
+      if (v > (paidAvantFusion[m] ?? 0)) paidAvantFusion[m] = v;
+    });
+
+    final List<Map<String, dynamic>> mergedTransactions =
+    _fusionnerTransactionsSansDoublons(txLocales, txServeur, base: baseTx);
+
+    String idDe(Map<String, dynamic> t) => t['id']?.toString().trim() ?? '';
+    final idsL = txLocales.map(idDe).where((i) => i.isNotEmpty).toSet();
+    final idsS = txServeur.map(idDe).where((i) => i.isNotEmpty).toSet();
+    final bool lesDeuxOntAjoute = idsS.any((i) => !idsL.contains(i)) &&
+        idsL.any((i) => !idsS.contains(i));
+
+    localEleve.transactions
+      ..clear()
+      ..addAll(mergedTransactions);
+
+    final Map<String, double> paidReconstruit = {};
+    for (final t in mergedTransactions) {
+      final mois = t['mois']?.toString() ?? '';
+      if (mois.isEmpty) continue;
+      final montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
+      paidReconstruit[mois] = (paidReconstruit[mois] ?? 0) + montant;
+    }
+    for (final mois in paidAvantFusion.keys) {
+      if (!moisAvecTx.contains(mois) && (paidAvantFusion[mois] ?? 0) > 0) {
+        paidReconstruit[mois] = paidAvantFusion[mois]!;
+      }
+    }
+    localEleve.paid
+      ..clear()
+      ..addAll(paidReconstruit);
+
+    if (lesDeuxOntAjoute) {
+      for (final entry in paidReconstruit.entries) {
+        try {
+          final double requis =
+          getRequiredForMonthForEleve(localEleve, entry.key);
+          if (entry.value > requis + 0.5) return true;
+        } catch (_) {}
+      }
+    }
+    return false;
+  }
+
   Future<void> mergeRestoredData(Map<String, dynamic> serverData) async {
-    config = SchoolConfig.fromJson(serverData['config'] ?? {});
+    dernierAvertissementsFusion = <String>[];
+    final Set<String> baseEleves = _syncBase['eleves'] ?? <String>{};
+    final Set<String> baseTx = _syncBase['tx'] ?? <String>{};
+    final Set<String> baseDepenses = _syncBase['depenses'] ?? <String>{};
+    final Set<String> baseSignataires = _syncBase['signataires'] ?? <String>{};
+    final Set<String> baseAdmins = _syncBase['admins'] ?? <String>{};
+
+    final bool localEtaitVide =
+    history.values.every((y) => y.eleves.isEmpty);
+
+    final SchoolConfig serverConfig =
+    SchoolConfig.fromJson(serverData['config'] ?? {});
+    final String cfgServeur = _syncCanon(serverConfig.toJson());
+    final String cfgLocale = _syncCanon(config.toJson());
+    if (_syncBaseConfigJson == null || cfgServeur != _syncBaseConfigJson) {
+      if (_syncBaseConfigJson != null &&
+          cfgLocale != _syncBaseConfigJson &&
+          cfgLocale != cfgServeur) {
+        dernierAvertissementsFusion.add(
+            "La configuration (frais, sections, classes) a été modifiée sur "
+                "cet ordinateur ET sur un autre : la version du serveur a été "
+                "conservée. Vérifiez les frais dans Paramètres.");
+      }
+      config = serverConfig;
+    }
 
     if (serverData['localIdCounter'] != null) {
       final serverCounter = serverData['localIdCounter'] as int;
@@ -1498,6 +2079,24 @@ extension FraisScolairesServices on FraisScolaires {
       }
     }
 
+    final Set<String> idsArchiveLocal = elevesSupprimesData.eleves
+        .map((e) => e.id)
+        .where((i) => i.isNotEmpty)
+        .toSet();
+    SchoolYearData? serverArchive;
+    if (serverData['elevesSupprimesData'] != null) {
+      serverArchive = SchoolYearData.fromJson(serverData['elevesSupprimesData']);
+    }
+    final Set<String> idsArchiveServer = serverArchive == null
+        ? <String>{}
+        : serverArchive.eleves
+        .map((e) => e.id)
+        .where((i) => i.isNotEmpty)
+        .toSet();
+
+    final Map<String, String> idRemap = {};
+    bool besoinRecalcul = false;
+
     if (serverData['history'] != null) {
       final serverHistory =
       (serverData['history'] as Map<String, dynamic>).map(
@@ -1509,93 +2108,108 @@ extension FraisScolairesServices on FraisScolaires {
         final year           = entry.key;
         final serverYearData = entry.value;
 
-        if (history.containsKey(year)) {
-          final localEleves  = history[year]!.eleves;
-          final existingByKey = <String, Eleve>{};
-          for (var e in localEleves) {
-            final key =
-                "${e.nom.trim().toLowerCase()}_${e.postNom.trim().toLowerCase()}_${e.prenom.trim().toLowerCase()}";
-            existingByKey[key] = e;
-          }
+        if (!history.containsKey(year)) {
+          serverYearData.eleves.removeWhere(
+                  (e) => e.id.isNotEmpty && idsArchiveLocal.contains(e.id));
+          history[year] = serverYearData;
+          continue;
+        }
 
-          for (var serverEleve in serverYearData.eleves) {
-            final key =
-                "${serverEleve.nom.trim().toLowerCase()}_${serverEleve.postNom.trim().toLowerCase()}_${serverEleve.prenom.trim().toLowerCase()}";
+        final localEleves = history[year]!.eleves;
+        final Set<String> idsServeurAnnee = serverYearData.eleves
+            .map((e) => e.id)
+            .where((i) => i.isNotEmpty)
+            .toSet();
 
-            if (existingByKey.containsKey(key)) {
-              final localEleve = existingByKey[key]!;
-              localEleve.id    = serverEleve.id.isNotEmpty
-                  ? serverEleve.id
-                  : localEleve.id;
-              localEleve.classe   = serverEleve.classe;
-              localEleve.section  = serverEleve.section;
-              localEleve.montantMensuelPersonnalise =
-                  serverEleve.montantMensuelPersonnalise ??
-                      localEleve.montantMensuelPersonnalise;
-              if (serverEleve.exceptionsMoisPersonnalisees.isNotEmpty) {
-                serverEleve.exceptionsMoisPersonnalisees.forEach((m, v) {
-                  localEleve.exceptionsMoisPersonnalisees.putIfAbsent(
-                      m, () => v);
-                });
-              }
-              localEleve.moisDebloque ??= serverEleve.moisDebloque;
-
-              final Map<String, double> paidAvantFusion =
-              Map<String, double>.from(localEleve.paid);
-              serverEleve.paid.forEach((m, v) {
-                if (v > (paidAvantFusion[m] ?? 0)) paidAvantFusion[m] = v;
-              });
-              final List<Map<String, dynamic>> mergedTransactions =
-              _fusionnerTransactionsSansDoublons(
-                List<Map<String, dynamic>>.from(localEleve.transactions),
-                List<Map<String, dynamic>>.from(serverEleve.transactions),
-              );
-
-              if (mergedTransactions.isEmpty) {
-                final Map<String, double> paidConserve =
-                Map<String, double>.from(localEleve.paid);
-                serverEleve.paid.forEach((mois, montant) {
-                  final double actuel = paidConserve[mois] ?? 0.0;
-                  if (montant > actuel) paidConserve[mois] = montant;
-                });
-                localEleve.paid
-                  ..clear()
-                  ..addAll(paidConserve);
-              } else {
-                localEleve.transactions
-                  ..clear()
-                  ..addAll(mergedTransactions);
-
-                final Map<String, double> paidReconstruit = {};
-                for (var t in mergedTransactions) {
-                  final mois = t['mois']?.toString() ?? '';
-                  if (mois.isEmpty) continue;
-                  final montant = (t['amount'] as num?)?.toDouble() ?? 0.0;
-                  paidReconstruit[mois] =
-                      (paidReconstruit[mois] ?? 0) + montant;
-                }
-                // ⚡ CORRECTION — on garde les montants des mois qui n'ont AUCUNE
-                // transaction (anciens paiements sans historique). Avant, ils
-                // étaient effacés lors d'une récupération.
-                for (final mois in paidAvantFusion.keys) {
-                  if (!paidReconstruit.containsKey(mois) &&
-                      (paidAvantFusion[mois] ?? 0) > 0) {
-                    paidReconstruit[mois] = paidAvantFusion[mois]!;
-                  }
-                }
-                localEleve.paid
-                  ..clear()
-                  ..addAll(paidReconstruit);
-              }
-            } else {
-              localEleves.add(serverEleve);
+        if (idsArchiveServer.isNotEmpty) {
+          final aArchiver = localEleves
+              .where((l) =>
+          l.id.isNotEmpty &&
+              idsArchiveServer.contains(l.id) &&
+              !idsServeurAnnee.contains(l.id))
+              .toList();
+          for (final l in aArchiver) {
+            localEleves.remove(l);
+            if (!idsArchiveLocal.contains(l.id)) {
+              elevesSupprimesData.eleves.add(l);
+              idsArchiveLocal.add(l.id);
             }
           }
-        } else {
-          history[year] = serverYearData;
+        }
+
+        final List<Eleve> instantane = List<Eleve>.from(localEleves);
+        final List<bool> pris = List<bool>.filled(instantane.length, false);
+
+        for (final s in serverYearData.eleves) {
+          if (s.id.isNotEmpty && idsArchiveLocal.contains(s.id)) continue;
+
+          int idx = -1;
+          if (s.id.isNotEmpty) {
+            idx = instantane.indexWhere((l) => l.id == s.id);
+          }
+          if (idx != -1) {
+            final l = instantane[idx];
+            if (!_syncMemeIdentite(l, s) && !baseEleves.contains(s.id)) {
+              final String ancien = s.id;
+              final String nouveau = generateLocalStudentId(s.nom);
+              s.id = nouveau;
+              idRemap[ancien] = nouveau;
+              localEleves.add(s);
+              dernierAvertissementsFusion.add(
+                  "Deux élèves différents avaient le même ID ($ancien) : "
+                      "${s.nom} ${s.postNom} ${s.prenom} a reçu le nouvel ID "
+                      "$nouveau.");
+              continue;
+            }
+            pris[idx] = true;
+            if (_syncFusionnerEleve(l, s, baseTx)) besoinRecalcul = true;
+            continue;
+          }
+
+          final String cle = _cleNomEleve(s);
+          idx = -1;
+          for (int i = 0; i < instantane.length; i++) {
+            if (pris[i]) continue;
+            if (idsServeurAnnee.contains(instantane[i].id)) continue;
+            if (_cleNomEleve(instantane[i]) == cle) {
+              idx = i;
+              break;
+            }
+          }
+          if (idx != -1) {
+            pris[idx] = true;
+            final l = instantane[idx];
+            if (s.id.isNotEmpty && s.id != l.id) idRemap[s.id] = l.id;
+            if (_syncFusionnerEleve(l, s, baseTx)) besoinRecalcul = true;
+            continue;
+          }
+
+          localEleves.add(s);
         }
       }
     }
+
+    if (serverArchive != null) {
+      for (final e in serverArchive.eleves) {
+        if (e.id.isEmpty || !idsArchiveLocal.contains(e.id)) {
+          elevesSupprimesData.eleves.add(e);
+          if (e.id.isNotEmpty) idsArchiveLocal.add(e.id);
+        }
+      }
+    }
+    if (serverData['dateSuppressionEleves'] != null) {
+      (serverData['dateSuppressionEleves'] as Map<String, dynamic>)
+          .forEach((key, value) {
+        dateSuppressionEleves.putIfAbsent(key, () => value.toString());
+      });
+    }
+    if (serverData['motifSuppressionEleves'] != null) {
+      (serverData['motifSuppressionEleves'] as Map<String, dynamic>)
+          .forEach((key, value) {
+        motifSuppressionEleves.putIfAbsent(key, () => value.toString());
+      });
+    }
+
     if (serverData['depensesByYear'] != null) {
       final serverDepenses =
       (serverData['depensesByYear'] as Map<String, dynamic>).map(
@@ -1612,18 +2226,18 @@ extension FraisScolairesServices on FraisScolaires {
         final serverList = entry.value;
 
         if (depensesByYear.containsKey(year)) {
-          final existingIds =
-          depensesByYear[year]!.map((d) => d.id).toSet();
-          for (var d in serverList) {
-            if (!existingIds.contains(d.id)) {
-              depensesByYear[year]!.add(d);
-            }
-          }
+          depensesByYear[year] = _syncFusionnerListeParId<Depense>(
+            locale: depensesByYear[year]!,
+            serveur: serverList,
+            idDe: (d) => d.id.toString(),
+            base: baseDepenses,
+          );
         } else {
           depensesByYear[year] = serverList;
         }
       }
     }
+
     if (serverData['autresFrais'] != null) {
       final serverAutresFrais = (serverData['autresFrais'] as List<dynamic>)
           .map((e) => AutreFrais.fromJson(e as Map<String, dynamic>))
@@ -1646,6 +2260,8 @@ extension FraisScolairesServices on FraisScolaires {
         }
       }
     }
+    autresFrais.removeWhere((f) => autresFraisSupprimesIds.contains(f.id));
+
     if (serverData['autresFraisPaiementsByYear'] != null) {
       final serverPaiements = (serverData['autresFraisPaiementsByYear']
       as Map<String, dynamic>)
@@ -1667,6 +2283,10 @@ extension FraisScolairesServices on FraisScolaires {
             !autresFraisSupprimesIds.contains(p.autreFraisId))
             .toList();
 
+        for (final p in serverList) {
+          _syncRemapperEleveIdPaiement(p, idRemap);
+        }
+
         if (autresFraisPaiementsByYear.containsKey(year)) {
           final existingIds =
           autresFraisPaiementsByYear[year]!.map((p) => p.id).toSet();
@@ -1686,20 +2306,22 @@ extension FraisScolairesServices on FraisScolaires {
             autresFraisSupprimesIds.contains(p.autreFraisId));
       }
     }
+
     if (serverData['autresFraisAdministrations'] != null) {
       final serverAutresFraisAdmins =
       (serverData['autresFraisAdministrations'] as List<dynamic>)
           .map((e) =>
           AutreFraisAdministration.fromJson(e as Map<String, dynamic>))
           .toList();
-      final existingAdminIds =
-      autresFraisAdministrations.map((a) => a.id).toSet();
-      for (var a in serverAutresFraisAdmins) {
-        if (!existingAdminIds.contains(a.id)) {
-          autresFraisAdministrations.add(a);
-        }
-      }
+      autresFraisAdministrations =
+          _syncFusionnerListeParId<AutreFraisAdministration>(
+            locale: autresFraisAdministrations,
+            serveur: serverAutresFraisAdmins,
+            idDe: (a) => a.id.toString(),
+            base: baseAdmins,
+          );
     }
+
     if (serverData['adminAuditLog'] != null) {
       final serverAudit = (serverData['adminAuditLog'] as List<dynamic>)
           .map((e) => AdminAuditLog.fromJson(e as Map<String, dynamic>))
@@ -1711,17 +2333,19 @@ extension FraisScolairesServices on FraisScolaires {
         }
       }
     }
+
     if (serverData['signataires'] != null) {
       final serverSignataires = (serverData['signataires'] as List<dynamic>)
           .map((e) => Signataire.fromJson(e as Map<String, dynamic>))
           .toList();
-      final existingSignataireIds = signataires.map((s) => s.id).toSet();
-      for (var s in serverSignataires) {
-        if (!existingSignataireIds.contains(s.id)) {
-          signataires.add(s);
-        }
-      }
+      signataires = _syncFusionnerListeParId<Signataire>(
+        locale: signataires,
+        serveur: serverSignataires,
+        idDe: (s) => s.id.toString(),
+        base: baseSignataires,
+      );
     }
+
     if (serverData['optionsSections'] != null) {
       final serverOptions = _parseOptionsSections(serverData['optionsSections']);
       serverOptions.forEach((nom, secs) {
@@ -1754,31 +2378,10 @@ extension FraisScolairesServices on FraisScolaires {
         }
       }
     }
-    if (serverData['elevesSupprimesData'] != null) {
-      final serverElevesSupprimes =
-      SchoolYearData.fromJson(serverData['elevesSupprimesData']);
-      final existingSupprimesIds =
-      elevesSupprimesData.eleves.map((e) => e.id).toSet();
-      for (var e in serverElevesSupprimes.eleves) {
-        if (!existingSupprimesIds.contains(e.id)) {
-          elevesSupprimesData.eleves.add(e);
-        }
-      }
-    }
-    if (serverData['dateSuppressionEleves'] != null) {
-      (serverData['dateSuppressionEleves'] as Map<String, dynamic>)
-          .forEach((key, value) {
-        dateSuppressionEleves.putIfAbsent(key, () => value.toString());
-      });
-    }
-    if (serverData['motifSuppressionEleves'] != null) {
-      (serverData['motifSuppressionEleves'] as Map<String, dynamic>)
-          .forEach((key, value) {
-        motifSuppressionEleves.putIfAbsent(key, () => value.toString());
-      });
-    }
 
-    currentYear = serverData['currentYear'] ?? currentYear;
+    final String anneeServeur =
+        serverData['currentYear']?.toString() ?? currentYear;
+    if (localEtaitVide) currentYear = anneeServeur;
     if (history.containsKey(currentYear)) {
       currentData = history[currentYear]!;
     } else {
@@ -1787,6 +2390,22 @@ extension FraisScolairesServices on FraisScolaires {
     }
 
     await _assignMissingIds();
+
+    if (besoinRecalcul) {
+      try {
+        await recalculerPaiementsPour();
+        dernierAvertissementsFusion.add(
+            "Des paiements du même mois avaient été saisis sur deux "
+                "ordinateurs : la répartition par mois a été recalculée "
+                "(aucun montant n'a été perdu ni ajouté).");
+      } catch (_) {}
+    }
+
+    final dynamic rev = serverData['revision'] ?? serverData['_revision'];
+    if (rev is num) _syncServerRevision = rev.toInt();
+    _syncBase = _syncIdsDepuisServeur(serverData);
+    _syncBaseConfigJson = cfgServeur;
+    _localLoadFailed = false;
   }
 
   Future<Map<String, dynamic>> recordAbsences({
@@ -1869,6 +2488,7 @@ extension FraisScolairesServices on FraisScolaires {
     required String studentId,
     required String title,
     required String message,
+    bool urgent = false,
   }) async {
     if (schoolCode == null || schoolCode!.isEmpty) {
       return {'success': false, 'error': 'Code école manquant.'};
@@ -1882,9 +2502,17 @@ extension FraisScolairesServices on FraisScolaires {
           'student_id':  studentId,
           'title':       title,
           'message':     message,
+          'urgent':      urgent,
         }),
       ).timeout(const Duration(seconds: 15));
-      if (response.statusCode == 200) return {'success': true};
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'success': true,
+          'batch_id': data['batch_id'],
+          'urgent': data['urgent'] == true,
+        };
+      }
       return {
         'success': false,
         'error': 'Statut ${response.statusCode} : ${response.body}',
@@ -1903,6 +2531,7 @@ extension FraisScolairesServices on FraisScolaires {
     String? classe,
     String? section,
     List<String>? studentIds,
+    bool urgent = false,
   }) async {
     if (schoolCode == null || schoolCode!.isEmpty) {
       return {'success': false, 'error': 'Code école manquant.'};
@@ -1920,6 +2549,7 @@ extension FraisScolairesServices on FraisScolaires {
           'classe':      classe ?? '',
           'section':     section ?? '',
           'student_ids': studentIds ?? [],
+          'urgent':      urgent,
         }),
       ).timeout(const Duration(seconds: 20));
       if (response.statusCode == 200) {
@@ -1927,6 +2557,8 @@ extension FraisScolairesServices on FraisScolaires {
         return {
           'success': true,
           'notified_count': data['notified_count'] ?? 0,
+          'batch_id': data['batch_id'],
+          'urgent': data['urgent'] == true,
         };
       }
       return {
