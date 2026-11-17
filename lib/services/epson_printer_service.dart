@@ -7,6 +7,7 @@ import 'package:win32/win32.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:image/image.dart' as img;
 import 'package:flutter/foundation.dart' show debugPrint;
+import 'receipt_layout_settings.dart';
 
 class EscPosPrinterService {
   static File? _logFile;
@@ -14,126 +15,164 @@ class EscPosPrinterService {
   static const int _maxLogSizeBytes = 5 * 1024 * 1024;
 
   // ---------------------------------------------------------------------------
-  // MISE EN PAGE DES REÇUS (réglages centralisés)
+  // INFORMATIONS DE L'ÉLÈVE (adresse, père, mère…) — fournies par l'écran
+  // d'accueil. Retourne une table : 'adresse', 'pere', 'mere',
+  // 'dateNaissance' et 'cf:<question>' pour les champs personnalisés.
+  // ---------------------------------------------------------------------------
+  static Map<String, String> Function(String studentId, String studentName)?
+  studentInfoResolver;
+
+  // ---------------------------------------------------------------------------
+  // MISE EN PAGE DES REÇUS (pilotée par ReceiptTheme)
   // ---------------------------------------------------------------------------
 
-  /// Nombre de caractères par ligne (police A, papier 80 mm).
-  /// 42 = valeur sûre pour les imprimantes 512 points ; si ton imprimante
-  /// est en 576 points tu peux monter à 48.
-  static const int _cols = 42;
-
-  /// Nombre de lignes vides laissées pour la signature + le cachet.
-  /// Augmente cette valeur si tu veux encore plus de place.
-  static const int _signatureFeedLines = 7;
-
-  /// Style de texte courant : gras + double hauteur (plus lisible).
-  static const PosStyles _body =
-  PosStyles(bold: true, height: PosTextSize.size2);
-
-  static const PosStyles _bodyRight = PosStyles(
-      bold: true, height: PosTextSize.size2, align: PosAlign.right);
-
-  static const PosStyles _bodyCenter = PosStyles(
-      bold: true, height: PosTextSize.size2, align: PosAlign.center);
-
-  static const PosStyles _center = PosStyles(align: PosAlign.center);
-
-  static const PosStyles _titleStyle = PosStyles(
-    align: PosAlign.center,
-    bold: true,
-    underline: true,
-    height: PosTextSize.size2,
-  );
-
-  static const PosStyles _bigCenter = PosStyles(
-    align: PosAlign.center,
-    bold: true,
-    height: PosTextSize.size2,
-    width: PosTextSize.size2,
-  );
-
-  /// Nom de l'élève : très grand si le nom est court, sinon double hauteur.
-  static PosStyles _nameStyle(String name) {
-    if (name.length <= (_cols ~/ 2)) {
-      return const PosStyles(
-        bold: true,
-        height: PosTextSize.size2,
-        width: PosTextSize.size2,
-      );
+  static Future<ReceiptTheme> _loadTheme() async {
+    try {
+      await receiptLayout.charger();
+      return ReceiptTheme.fromSettings(receiptLayout);
+    } catch (e, st) {
+      _log('EXCEPTION lecture des réglages de mise en forme, format actuel '
+          'utilisé par défaut : $e\n$st');
+      return ReceiptTheme.fromSettings(ReceiptLayoutSettings());
     }
-    return const PosStyles(
-      bold: true,
-      height: PosTextSize.size2,
-      width: PosTextSize.size1,
-    );
   }
 
-  static List<int> _sepLine(Generator g, String ch) {
-    return g.text(ch * _cols, styles: _center);
+  static List<int> _sepLine(Generator g, ReceiptTheme t, String ch) {
+    return g.text(ch * t.cols, styles: t.center);
   }
 
-  /// Ligne séparatrice + logo/nom de l'école.
+  static String _latin(String s) {
+    final b = StringBuffer();
+    for (final r in s.runes) {
+      b.write(r <= 255 ? String.fromCharCode(r) : '?');
+    }
+    return b.toString();
+  }
+
+  static List<String> _wrap(String text, int max) {
+    final words = text.trim().split(RegExp(r'\s+'));
+    final lines = <String>[];
+    String cur = '';
+    for (var w in words) {
+      while (w.length > max) {
+        if (cur.isNotEmpty) {
+          lines.add(cur);
+          cur = '';
+        }
+        lines.add(w.substring(0, max));
+        w = w.substring(max);
+      }
+      final cand = cur.isEmpty ? w : '$cur $w';
+      if (cand.length <= max) {
+        cur = cand;
+      } else {
+        lines.add(cur);
+        cur = w;
+      }
+    }
+    if (cur.isNotEmpty) lines.add(cur);
+    return lines;
+  }
+
+  /// Lignes d'informations supplémentaires de l'élève (adresse, père, mère…).
+  /// Ne bloque JAMAIS l'impression : en cas de souci, retourne rien.
+  static List<int> _infoBlock(
+      Generator generator, ReceiptTheme t, String studentId, String studentName) {
+    try {
+      final s = receiptLayout;
+      if (!s.afficherInfosSup) return <int>[];
+      final resolver = studentInfoResolver;
+      if (resolver == null) return <int>[];
+      final info = resolver(studentId, studentName);
+      if (info.isEmpty) return <int>[];
+
+      final lignes = <MapEntry<String, String>>[];
+      if (s.showAdresse) lignes.add(MapEntry('Adresse', info['adresse'] ?? ''));
+      if (s.showPere) lignes.add(MapEntry('Père', info['pere'] ?? ''));
+      if (s.showMere) lignes.add(MapEntry('Mère', info['mere'] ?? ''));
+      if (s.showDateNaissance) {
+        lignes.add(MapEntry('Né(e) le', info['dateNaissance'] ?? ''));
+      }
+      for (final k in s.champsPerso) {
+        lignes.add(MapEntry(k, info['cf:$k'] ?? ''));
+      }
+
+      List<int> bytes = [];
+      for (final l in lignes) {
+        final v = _latin(l.value).trim();
+        if (v.isEmpty) continue;
+        for (final ligne in _wrap('${_latin(l.key)} : $v', t.cols)) {
+          bytes += generator.text(ligne, styles: t.row);
+        }
+      }
+      return bytes;
+    } catch (e, st) {
+      _log('EXCEPTION lecture des informations élève pour le reçu, ignorées : '
+          '$e\n$st');
+      return <int>[];
+    }
+  }
+
+  /// Ligne séparatrice + logo(s)/nom de l'école.
   static List<int> _schoolHeader(
-      Generator generator, {
+      Generator generator,
+      ReceiptTheme t, {
         required String schoolName,
         required Uint8List? logoBytes,
         required String contexte,
       }) {
     List<int> bytes = [];
-    bytes += _sepLine(generator, '=');
+    bytes += _sepLine(generator, t, '=');
 
-    if (logoBytes != null) {
+    if (logoBytes != null && t.logoCount > 0) {
       try {
         final headerImage = _buildReceiptHeaderImage(
           schoolName: schoolName,
           logoBytes: logoBytes,
+          theme: t,
         );
         bytes += generator.image(headerImage);
       } catch (e, st) {
         _log('EXCEPTION génération du logo ($contexte), logo ignoré : '
             '$e\n$st');
-        bytes += generator.text(schoolName.toUpperCase(), styles: _bigCenter);
+        bytes += generator.text(schoolName.toUpperCase(),
+            styles: t.schoolFor(schoolName));
       }
     } else {
-      bytes += generator.text(schoolName.toUpperCase(), styles: _bigCenter);
+      bytes += generator.text(schoolName.toUpperCase(),
+          styles: t.schoolFor(schoolName));
     }
     return bytes;
   }
 
-  /// Bloc signature / cachet : grand espace vide pour signer et apposer
-  /// le sceau ou le logo.
-  static List<int> _signatureBlock(Generator generator) {
+  /// Bloc signature / cachet.
+  static List<int> _signatureBlock(Generator generator, ReceiptTheme t) {
     List<int> bytes = [];
-    bytes += generator.text(
-      'Signature / Cachet :',
-      styles: const PosStyles(
-        bold: true,
-        height: PosTextSize.size2,
-        width: PosTextSize.size2,
-      ),
-    );
-    bytes += generator.feed(_signatureFeedLines);
-    bytes += generator.text('.' * _cols, styles: _center);
+    bytes += generator.text(t.signatureLabel, styles: t.signature);
+    if (t.signatureFeed > 0) {
+      bytes += generator.feed(t.signatureFeed);
+    }
+    bytes += generator.text('.' * t.cols, styles: t.center);
     return bytes;
   }
 
-  static List<int> _footer(Generator generator, {bool conserver = true}) {
+  static List<int> _footer(Generator generator, ReceiptTheme t,
+      {bool conserver = true}) {
     List<int> bytes = [];
-    bytes += _sepLine(generator, '=');
-    bytes += generator.text(
-      'Merci pour votre paiement !',
-      styles: _bodyCenter,
-    );
-    if (conserver) {
+    bytes += _sepLine(generator, t, '=');
+    if (t.showMerci) {
       bytes += generator.text(
-        'Conservez ce reçu.',
-        styles: const PosStyles(
-          align: PosAlign.center,
-          height: PosTextSize.size2,
-        ),
+        'Merci pour votre paiement !',
+        styles: t.bodyCenter,
       );
     }
-    bytes += _sepLine(generator, '=');
+    if (conserver && t.showConserver) {
+      bytes += generator.text(
+        'Conservez ce reçu.',
+        styles: t.conserver,
+      );
+    }
+    bytes += _sepLine(generator, t, '=');
     bytes += generator.feed(2);
     bytes += generator.cut();
     return bytes;
@@ -295,7 +334,7 @@ class EscPosPrinterService {
   }
 
   // ---------------------------------------------------------------------------
-  // ENVOI DES OCTETS BRUTS
+  // ENVOI DES OCTETS BRUTS (INCHANGÉ)
   // ---------------------------------------------------------------------------
 
   static Future<bool> _sendRawBytes(
@@ -604,7 +643,7 @@ Write-Output \$result
   }
 
   // ---------------------------------------------------------------------------
-  // EN-TÊTE DU REÇU (LOGO + NOM DE L'ÉCOLE)
+  // EN-TÊTE DU REÇU (LOGO(S) + NOM DE L'ÉCOLE)
   // ---------------------------------------------------------------------------
 
   static img.Image _prepareLogoForPrint(Uint8List logoBytes, int targetSize) {
@@ -642,23 +681,28 @@ Write-Output \$result
     return out;
   }
 
-  /// Largeur de l'image d'en-tête en points (512 = largeur sûre 80 mm).
-  static const int _headerWidth = 512;
-
-  /// Taille du logo (carré) en points. Avant : 60 → maintenant : 110.
-  static const int _logoBox = 110;
-
   static img.Image _buildReceiptHeaderImage({
     required String schoolName,
     required Uint8List logoBytes,
+    required ReceiptTheme theme,
   }) {
     const int margin = 6;
-    const int logoBox = _logoBox;
+    final int headerWidth = theme.headerWidth;
+    final int logoBox = theme.logoBox;
+    final int lineHeight = theme.lineHeight;
+    final int nbLogos = theme.logoCount < 1
+        ? 1
+        : (theme.logoCount > 3 ? 3 : theme.logoCount);
+    final bool logoDroite = nbLogos >= 2;
+    // 3e logo : centré, sur sa propre ligne au-dessus du nom.
+    final int rangeeCentre = nbLogos >= 3 ? logoBox + margin : 0;
 
     final int textZoneLeft = margin + logoBox + margin;
-    final int textZoneRight = _headerWidth - margin - logoBox - margin;
+    final int textZoneRight = logoDroite
+        ? headerWidth - margin - logoBox - margin
+        : headerWidth - margin;
     final int textZoneWidth =
-    (textZoneRight - textZoneLeft).clamp(40, _headerWidth);
+    (textZoneRight - textZoneLeft).clamp(40, headerWidth);
 
     img.Image? logo;
     try {
@@ -675,7 +719,8 @@ Write-Output \$result
     img.BitmapFont usedFont;
 
     final safeNameBig = _safeText(schoolName.trim(), bigFont);
-    if (_textWidth(bigFont, safeNameBig) <= textZoneWidth) {
+    if (theme.bigSchoolName &&
+        _textWidth(bigFont, safeNameBig) <= textZoneWidth) {
       firstLine = safeNameBig;
       extraLines = [];
       usedFont = bigFont;
@@ -698,7 +743,7 @@ Write-Output \$result
 
       final List<String> wrapped = [];
       if (remainingWords.isNotEmpty) {
-        final fullWidth = _headerWidth - 2 * margin;
+        final fullWidth = headerWidth - 2 * margin;
         String wline = '';
         for (final w in remainingWords) {
           final candidate = wline.isEmpty ? w : '$wline $w';
@@ -718,39 +763,50 @@ Write-Output \$result
       usedFont = normalFont;
     }
 
-    const int lineHeight = 28;
     final int topRowHeight =
     logo != null ? logoBox : (usedFont == bigFont ? 52 : 32);
     final int extraHeight =
     extraLines.isEmpty ? 0 : (extraLines.length * lineHeight) + 4;
-    final int headerHeight = (margin * 2) + topRowHeight + extraHeight;
+    final int headerHeight =
+        (margin * 2) + rangeeCentre + topRowHeight + extraHeight;
+    final int baseY = margin + rangeeCentre;
 
-    final canvas = img.Image(width: _headerWidth, height: headerHeight);
+    final canvas = img.Image(width: headerWidth, height: headerHeight);
     img.fill(canvas, color: img.ColorRgb8(255, 255, 255));
 
     if (logo != null) {
-      final ly = margin + ((topRowHeight - logo.height) ~/ 2);
+      final ly = baseY + ((topRowHeight - logo.height) ~/ 2);
       img.compositeImage(canvas, logo, dstX: margin, dstY: ly);
-      img.compositeImage(
-        canvas,
-        logo,
-        dstX: _headerWidth - margin - logo.width,
-        dstY: ly,
-      );
+      if (logoDroite) {
+        img.compositeImage(
+          canvas,
+          logo,
+          dstX: headerWidth - margin - logo.width,
+          dstY: ly,
+        );
+      }
+      if (nbLogos >= 3) {
+        img.compositeImage(
+          canvas,
+          logo,
+          dstX: (headerWidth - logo.width) ~/ 2,
+          dstY: margin,
+        );
+      }
     }
 
     final int fontVisualHeight = usedFont == bigFont ? 48 : 24;
     final int firstWidth = _textWidth(usedFont, firstLine);
     final int fx = textZoneLeft +
         (((textZoneWidth - firstWidth) / 2).round()).clamp(0, textZoneWidth);
-    final int fy = margin + ((topRowHeight - fontVisualHeight) / 2).round();
+    final int fy = baseY + ((topRowHeight - fontVisualHeight) / 2).round();
     _drawBoldString(canvas, firstLine,
         font: usedFont, x: fx, y: fy, color: img.ColorRgb8(0, 0, 0));
 
-    int ey = margin + topRowHeight + 4;
+    int ey = baseY + topRowHeight + 4;
     for (final line in extraLines) {
       final w = _textWidth(normalFont, line);
-      final ex = (((_headerWidth - w) / 2).round()).clamp(0, _headerWidth);
+      final ex = (((headerWidth - w) / 2).round()).clamp(0, headerWidth);
       _drawBoldString(canvas, line,
           font: normalFont, x: ex, y: ey, color: img.ColorRgb8(0, 0, 0));
       ey += lineHeight;
@@ -846,6 +902,7 @@ Write-Output \$result
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
+      final t = await _loadTheme();
 
       generator.setGlobalCodeTable('CP1252');
 
@@ -860,78 +917,81 @@ Write-Output \$result
 
       bytes += _schoolHeader(
         generator,
+        t,
         schoolName: schoolName,
         logoBytes: logoBytes,
         contexte: 'printReceipt',
       );
 
-      bytes += generator.text('REÇU DE PAIEMENT', styles: _titleStyle);
+      bytes += generator.text('REÇU DE PAIEMENT',
+          styles: t.titleFor('REÇU DE PAIEMENT'));
 
       if (noteExplicative != null && noteExplicative.trim().isNotEmpty) {
         bytes += generator.text(
           noteExplicative.trim().toUpperCase(),
-          styles: _bodyCenter,
+          styles: t.bodyCenter,
         );
       }
 
       bytes += generator.text(
         'Année scolaire : $currentYear',
-        styles: _bodyCenter,
+        styles: t.bodyCenter,
       );
-      bytes += _sepLine(generator, '=');
+      bytes += _sepLine(generator, t, '=');
 
-      bytes += generator.text('Nom complet :', styles: _body);
+      bytes += generator.text('Nom complet :', styles: t.label);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: _nameStyle(studentName),
+        styles: t.nameStyle(studentName),
       );
-      bytes += _sepLine(generator, '.');
+      bytes += _infoBlock(generator, t, studentId, studentName);
+      bytes += _sepLine(generator, t, '.');
 
       bytes += generator.row([
-        PosColumn(text: 'Reçu : $numRecu', width: 12, styles: _body),
+        PosColumn(text: 'Reçu : $numRecu', width: 12, styles: t.small),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'ID : $studentId', width: 6, styles: _body),
-        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
+        PosColumn(text: 'ID : $studentId', width: 6, styles: t.row),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: t.row),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
-        PosColumn(text: '$today $heure', width: 6, styles: _body),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: t.row),
+        PosColumn(text: '$today $heure', width: 6, styles: t.small),
       ]);
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.row([
-        PosColumn(text: 'Mois payé :', width: 6, styles: _body),
-        PosColumn(text: moisPaye, width: 6, styles: _body),
+        PosColumn(text: 'Mois payé :', width: 6, styles: t.row),
+        PosColumn(text: moisPaye, width: 6, styles: t.row),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Montant payé :', width: 7, styles: _body),
+        PosColumn(text: 'Montant payé :', width: 7, styles: t.row),
         PosColumn(
           text: '${montantPaye.toStringAsFixed(0)} FC',
           width: 5,
-          styles: _bodyRight,
+          styles: t.amountSingle,
         ),
       ]);
 
       if (resteAPayerMois > 0) {
         bytes += generator.row([
-          PosColumn(text: 'Reste à payer :', width: 7, styles: _body),
+          PosColumn(text: 'Reste à payer :', width: 7, styles: t.row),
           PosColumn(
             text: '${resteAPayerMois.toStringAsFixed(0)} FC',
             width: 5,
-            styles: _bodyRight,
+            styles: t.amountSingle,
           ),
         ]);
       } else {
         bytes += generator.text(
           '>>> MOIS COMPLÈTEMENT PAYÉ <<<',
-          styles: _bodyCenter,
+          styles: t.bodyCenter,
         );
       }
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
 
-      bytes += _signatureBlock(generator);
-      bytes += _footer(generator);
+      bytes += _signatureBlock(generator, t);
+      bytes += _footer(generator, t);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printReceipt terminé pour "$studentName" ($studentId) — '
@@ -980,6 +1040,7 @@ Write-Output \$result
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
+      final t = await _loadTheme();
 
       generator.setGlobalCodeTable('CP1252');
 
@@ -994,48 +1055,49 @@ Write-Output \$result
 
       bytes += _schoolHeader(
         generator,
+        t,
         schoolName: schoolName,
         logoBytes: logoBytes,
         contexte: 'printTransactionsReceipt',
       );
 
-      bytes += generator.text(
-        duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : titre,
-        styles: _titleStyle,
-      );
+      final String texteTitre =
+      duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : titre;
+      bytes += generator.text(texteTitre, styles: t.titleFor(texteTitre));
       bytes += generator.text(
         'Année scolaire : $currentYear',
-        styles: _bodyCenter,
+        styles: t.bodyCenter,
       );
-      bytes += _sepLine(generator, '=');
+      bytes += _sepLine(generator, t, '=');
 
-      bytes += generator.text('Nom complet :', styles: _body);
+      bytes += generator.text('Nom complet :', styles: t.label);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: _nameStyle(studentName),
+        styles: t.nameStyle(studentName),
       );
-      bytes += _sepLine(generator, '.');
+      bytes += _infoBlock(generator, t, studentId, studentName);
+      bytes += _sepLine(generator, t, '.');
 
       bytes += generator.row([
-        PosColumn(text: 'Reçu : $numRecu', width: 12, styles: _body),
+        PosColumn(text: 'Reçu : $numRecu', width: 12, styles: t.small),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'ID : $studentId', width: 6, styles: _body),
-        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
+        PosColumn(text: 'ID : $studentId', width: 6, styles: t.row),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: t.row),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
-        PosColumn(text: '$today $heure', width: 6, styles: _body),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: t.row),
+        PosColumn(text: '$today $heure', width: 6, styles: t.small),
       ]);
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.text(
         transactions.length > 1
             ? 'DÉTAIL DES PAIEMENTS (${transactions.length})'
             : 'DÉTAIL DU PAIEMENT',
-        styles: _bodyCenter,
+        styles: t.bodyCenter,
       );
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
 
       double total = 0;
       final sorted = List<Map<String, dynamic>>.from(transactions)
@@ -1045,47 +1107,47 @@ Write-Output \$result
           return dateA.compareTo(dateB);
         });
 
-      for (final t in sorted) {
-        final mois = (t['mois'] ?? '').toString();
-        final montant = (t['amount'] as num?)?.toDouble() ??
-            (t['montant'] as num?)?.toDouble() ??
+      for (final tr in sorted) {
+        final mois = (tr['mois'] ?? '').toString();
+        final montant = (tr['amount'] as num?)?.toDouble() ??
+            (tr['montant'] as num?)?.toDouble() ??
             0.0;
-        final date = (t['date'] ?? '').toString();
+        final date = (tr['date'] ?? '').toString();
         total += montant;
 
         bytes += generator.row([
           PosColumn(
             text: mois.isNotEmpty ? mois : '-',
             width: 6,
-            styles: _body,
+            styles: t.row,
           ),
           PosColumn(
             text: '${montant.toStringAsFixed(0)} FC',
             width: 6,
-            styles: _bodyRight,
+            styles: t.rowRight,
           ),
         ]);
         if (date.isNotEmpty) {
           bytes += generator.text(
             '   le $date',
-            styles: const PosStyles(height: PosTextSize.size2),
+            styles: t.detail,
           );
         }
       }
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.row([
-        PosColumn(text: 'TOTAL PAYÉ :', width: 6, styles: _body),
+        PosColumn(text: 'TOTAL PAYÉ :', width: 6, styles: t.strong),
         PosColumn(
           text: '${total.toStringAsFixed(0)} FC',
           width: 6,
-          styles: _bodyRight,
+          styles: t.strongRight,
         ),
       ]);
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
 
-      bytes += _signatureBlock(generator);
-      bytes += _footer(generator);
+      bytes += _signatureBlock(generator, t);
+      bytes += _footer(generator, t);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printTransactionsReceipt terminé pour "$studentName" '
@@ -1133,6 +1195,7 @@ Write-Output \$result
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
+      final t = await _loadTheme();
 
       generator.setGlobalCodeTable('CP1252');
 
@@ -1144,40 +1207,41 @@ Write-Output \$result
 
       bytes += _schoolHeader(
         generator,
+        t,
         schoolName: schoolName,
         logoBytes: logoBytes,
         contexte: 'printStudentPaymentHistoryReceipt',
       );
 
-      bytes += generator.text(
-        duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : 'REÇU DE PAIEMENT',
-        styles: _titleStyle,
-      );
+      final String texteTitre =
+      duplicata ? 'REÇU DE PAIEMENT (DUPLICATA)' : 'REÇU DE PAIEMENT';
+      bytes += generator.text(texteTitre, styles: t.titleFor(texteTitre));
       bytes += generator.text(
         'Année scolaire : $currentYear',
-        styles: _bodyCenter,
+        styles: t.bodyCenter,
       );
-      bytes += _sepLine(generator, '=');
+      bytes += _sepLine(generator, t, '=');
 
-      bytes += generator.text('Nom complet :', styles: _body);
+      bytes += generator.text('Nom complet :', styles: t.label);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: _nameStyle(studentName),
+        styles: t.nameStyle(studentName),
       );
-      bytes += _sepLine(generator, '.');
+      bytes += _infoBlock(generator, t, studentId, studentName);
+      bytes += _sepLine(generator, t, '.');
 
       bytes += generator.row([
-        PosColumn(text: 'ID : $studentId', width: 6, styles: _body),
-        PosColumn(text: 'Promo : $classe', width: 6, styles: _body),
+        PosColumn(text: 'ID : $studentId', width: 6, styles: t.row),
+        PosColumn(text: 'Promo : $classe', width: 6, styles: t.row),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
-        PosColumn(text: '$today $heure', width: 6, styles: _body),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: t.row),
+        PosColumn(text: '$today $heure', width: 6, styles: t.small),
       ]);
 
-      bytes += _sepLine(generator, '-');
-      bytes += generator.text('BILAN FINANCIER', styles: _bodyCenter);
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
+      bytes += generator.text('BILAN FINANCIER', styles: t.bodyCenter);
+      bytes += _sepLine(generator, t, '-');
 
       for (final mois in months) {
         final double paye = paidByMonth[mois] ?? 0.0;
@@ -1198,56 +1262,53 @@ Write-Output \$result
           PosColumn(
             text: mois,
             width: 4,
-            styles: PosStyles(bold: !nonCommence, height: PosTextSize.size2),
+            styles: t.monthStyle(!nonCommence),
           ),
           PosColumn(
             text: '${paye.toStringAsFixed(0)} / ${requis.toStringAsFixed(0)}',
             width: 5,
-            styles: PosStyles(bold: !nonCommence, height: PosTextSize.size2),
+            styles: t.monthStyle(!nonCommence),
           ),
           PosColumn(
             text: statut,
             width: 3,
-            styles: PosStyles(
-              bold: !nonCommence,
-              height: PosTextSize.size2,
-              align: PosAlign.right,
-            ),
+            styles: t.monthStyle(!nonCommence, align: PosAlign.right),
           ),
         ]);
       }
 
       final double resteTotal = totalRequis - totalPaye;
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.row([
-        PosColumn(text: 'Total payé :', width: 6, styles: _body),
+        PosColumn(text: 'Total payé :', width: 6, styles: t.row),
         PosColumn(
           text: '${totalPaye.toStringAsFixed(0)} FC',
           width: 6,
-          styles: _bodyRight,
+          styles: t.rowRight,
         ),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Total requis :', width: 6, styles: _body),
+        PosColumn(text: 'Total requis :', width: 6, styles: t.row),
         PosColumn(
           text: '${totalRequis.toStringAsFixed(0)} FC',
           width: 6,
-          styles: _bodyRight,
+          styles: t.rowRight,
         ),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Reste à payer :', width: 6, styles: _body),
+        PosColumn(text: 'Reste à payer :', width: 6, styles: t.strong),
         PosColumn(
           text: '${(resteTotal > 0 ? resteTotal : 0).toStringAsFixed(0)} FC',
           width: 6,
-          styles: _bodyRight,
+          styles: t.strongRight,
         ),
       ]);
 
-      bytes += _sepLine(generator, '-');
-      bytes += generator.text('HISTORIQUE DES PAIEMENTS', styles: _bodyCenter);
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
+      bytes += generator.text('HISTORIQUE DES PAIEMENTS',
+          styles: t.bodyCenter);
+      bytes += _sepLine(generator, t, '-');
 
       final sorted = List<Map<String, dynamic>>.from(transactions)
         ..sort((a, b) => (a['date'] ?? '')
@@ -1257,39 +1318,40 @@ Write-Output \$result
       if (sorted.isEmpty) {
         bytes += generator.text(
           'Aucune transaction enregistrée.',
-          styles: const PosStyles(
-            align: PosAlign.center,
-            height: PosTextSize.size2,
-          ),
+          styles: t.empty,
         );
       } else {
-        for (final t in sorted) {
-          final String date =
-          (t['date'] ?? '').toString().isEmpty ? '-' : t['date'].toString();
-          final String mois =
-          (t['mois'] ?? '').toString().isEmpty ? '-' : t['mois'].toString();
-          final double montant = (t['amount'] as num?)?.toDouble() ??
-              (t['montant'] as num?)?.toDouble() ??
+        for (final tr in sorted) {
+          final String date = (tr['date'] ?? '').toString().isEmpty
+              ? '-'
+              : tr['date'].toString();
+          final String mois = (tr['mois'] ?? '').toString().isEmpty
+              ? '-'
+              : tr['mois'].toString();
+          final double montant = (tr['amount'] as num?)?.toDouble() ??
+              (tr['montant'] as num?)?.toDouble() ??
               0.0;
 
           bytes += generator.row([
             PosColumn(
               text: '$date - $mois',
               width: 8,
-              styles: const PosStyles(height: PosTextSize.size2),
+              styles: t.historyLeft,
             ),
             PosColumn(
               text: '${montant.toStringAsFixed(0)} FC',
               width: 4,
-              styles: _bodyRight,
+              styles: t.rowRight,
             ),
           ]);
         }
       }
 
-      bytes += _sepLine(generator, '-');
-      bytes += _signatureBlock(generator);
-      bytes += _footer(generator);
+      if (t.signatureOnHistory) {
+        bytes += _sepLine(generator, t, '-');
+        bytes += _signatureBlock(generator, t);
+      }
+      bytes += _footer(generator, t);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printStudentPaymentHistoryReceipt terminé pour "$studentName" '
@@ -1331,6 +1393,7 @@ Write-Output \$result
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
+      final t = await _loadTheme();
 
       generator.setGlobalCodeTable('CP1252');
 
@@ -1342,47 +1405,50 @@ Write-Output \$result
 
       bytes += _schoolHeader(
         generator,
+        t,
         schoolName: schoolName,
         logoBytes: logoBytes,
         contexte: 'printAutreFraisReceipt',
       );
 
-      bytes += generator.text(
-        duplicata
-            ? '${titreFrais.toUpperCase()} (DUPLICATA)'
-            : titreFrais.toUpperCase(),
-        styles: _titleStyle,
-      );
-      bytes += _sepLine(generator, '=');
+      final String texteTitre = duplicata
+          ? '${titreFrais.toUpperCase()} (DUPLICATA)'
+          : titreFrais.toUpperCase();
+      bytes += generator.text(texteTitre, styles: t.titleFor(texteTitre));
+      bytes += _sepLine(generator, t, '=');
 
-      bytes += generator.text('Nom complet :', styles: _body);
+      bytes += generator.text('Nom complet :', styles: t.label);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: _nameStyle(studentName),
+        styles: t.nameStyle(studentName),
       );
+      bytes += _infoBlock(generator, t, '', studentName);
 
       bytes += generator.row([
-        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
-        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: t.row),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: t.row),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Date :', width: 4, styles: _body),
-        PosColumn(text: '$today $heure', width: 8, styles: _body),
+        PosColumn(text: 'Date :', width: t.dateLabelWidth, styles: t.row),
+        PosColumn(
+            text: '$today $heure',
+            width: 12 - t.dateLabelWidth,
+            styles: t.dateValue),
       ]);
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.row([
-        PosColumn(text: 'Montant payé :', width: 7, styles: _body),
+        PosColumn(text: 'Montant payé :', width: 7, styles: t.row),
         PosColumn(
           text: '${montant.toStringAsFixed(0)} FC',
           width: 5,
-          styles: _bodyRight,
+          styles: t.amountSingle,
         ),
       ]);
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
 
-      bytes += _signatureBlock(generator);
-      bytes += _footer(generator, conserver: false);
+      bytes += _signatureBlock(generator, t);
+      bytes += _footer(generator, t, conserver: false);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printAutreFraisReceipt terminé pour "$studentName" '
@@ -1428,6 +1494,7 @@ Write-Output \$result
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
+      final t = await _loadTheme();
 
       generator.setGlobalCodeTable('CP1252');
 
@@ -1439,40 +1506,41 @@ Write-Output \$result
 
       bytes += _schoolHeader(
         generator,
+        t,
         schoolName: schoolName,
         logoBytes: logoBytes,
         contexte: 'printAutresFraisTransactionsReceipt',
       );
 
-      bytes += generator.text(
-        duplicata ? 'AUTRES FRAIS (DUPLICATA)' : 'REÇU — AUTRES FRAIS',
-        styles: _titleStyle,
-      );
-      bytes += _sepLine(generator, '=');
+      final String texteTitre =
+      duplicata ? 'AUTRES FRAIS (DUPLICATA)' : 'REÇU — AUTRES FRAIS';
+      bytes += generator.text(texteTitre, styles: t.titleFor(texteTitre));
+      bytes += _sepLine(generator, t, '=');
 
-      bytes += generator.text('Nom complet :', styles: _body);
+      bytes += generator.text('Nom complet :', styles: t.label);
       bytes += generator.text(
         studentName.toUpperCase(),
-        styles: _nameStyle(studentName),
+        styles: t.nameStyle(studentName),
       );
+      bytes += _infoBlock(generator, t, '', studentName);
 
       bytes += generator.row([
-        PosColumn(text: 'Cl. : $classe', width: 6, styles: _body),
-        PosColumn(text: 'Sect. : $section', width: 6, styles: _body),
+        PosColumn(text: 'Cl. : $classe', width: 6, styles: t.row),
+        PosColumn(text: 'Sect. : $section', width: 6, styles: t.row),
       ]);
       bytes += generator.text(
         'Imprimé le : $today $heure',
-        styles: const PosStyles(height: PosTextSize.size2),
+        styles: t.detail,
       );
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.text(
         paiements.length > 1
             ? 'DÉTAIL DES FRAIS (${paiements.length})'
             : 'DÉTAIL DU FRAIS',
-        styles: _bodyCenter,
+        styles: t.bodyCenter,
       );
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
 
       double total = 0;
       final sorted = List<Map<String, dynamic>>.from(paiements)
@@ -1490,35 +1558,35 @@ Write-Output \$result
           PosColumn(
             text: nom.isNotEmpty ? nom : '-',
             width: 7,
-            styles: _body,
+            styles: t.row,
           ),
           PosColumn(
             text: '${montant.toStringAsFixed(0)} FC',
             width: 5,
-            styles: _bodyRight,
+            styles: t.rowRight,
           ),
         ]);
         if (date.isNotEmpty) {
           bytes += generator.text(
             '   $date',
-            styles: const PosStyles(height: PosTextSize.size2),
+            styles: t.detail,
           );
         }
       }
 
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
       bytes += generator.row([
-        PosColumn(text: 'TOTAL PAYÉ :', width: 6, styles: _body),
+        PosColumn(text: 'TOTAL PAYÉ :', width: 6, styles: t.strong),
         PosColumn(
           text: '${total.toStringAsFixed(0)} FC',
           width: 6,
-          styles: _bodyRight,
+          styles: t.strongRight,
         ),
       ]);
-      bytes += _sepLine(generator, '-');
+      bytes += _sepLine(generator, t, '-');
 
-      bytes += _signatureBlock(generator);
-      bytes += _footer(generator, conserver: false);
+      bytes += _signatureBlock(generator, t);
+      bytes += _footer(generator, t, conserver: false);
 
       final ok = await _sendRawBytes(printerName, Uint8List.fromList(bytes));
       _log('printAutresFraisTransactionsReceipt terminé pour '

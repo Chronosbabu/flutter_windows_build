@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
 import '../app_state.dart';
+import '../services/epson_printer_service.dart';
 import 'enregistrer_eleve_screen.dart';
 import 'paiement_eleve_screen.dart';
 import 'repartition_screen.dart';
@@ -22,6 +23,8 @@ import 'report_generation_screen.dart';
 // réception des messages des parents)
 import 'messages_envoyes_screen.dart';
 import 'messages_parents_screen.dart';
+// ⚡ NOUVEAU — Mise en forme des reçus (formats par défaut + personnalisé)
+import 'receipt_layout_screen.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -49,6 +52,7 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   void initState() {
     super.initState();
     fraisScolaires = FraisScolaires();
+    _installerResolveurInfosEleve();
     _loadData();
     // Actualisation automatique de la pastille « messages des parents ».
     _unreadTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -61,6 +65,70 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   void dispose() {
     _unreadTimer?.cancel();
     super.dispose();
+  }
+
+  // ============================================================
+  // ⚡ NOUVEAU — INFORMATIONS DE L'ÉLÈVE POUR LES REÇUS
+  // (adresse, père, mère, date de naissance, champs personnalisés).
+  // Utilisé uniquement pour la mise en page : ne touche pas à
+  // la communication avec l'imprimante.
+  // ============================================================
+  String _normaliserNom(String s) =>
+      s.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  String _formaterDate(String brut) {
+    final v = brut.trim();
+    if (RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(v)) {
+      final p = v.substring(0, 10).split('-');
+      return '${p[2]}/${p[1]}/${p[0]}';
+    }
+    return v;
+  }
+
+  void _installerResolveurInfosEleve() {
+    EscPosPrinterService.studentInfoResolver =
+        (String studentId, String studentName) {
+      final Map<String, String> out = <String, String>{};
+      try {
+        dynamic eleve;
+        if (studentId.isNotEmpty) {
+          eleve = fraisScolaires.trouverEleveParId(studentId);
+        }
+        if (eleve == null) {
+          final cible = _normaliserNom(studentName);
+          for (final e in fraisScolaires.currentData.eleves) {
+            if (_normaliserNom('${e.nom} ${e.postNom} ${e.prenom}') == cible) {
+              eleve = e;
+              break;
+            }
+          }
+        }
+        if (eleve == null) return out;
+
+        String lire(dynamic Function() f) {
+          try {
+            final v = f();
+            return v == null ? '' : v.toString().trim();
+          } catch (_) {
+            return '';
+          }
+        }
+
+        out['adresse'] = lire(() => eleve.adresse);
+        out['pere'] = lire(() => eleve.pereNom);
+        out['mere'] = lire(() => eleve.mereNom);
+        out['dateNaissance'] = _formaterDate(lire(() => eleve.dateNaissance));
+        try {
+          final cf = eleve.customFields;
+          if (cf is Map) {
+            cf.forEach((k, v) {
+              out['cf:$k'] = v == null ? '' : v.toString().trim();
+            });
+          }
+        } catch (_) {}
+      } catch (_) {}
+      return out;
+    };
   }
 
   Future<void> _loadData() async {
@@ -471,6 +539,19 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                     MaterialPageRoute(
                       builder: (_) =>
                           RecusScreen(fraisScolaires: fraisScolaires),
+                    ),
+                  ),
+                ),
+                // ⚡ NOUVEAU — choix du format des reçus (grand format,
+                // classique compact ou personnalisé) + infos de l'élève.
+                _buildCard(
+                  Icons.tune,
+                  "Mise en forme reçus",
+                      () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ReceiptLayoutScreen(
+                          fraisScolaires: fraisScolaires),
                     ),
                   ),
                 ),

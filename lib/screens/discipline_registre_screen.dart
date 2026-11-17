@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 import 'communique_screen.dart';
 // ⚡ NOUVEAU — messagerie école ⇄ parents
 import 'messages_envoyes_screen.dart';
 import 'messages_parents_screen.dart';
+
+/// Limites des messages (identiques à celles du serveur).
+const int kMaxMessageLength = 2000;
+const int kMaxTitleLength   = 80;
 
 class DisciplineRegistreScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -223,19 +228,31 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // ⚡ PROTECTION — titre limité (le collage est tronqué)
                 TextField(
                   controller: titleController,
+                  maxLength: kMaxTitleLength,
+                  inputFormatters: [
+                    LengthLimitingTextInputFormatter(kMaxTitleLength),
+                  ],
                   decoration: const InputDecoration(
                     labelText: "Titre",
                     border: OutlineInputBorder(),
                   ),
                 ),
                 const SizedBox(height: 12),
+                // ⚡ PROTECTION — message limité à 2000 caractères : même
+                // si on colle un texte énorme, il est coupé automatiquement.
                 TextField(
                   controller: messageController,
                   maxLines: 5,
+                  maxLength: kMaxMessageLength,
+                  inputFormatters: [
+                    LengthLimitingTextInputFormatter(kMaxMessageLength),
+                  ],
                   decoration: const InputDecoration(
                     labelText: "Message au parent",
+                    helperText: "Maximum $kMaxMessageLength caractères",
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -289,12 +306,29 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
               onPressed: sending
                   ? null
                   : () async {
-                if (messageController.text.trim().isEmpty) return;
+                final titre   = titleController.text.trim();
+                final message = messageController.text.trim();
+                if (message.isEmpty) return;
+
+                // ⚡ PROTECTION — double vérification avant l'envoi
+                if (message.length > kMaxMessageLength ||
+                    titre.length > kMaxTitleLength) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                          "⚠️ Message trop long (2000 caractères maximum, "
+                              "titre 80 maximum)."),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                  return;
+                }
+
                 setDialogState(() => sending = true);
                 final result = await widget.fraisScolaires.sendConvocation(
                   studentId: eleve.id,
-                  title:     titleController.text.trim(),
-                  message:   messageController.text.trim(),
+                  title:     titre,
+                  message:   message,
                   urgent:    urgent,
                 );
                 if (ctx.mounted) Navigator.pop(ctx);

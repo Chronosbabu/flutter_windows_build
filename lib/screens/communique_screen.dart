@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
+
+/// Limites des messages (identiques à celles du serveur).
+const int _kMaxMessageLength = 2000;
+const int _kMaxTitleLength   = 80;
 
 enum _CibleType { toutLecole, section, classe, eleves }
 
@@ -83,6 +88,20 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
       );
       return;
     }
+
+    // ⚡ PROTECTION — double vérification avant l'envoi
+    if (message.length > _kMaxMessageLength ||
+        title.length > _kMaxTitleLength) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("⚠️ Message trop long (2000 caractères maximum, "
+              "titre 80 maximum)."),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     if (cible == _CibleType.section && selectedSection == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Sélectionnez une section")),
@@ -303,20 +322,32 @@ class _CommuniqueScreenState extends State<CommuniqueScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // ⚡ PROTECTION — titre limité (le collage est tronqué)
             TextField(
               controller: titleController,
+              maxLength: _kMaxTitleLength,
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(_kMaxTitleLength),
+              ],
               decoration: const InputDecoration(
                 labelText: "Titre du communiqué",
                 border: OutlineInputBorder(),
               ),
             ),
             const SizedBox(height: 14),
+            // ⚡ PROTECTION — message limité à 2000 caractères : même si on
+            // colle un texte énorme, il est coupé automatiquement.
             TextField(
               controller: messageController,
               maxLines: 6,
+              maxLength: _kMaxMessageLength,
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(_kMaxMessageLength),
+              ],
               decoration: const InputDecoration(
                 labelText: "Message",
                 hintText: "Rédigez ici le communiqué à envoyer aux parents...",
+                helperText: "Maximum $_kMaxMessageLength caractères",
                 border: OutlineInputBorder(),
               ),
             ),

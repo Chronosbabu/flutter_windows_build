@@ -3,6 +3,21 @@ import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 
 // ======================================================================
+// Couleurs fixes de la messagerie (style WhatsApp) — elles ne dépendent
+// PAS du thème de l'application, donc tout reste lisible en mode clair
+// comme en mode sombre.
+// ======================================================================
+const Color _kChatBackground = Color(0xFFEFEAE2); // fond beige
+const Color _kBubbleMine     = Color(0xFFD9FDD3); // bulle de l'école (vert clair)
+const Color _kBubbleOther    = Color(0xFFFFFFFF); // bulle du parent (blanc)
+const Color _kTextMain       = Color(0xFF111B21); // texte des messages (quasi noir)
+const Color _kTextSecondary  = Color(0xFF54656F); // heure, textes secondaires
+const Color _kReadBlue       = Color(0xFF53BDEB); // coches bleues « lu »
+const Color _kAppBarGreen    = Color(0xFF075E54); // barre du haut
+const Color _kAccentGreen    = Color(0xFF128C7E); // boutons
+const Color _kInputFill      = Color(0xFFF0F2F5); // fond du champ de saisie
+
+// ======================================================================
 // Outils communs d'affichage (dates en français, heure locale)
 // ======================================================================
 DateTime? _parseServerDate(String? s) {
@@ -329,6 +344,8 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
     final text = (last['text'] ?? '').toString();
     final when = _parseServerDate(last['created_at']?.toString());
     final bold = unread > 0;
+    // ⚡ Couleur qui s'adapte au thème (clair ou sombre) : lisible partout.
+    final Color mainTextColor = Theme.of(context).colorScheme.onSurface;
 
     return InkWell(
       onTap: () => _open(c),
@@ -362,6 +379,7 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 16,
+                            color: mainTextColor,
                             fontWeight:
                             bold ? FontWeight.bold : FontWeight.w600,
                           ),
@@ -395,7 +413,9 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 14,
-                            color: bold ? Colors.black87 : Colors.grey.shade700,
+                            color: bold
+                                ? mainTextColor
+                                : mainTextColor.withAlpha(170),
                             fontWeight:
                             bold ? FontWeight.w600 : FontWeight.normal,
                           ),
@@ -442,6 +462,9 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
 /// coches de lecture (✓ envoyé, ✓✓ gris reçu, ✓✓ bleu lu + heure de lecture).
 /// L'école peut marquer sa réponse URGENTE : le parent reçoit alors des
 /// rappels vibrants tant qu'il ne l'a pas lue.
+///
+/// ⚡ Toutes les couleurs sont FIXES (style WhatsApp) : l'écran est lisible
+/// que le téléphone soit en mode clair ou en mode sombre.
 class SchoolChatScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   final String studentId;
@@ -461,7 +484,6 @@ class SchoolChatScreen extends StatefulWidget {
 }
 
 class _SchoolChatScreenState extends State<SchoolChatScreen> {
-  static const Color _mine = Color(0xFFDCF8C6);
   static const Color _urgentColor = Color(0xFFC62828);
   static const Color _urgentBg = Color(0xFFFFEBEE);
 
@@ -636,6 +658,17 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
     final text = _controller.text.trim();
     if (text.isEmpty || _sending) return;
 
+    // ⚡ PROTECTION — jamais plus de 2000 caractères
+    if (text.length > 2000) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⚠️ Message trop long (2000 caractères maximum).'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     setState(() => _sending = true);
     final r = await widget.fraisScolaires.replyToParent(
       studentId: widget.studentId,
@@ -673,8 +706,12 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFECE5DD),
+      backgroundColor: _kChatBackground,
       appBar: AppBar(
+        backgroundColor: _kAppBarGreen,
+        foregroundColor: Colors.white,
+        iconTheme: const IconThemeData(color: Colors.white),
+        elevation: 1,
         titleSpacing: 0,
         title: Row(
           children: [
@@ -698,7 +735,11 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                     'Parent de ${widget.nomEleve}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 16),
+                    style: const TextStyle(
+                      fontSize: 16,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   if (widget.classe.isNotEmpty)
                     Text(widget.classe,
@@ -721,7 +762,9 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
 
   Widget _buildMessages() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(
+        child: CircularProgressIndicator(color: _kAccentGreen),
+      );
     }
     if (_error != null) {
       return Center(
@@ -730,13 +773,18 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.cloud_off, size: 60, color: Colors.grey),
+              const Icon(Icons.cloud_off, size: 60, color: _kTextSecondary),
               const SizedBox(height: 12),
               Text(_error!,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.grey)),
+                  style: const TextStyle(
+                      color: _kTextMain, fontSize: 15)),
               const SizedBox(height: 16),
               ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _kAccentGreen,
+                  foregroundColor: Colors.white,
+                ),
                 onPressed: () => _load(first: true),
                 icon: const Icon(Icons.refresh),
                 label: const Text('Réessayer'),
@@ -754,7 +802,7 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
             "Aucun message pour cet élève. Écrivez ci-dessous pour contacter "
                 'son parent.',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.grey),
+            style: TextStyle(color: _kTextSecondary, fontSize: 15),
           ),
         ),
       );
@@ -766,8 +814,13 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
         padding: const EdgeInsets.symmetric(vertical: 8),
         child: Center(
           child: _loadingOlder
-              ? const CircularProgressIndicator()
+              ? const CircularProgressIndicator(color: _kAccentGreen)
               : OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kAccentGreen,
+              backgroundColor: Colors.white,
+              side: const BorderSide(color: _kAccentGreen),
+            ),
             onPressed: _loadOlder,
             icon: const Icon(Icons.history, size: 18),
             label: const Text('Messages plus anciens'),
@@ -798,14 +851,25 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Center(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
           decoration: BoxDecoration(
-            color: Colors.white70,
+            color: Colors.white,
             borderRadius: BorderRadius.circular(10),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(25),
+                blurRadius: 1.5,
+                offset: const Offset(0, 1),
+              ),
+            ],
           ),
           child: Text(
             _dayLabel(d),
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            style: const TextStyle(
+              fontSize: 12.5,
+              color: _kTextSecondary,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ),
@@ -849,18 +913,18 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
           child: Container(
             padding: const EdgeInsets.fromLTRB(10, 7, 10, 4),
             decoration: BoxDecoration(
-              color: mine ? (urgent ? _urgentBg : _mine) : Colors.white,
+              color: mine ? (urgent ? _urgentBg : _kBubbleMine) : _kBubbleOther,
               border:
               urgent ? Border.all(color: _urgentColor, width: 1.5) : null,
               borderRadius: BorderRadius.only(
-                topLeft: const Radius.circular(14),
-                topRight: const Radius.circular(14),
-                bottomLeft: Radius.circular(mine ? 14 : 3),
-                bottomRight: Radius.circular(mine ? 3 : 14),
+                topLeft: const Radius.circular(12),
+                topRight: const Radius.circular(12),
+                bottomLeft: Radius.circular(mine ? 12 : 2),
+                bottomRight: Radius.circular(mine ? 2 : 12),
               ),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withAlpha(22),
+                  color: Colors.black.withAlpha(35),
                   blurRadius: 1.5,
                   offset: const Offset(0, 1),
                 ),
@@ -901,11 +965,11 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                 if (typeLabel != null) ...[
                   Text(
                     typeLabel,
-                    style: TextStyle(
-                      fontSize: 11,
+                    style: const TextStyle(
+                      fontSize: 11.5,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 0.6,
-                      color: Colors.grey.shade700,
+                      color: _kAccentGreen,
                     ),
                   ),
                   const SizedBox(height: 2),
@@ -916,12 +980,22 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                   Text(
                     title,
                     style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.bold),
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: _kTextMain,
+                    ),
                   ),
                   const SizedBox(height: 2),
                 ],
-                Text(text, style: const TextStyle(fontSize: 15, height: 1.25)),
-                const SizedBox(height: 2),
+                Text(
+                  text,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    height: 1.3,
+                    color: _kTextMain,
+                  ),
+                ),
+                const SizedBox(height: 3),
                 Align(
                   alignment: Alignment.centerRight,
                   child: Row(
@@ -931,23 +1005,26 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                         Text(
                           'Lu ${_hm(readAt)}',
                           style: const TextStyle(
-                              fontSize: 10, color: Color(0xFF34B7F1)),
+                            fontSize: 11,
+                            color: _kReadBlue,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                         const SizedBox(width: 6),
                       ],
                       Text(
                         when == null ? '' : _hm(when),
                         style: const TextStyle(
-                            fontSize: 11, color: Color(0xFF8A8A8A)),
+                          fontSize: 11.5,
+                          color: _kTextSecondary,
+                        ),
                       ),
                       if (mine) ...[
                         const SizedBox(width: 3),
                         Icon(
                           delivered ? Icons.done_all : Icons.done,
-                          size: 16,
-                          color: isRead
-                              ? const Color(0xFF34B7F1)
-                              : const Color(0xFF8A8A8A),
+                          size: 17,
+                          color: isRead ? _kReadBlue : _kTextSecondary,
                         ),
                       ],
                     ],
@@ -963,7 +1040,7 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
 
   Widget _buildInput() {
     return Container(
-      color: Colors.white,
+      color: _kChatBackground,
       child: SafeArea(
         top: false,
         child: Padding(
@@ -990,7 +1067,7 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                         child: Text(
                           'Message URGENT : le téléphone du parent vibrera '
                               'par rappels successifs jusqu\'à ce qu\'il le lise.',
-                          style: TextStyle(fontSize: 12, color: _urgentColor),
+                          style: TextStyle(fontSize: 12.5, color: _urgentColor),
                         ),
                       ),
                     ],
@@ -1010,12 +1087,17 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: _urgent ? _urgentColor : Colors.grey.shade200,
+                          color: _urgent ? _urgentColor : Colors.white,
+                          border: Border.all(
+                            color: _urgent
+                                ? _urgentColor
+                                : Colors.grey.shade400,
+                          ),
                         ),
                         child: Icon(
                           Icons.warning_amber_rounded,
                           size: 22,
-                          color: _urgent ? Colors.white : Colors.grey.shade700,
+                          color: _urgent ? Colors.white : _kTextSecondary,
                         ),
                       ),
                     ),
@@ -1027,25 +1109,47 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                       minLines: 1,
                       maxLines: 5,
                       maxLength: 2000,
+                      cursorColor: _kAccentGreen,
+                      // ⚡ Texte tapé : noir fixe, jamais blanc
+                      style: const TextStyle(
+                        fontSize: 16,
+                        color: _kTextMain,
+                      ),
                       textCapitalization: TextCapitalization.sentences,
                       decoration: InputDecoration(
                         hintText: _urgent
                             ? 'Message urgent au parent…'
                             : 'Répondre au parent…',
+                        hintStyle: const TextStyle(
+                          color: _kTextSecondary,
+                          fontSize: 16,
+                        ),
                         counterText: '',
                         isDense: true,
+                        filled: true,
+                        fillColor: Colors.white,
                         contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 10),
+                            horizontal: 16, vertical: 11),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(22),
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide.none,
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: const BorderSide(
+                              color: _kAccentGreen, width: 1.5),
                         ),
                       ),
                     ),
                   ),
                   const SizedBox(width: 8),
                   CircleAvatar(
-                    radius: 22,
-                    backgroundColor: _urgent ? _urgentColor : Colors.green,
+                    radius: 23,
+                    backgroundColor: _urgent ? _urgentColor : _kAccentGreen,
                     child: _sending
                         ? const SizedBox(
                       width: 20,
@@ -1055,7 +1159,7 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                     )
                         : IconButton(
                       icon: const Icon(Icons.send,
-                          color: Colors.white, size: 20),
+                          color: Colors.white, size: 21),
                       onPressed: _send,
                     ),
                   ),
