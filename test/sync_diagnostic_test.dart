@@ -632,6 +632,33 @@ void main() {
         reason: 'paiement de B (4 000) présent sur le serveur');
   });
 
+  test('4c. même scénario que 4 avec l\'application corrigée (étape 1 : '
+      'aucun envoi automatique) : aucun paiement perdu', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    final kB = eleveParNom(fsB, 'KABILA');
+    await payer(fsB, kB, 3000);
+    await pause();
+    await payer(fsB, kB, 3000);
+    await pause();
+    await payer(fsB, kB, 3000);
+    expect((await synchroniser(fsB))['success'], isTrue);
+
+    var fsA = await a.ouvrir(); // en retard, ne récupère pas
+    await payer(fsA, eleveParNom(fsA, 'KABILA'), 1000);
+
+    fsB = await b.ouvrir();
+    await recuperer(fsB);
+    fsA = await a.ouvrir();
+    await synchroniser(fsA);
+    fsB = await b.ouvrir();
+    await synchroniser(fsB);
+    for (final fs in [fsA, fsB]) {
+      expect(totalArgent(fs), 10000);
+      expect(totalPaid(fs), 10000);
+    }
+  });
+
   // =========================================================================
   // 5. Conflit d'ID avec une AUTRE école : le serveur renomme l'élève.
   // =========================================================================

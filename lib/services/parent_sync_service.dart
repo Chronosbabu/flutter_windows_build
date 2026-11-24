@@ -23,6 +23,20 @@ class ParentSyncService {
   ParentSyncService._();
   static final ParentSyncService instance = ParentSyncService._();
 
+  // ⚡ SÉCURITÉ DES DONNÉES — ENVOI AUTOMATIQUE COUPÉ.
+  // La route serveur /school/sync_student_payments REMPLACE tous les
+  // paiements d'un élève par ceux de l'ordinateur qui envoie, sans changer
+  // la révision du serveur : un ordinateur en retard effaçait ainsi les
+  // paiements saisis ailleurs, et des élèves / montants se multipliaient
+  // (voir test/sync_diagnostic_test.dart, scénarios 4, 4b et 12).
+  // Tant que la route serveur n'est pas corrigée (fusion sans suppression),
+  // rien n'est envoyé : les paiements passent uniquement par « Sauvegarder »
+  // (sauvegarde complète, protégée par la révision).
+  // ⚠️ Conséquence : les parents ne reçoivent plus de notification de
+  // paiement en temps réel. Repasser à true SEULEMENT après la correction du
+  // serveur.
+  static const bool envoiAutomatiqueActif = false;
+
   static const String _serverUrl = 'https://jsinf.onrender.com';
   static const String _kQueue = 'parent_sync_queue_v1';
   static const String _kFingerprints = 'parent_sync_fp_v1';
@@ -55,8 +69,32 @@ class ParentSyncService {
     _fs = fs;
     if (password != null && password.isNotEmpty) _password = password;
     await _ensureLoaded();
+    if (!envoiAutomatiqueActif) {
+      await _viderEnvoisEnAttente();
+      return;
+    }
     _ticker ??= Timer.periodic(const Duration(seconds: 10), (_) => _tick());
     unawaited(_tick());
+  }
+
+  /// Envoi coupé : on efface la file d'attente et les empreintes gardées sur
+  /// l'appareil. Ainsi, le jour où l'envoi sera réactivé, aucune ancienne
+  /// fiche (périmée) ne partira vers le serveur ; le premier passage du
+  /// détecteur ne fera que mémoriser l'état du moment.
+  Future<void> _viderEnvoisEnAttente() async {
+    _ticker?.cancel();
+    _ticker = null;
+    _debounce?.cancel();
+    _debounce = null;
+    _dirty.clear();
+    _fp.clear();
+    _hasBaseline = false;
+    stuckCount.value = 0;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kQueue);
+      await prefs.remove(_kFingerprints);
+    } catch (_) {}
   }
 
   Future<void> _ensureLoaded() => _loading ??= _doLoad();
@@ -109,6 +147,7 @@ class ParentSyncService {
       markDirtyIds(eleves.map((e) => e.id));
 
   Future<void> markDirtyIds(Iterable<String> ids) async {
+    if (!envoiAutomatiqueActif) return;
     await _ensureLoaded();
     final fs = _fs;
     if (fs == null) return;
@@ -136,6 +175,7 @@ class ParentSyncService {
   // Détecteur de modifications (filet de sécurité)
   // ------------------------------------------------------------------
   Future<void> _tick() async {
+    if (!envoiAutomatiqueActif) return;
     if (_ticking) return;
     _ticking = true;
     try {
@@ -223,6 +263,10 @@ class ParentSyncService {
   /// Envoie tout ce qui est en attente. Sans connexion, ne perd rien :
   /// la file reste sur l'appareil et le prochain passage réessaie.
   Future<void> flush() async {
+    if (!envoiAutomatiqueActif) {
+      stuckCount.value = 0;
+      return;
+    }
     if (_flushing) return;
     final fs = _fs;
     if (fs == null || _dirty.isEmpty) {
