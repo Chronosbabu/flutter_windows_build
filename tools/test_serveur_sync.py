@@ -238,6 +238,86 @@ class TestSyncPaiements(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.get_json()['code'], 'STALE_REVISION')
 
+    # -- paiements annulés : jamais réajoutés --
+    def sauvegarder(self, transformer):
+        data = self.lire()
+        rev = data.pop('_revision')
+        data.pop('_tx_supprimees', None)   # l'application ne la renvoie pas
+        data.pop('_saved_at', None)
+        transformer(data)
+        r = self.client.post('/backup', json={
+            'school_code': CODE, 'data': data, 'base_revision': rev})
+        self.assertEqual(r.status_code, 200, r.get_json())
+
+    def enrichir(self):
+        # Un autre élève a beaucoup payé : annuler T1 (3 000) ne déclenche
+        # pas le garde-fou « perte d'argent » de /backup.
+        d = self.lire()
+        d['history'][ANNEE]['eleves'][1] = eleve(
+            'E2', 'MUKENDI', [tx('T0', '2026-11-01', 50000)])
+        self.ecrire(d)
+
+    def test_paiement_annule_ne_revient_pas(self):
+        self.enrichir()
+
+        def annuler_t1(d):
+            e1 = d['history'][ANNEE]['eleves'][0]
+            e1['transactions'] = []
+            e1['paid'] = {}
+        self.sauvegarder(annuler_t1)
+        self.assertEqual(self.lire()['_tx_supprimees'], ['E1|T1'])
+
+        # Un ancien ordinateur en retard renvoie T1 (et un vrai nouveau T2).
+        code, rep = self.envoyer([self.snap('E1', 'KABILA', [
+            tx('T1', '2026-11-17', 3000), tx('T2', '2026-11-24', 2000)])])
+        e = self.eleve_serveur('E1')
+        self.assertEqual([t['id'] for t in e['transactions']], ['T2'])
+        self.assertEqual(e['paid'], {'Septembre': 2000})
+
+        # /restore ne renvoie pas la liste interne.
+        r = self.client.get(f'/restore?school_code={CODE}',
+                            headers={'X-Backup-Password': MDP})
+        self.assertNotIn('_tx_supprimees', r.get_json())
+
+        # Sauvegarde suivante sans la liste : elle est conservée.
+        self.sauvegarder(lambda d: None)
+        self.assertEqual(self.lire()['_tx_supprimees'], ['E1|T1'])
+
+    def test_paiement_retabli_par_sauvegarde_sort_de_la_liste(self):
+        self.enrichir()
+
+        def annuler(d):
+            d['history'][ANNEE]['eleves'][0]['transactions'] = []
+        self.sauvegarder(annuler)
+
+        def retablir(d):
+            d['history'][ANNEE]['eleves'][0]['transactions'] = [
+                tx('T1', '2026-11-17', 3000)]
+        self.sauvegarder(retablir)
+        self.assertEqual(self.lire()['_tx_supprimees'], [])
+
+    def test_eleve_absent_de_la_sauvegarde_non_concerne(self):
+        self.enrichir()
+
+        def archiver_e1(d):
+            d['history'][ANNEE]['eleves'] = d['history'][ANNEE]['eleves'][1:]
+        self.sauvegarder(archiver_e1)
+        self.assertEqual(self.lire()['_tx_supprimees'], [])
+
+    def test_liste_plafonnee(self):
+        ancien = serveur._MAX_TX_SUPPRIMEES
+        serveur._MAX_TX_SUPPRIMEES = 2
+        try:
+            self.enrichir()
+            d = self.lire()
+            d['_tx_supprimees'] = ['X|1', 'X|2']
+            self.ecrire(d)
+            self.sauvegarder(lambda d: d['history'][ANNEE]['eleves'][0]
+                             .update({'transactions': []}))
+            self.assertEqual(self.lire()['_tx_supprimees'], ['X|2', 'E1|T1'])
+        finally:
+            serveur._MAX_TX_SUPPRIMEES = ancien
+
     # -- /backup : version des paiements des parents --
     def test_backup_met_a_jour_version_des_eleves_modifies(self):
         data = self.lire()
