@@ -1311,4 +1311,77 @@ void main() {
     expect(niveaux(r(4, 40000), r(4, 38000), r(4, 40000), r(4, 38000)),
         ['argent:attention']);
   });
+
+  // =========================================================================
+  // ÉTAPE 5c — détecteur de doublons, réparation sûre
+  // =========================================================================
+  test('5c-1. fiche en double VIDE : détectée et archivée, argent intact',
+      () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    final k = eleveParNom(fsA, 'KABILA');
+    await payer(fsA, k, 3000);
+    fsA.currentData.eleves.add(Eleve(
+        id: 'KA26EZZ9', nom: k.nom, postNom: k.postNom, prenom: k.prenom,
+        classe: k.classe, section: k.section));
+    await fsA.saveData();
+
+    final d = fsA.detecterDoublons();
+    expect(d.length, 1);
+    expect(d.single['type'], 'eleve');
+    expect(d.single['aArchiver'], ['KA26EZZ9']);
+    expect(await fsA.reparerDoublonsSurs(), 1);
+    expect(fsA.currentData.eleves.length, 4);
+    expect(eleveParNom(fsA, 'KABILA').id, k.id);
+    expect(totalArgent(fsA), 3000);
+    expect(fsA.elevesSupprimesData.eleves.map((e) => e.id), ['KA26EZZ9']);
+    expect(fsA.detecterDoublons(), isEmpty);
+    expect((await fsA.lireJournalSync(max: 1)).single['action'],
+        'reparation_doublons');
+
+    // L'archivage se propage à l'autre ordinateur.
+    await synchroniser(fsA);
+    final fsB = await b.ouvrir();
+    await recuperer(fsB);
+    expect(elevesNommes(fsB, 'KABILA').length, 1);
+  });
+
+  test('5c-2. deux fiches avec des paiements : signalées, jamais réparées '
+      'automatiquement', () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    final k = eleveParNom(fsA, 'KABILA');
+    await payer(fsA, k, 3000);
+    final dbl = Eleve(
+        id: 'KA26EZZ9', nom: k.nom, postNom: k.postNom, prenom: k.prenom,
+        classe: k.classe, section: k.section);
+    fsA.currentData.eleves.add(dbl);
+    await pause();
+    await payer(fsA, dbl, 2000);
+    final d = fsA.detecterDoublons();
+    expect(d.single['aArchiver'], isEmpty);
+    expect(await fsA.reparerDoublonsSurs(), 0);
+    expect(fsA.currentData.eleves.length, 5);
+    expect(totalArgent(fsA), 5000);
+  });
+
+  test('5c-3. paiements identiques le même jour : signalés, jamais '
+      'supprimés', () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    final k = eleveParNom(fsA, 'MUKENDI');
+    await payer(fsA, k, 2000);
+    await pause();
+    // même date, même mois (Septembre pas encore soldé), même montant
+    final t = Map<String, dynamic>.from(k.transactions.first)
+      ..['id'] = 'TXDOUBLE';
+    k.transactions.add(t);
+    k.paid['Septembre'] = 4000;
+    await fsA.saveData();
+    final d = fsA.detecterDoublons();
+    expect(d.single['type'], 'transactions');
+    expect((d.single['ids'] as List).length, 2);
+    expect(await fsA.reparerDoublonsSurs(), 0);
+    expect(totalArgent(fsA), 4000);
+  });
 }

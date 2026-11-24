@@ -1337,6 +1337,105 @@ extension FraisScolairesServices on FraisScolaires {
     return anomalies;
   }
 
+  // ==========================================================================
+  // ⚡ ÉTAPE 5 — DÉTECTEUR DE DOUBLONS (année en cours)
+  // ==========================================================================
+  bool _ficheVide(Eleve e) =>
+      e.transactions.isEmpty &&
+          !e.hasCarteInfo &&
+          !autresFraisPaiementsByYear.values
+              .any((l) => l.any((p) => p.eleveId == e.id));
+
+  /// Groupes de doublons de l'année en cours :
+  ///  • type 'eleve' : même nom complet, plusieurs fiches. « aArchiver » =
+  ///    fiches VIDES qu'on peut archiver sans rien perdre (vide si aucune
+  ///    réparation sûre n'est possible) ;
+  ///  • type 'transactions' : paiements identiques (même date, mois et
+  ///    montant) dans un même élève — à vérifier à la main (ils peuvent être
+  ///    réels), jamais supprimés automatiquement.
+  List<Map<String, dynamic>> detecterDoublons() {
+    final out = <Map<String, dynamic>>[];
+    final parNom = <String, List<Eleve>>{};
+    for (final e in currentData.eleves) {
+      final cle = _cleNomEleve(e);
+      if (cle.replaceAll('_', '').trim().isEmpty) continue;
+      parNom.putIfAbsent(cle, () => []).add(e);
+    }
+    parNom.forEach((cle, liste) {
+      if (liste.map((e) => e.id).toSet().length < 2) return;
+      final vides = liste.where(_ficheVide).toList();
+      final pleines = liste.where((e) => !_ficheVide(e)).toList();
+      final List<Eleve> aArchiver = pleines.isNotEmpty
+          ? vides
+          : (vides.length > 1 ? vides.sublist(1) : <Eleve>[]);
+      out.add({
+        'type': 'eleve',
+        'nom': '${liste.first.nom} ${liste.first.postNom} ${liste.first.prenom}'
+            .trim(),
+        'fiches': [
+          for (final e in liste)
+            {
+              'id': e.id,
+              'classe': e.classe,
+              'section': e.section,
+              'transactions': e.transactions.length,
+              'argent': e.transactions.fold<double>(
+                  0, (s, t) => s + ((t['amount'] as num?)?.toDouble() ?? 0)),
+              'vide': _ficheVide(e),
+            }
+        ],
+        'aArchiver': aArchiver.map((e) => e.id).toList(),
+      });
+    });
+    for (final e in currentData.eleves) {
+      final parSig = <String, List<String>>{};
+      for (final t in e.transactions) {
+        final id = t['id']?.toString() ?? '';
+        parSig.putIfAbsent(_signatureTransaction(t), () => []).add(id);
+      }
+      parSig.forEach((sig, ids) {
+        if (ids.length < 2) return;
+        final parts = sig.split('|');
+        out.add({
+          'type': 'transactions',
+          'eleveId': e.id,
+          'nom': '${e.nom} ${e.postNom} ${e.prenom}'.trim(),
+          'date': parts.isNotEmpty ? parts[0] : '',
+          'mois': parts.length > 1 ? parts[1] : '',
+          'montant': parts.length > 2 ? double.tryParse(parts[2]) ?? 0 : 0,
+          'ids': ids,
+        });
+      });
+    }
+    return out;
+  }
+
+  /// Réparation SÛRE : archive uniquement les fiches en double VIDES (aucun
+  /// paiement, aucun « autre frais », aucune information) quand une autre
+  /// fiche du même élève existe. Rien d'autre n'est touché. L'archivage se
+  /// propage aux autres ordinateurs à la synchronisation. Retourne le nombre
+  /// de fiches archivées.
+  Future<int> reparerDoublonsSurs() async {
+    final ids = <String>{
+      for (final g in detecterDoublons())
+        if (g['type'] == 'eleve') ...(g['aArchiver'] as List).cast<String>(),
+    };
+    if (ids.isEmpty) return 0;
+    await _creerCopieSecuriteLocale('avant_reparation_doublons');
+    final aArchiver =
+    currentData.eleves.where((e) => ids.contains(e.id)).toList();
+    for (final e in aArchiver) {
+      await archiverEtSupprimerEleve(e,
+          motif: 'Doublon vide (réparation automatique)');
+    }
+    await _journaliserSync({
+      'action': 'reparation_doublons',
+      'fiches_archivees': aArchiver.map((e) => e.id).toList(),
+      'resume': resumeSynchronisation(),
+    });
+    return aArchiver.length;
+  }
+
   /// Dernières entrées du journal, de la plus récente à la plus ancienne.
   Future<List<Map<String, dynamic>>> lireJournalSync({int max = 200}) async {
     try {
