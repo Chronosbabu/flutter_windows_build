@@ -145,10 +145,17 @@ class ExportExcelEleves {
     return cols;
   }
 
-  /// Trie les élèves comme dans le registre (section, classe, puis nom).
-  static List<Eleve> ordonner(FraisScolaires fs, List<Eleve> eleves) => [
-        for (final g in RegistreEleves.grouper(fs, eleves)) ...g.eleves,
-      ];
+  /// Trie les élèves comme dans le registre (section, classe), puis par
+  /// ordre alphabétique (nom, post-nom, prénom) dans chaque classe.
+  static List<Eleve> ordonner(FraisScolaires fs, List<Eleve> eleves) {
+    String cle(Eleve e) => RegistreEleves.normaliser(
+        '${e.nom} ${e.postNom} ${e.prenom}');
+    return [
+      for (final g in RegistreEleves.grouper(fs, eleves))
+        ...(List<Eleve>.from(g.eleves)
+          ..sort((a, b) => cle(a).compareTo(cle(b)))),
+    ];
+  }
 
   // ---------------------------------------------------------------------
   // Nom de fichier et dossier Bureau
@@ -180,7 +187,10 @@ class ExportExcelEleves {
           [
             '-NoProfile',
             '-Command',
-            "[Environment]::GetFolderPath('Desktop')",
+            // Sortie forcée en UTF-8 : sinon un chemin accentué
+            // (ex. « C:\Users\Élève\Desktop ») arrive déformé.
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                "[Environment]::GetFolderPath('Desktop')",
           ],
           stdoutEncoding: utf8,
         );
@@ -280,8 +290,10 @@ class ExportExcelEleves {
 
   static String _nomFeuille(String titre) {
     var t = titre.replaceAll(RegExp(r'[\\/*?:\[\]]'), ' ').trim();
+    // Excel refuse un nom de feuille qui commence ou finit par « ' ».
+    t = t.replaceAll(RegExp(r"^'+|'+$"), '').trim();
     if (t.isEmpty) t = 'Élèves';
-    if (t.length > 31) t = t.substring(0, 31);
+    if (t.length > 31) t = t.substring(0, 31).trim();
     return t;
   }
 
@@ -339,7 +351,10 @@ class ExportExcelEleves {
     }
     sheet.write('</worksheet>');
 
-    final nomFeuille = _xml(_nomFeuille(titre));
+    final nomBrut = _nomFeuille(titre);
+    final nomFeuille = _xml(nomBrut);
+    // Dans une référence ('Feuille'!A1), l'apostrophe se double.
+    final nomFeuilleRef = _xml(nomBrut.replaceAll("'", "''"));
 
     final fichiers = <String, String>{
       '[Content_Types].xml':
@@ -377,7 +392,7 @@ class ExportExcelEleves {
               '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
               'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
               '<sheets><sheet name="$nomFeuille" sheetId="1" r:id="rId1"/></sheets>'
-              '${nbCols > 0 && lignes.length > 1 ? '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">\'$nomFeuille\'!\$A\$1:\$${_colonne(nbCols - 1)}\$${lignes.length}</definedName></definedNames>' : ''}'
+              '${nbCols > 0 && lignes.length > 1 ? '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">\'$nomFeuilleRef\'!\$A\$1:\$${_colonne(nbCols - 1)}\$${lignes.length}</definedName></definedNames>' : ''}'
               '</workbook>',
       'xl/_rels/workbook.xml.rels':
           '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'

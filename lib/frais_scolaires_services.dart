@@ -2181,8 +2181,10 @@ extension FraisScolairesServices on FraisScolaires {
         await _appliquerDonneesLocales(export);
         schoolCode ??= code;
         // Le code d'ordinateur (identifiants d'élèves) reste celui de CET
-        // ordinateur s'il en a déjà un.
-        if (codeOrdinateur != null) _codeAppareil = codeOrdinateur;
+        // ordinateur. S'il n'en a pas encore, un nouveau sera tiré : on ne
+        // reprend JAMAIS celui de l'export, sinon l'ordinateur d'origine et
+        // celui-ci pourraient fabriquer les mêmes identifiants d'élèves.
+        _codeAppareil = codeOrdinateur;
         _localLoadFailed = false;
       } else {
         // On garde l'état de synchronisation de cet ordinateur.
