@@ -13,6 +13,7 @@ import '../services/epson_printer_service.dart';
 import 'recovery_screen.dart';
 import 'aide.dart';
 import 'grille_frais_screen.dart';
+import 'sync_protection.dart';
 
 class _ExceptionDraft {
   final Eleve eleve;
@@ -565,6 +566,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         message += "\n⚠️ Le résumé du promoteur n'a pas pu être envoyé : "
             "réessayez dans un instant.";
       }
+      if (result['autreOrdinateur'] == true) {
+        message += "\nℹ️ Un autre ordinateur avait sauvegardé entre-temps : "
+            "ses données ont été récupérées et fusionnées avant l'envoi.";
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(message),
@@ -572,6 +577,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           duration: const Duration(seconds: 4),
         ),
       );
+      // ⚡ ÉTAPE 5 — résumé avant / serveur / après (bloquant si anormal)
+      await afficherResumeSync(context, widget.fraisScolaires, result);
+      if (mounted) setState(() {});
+      await _afficherAvertissementsFusion();
+      return;
+    }
+
+    // ⚡ ÉTAPE 5 — chiffres anormaux : rien n'a été envoyé au serveur.
+    if (result['code'] == 'ANOMALIE_FUSION') {
+      await afficherResumeSync(context, widget.fraisScolaires, result);
+      if (mounted) setState(() {});
       await _afficherAvertissementsFusion();
       return;
     }
@@ -638,6 +654,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
+    // ⚡ ÉTAPE 5 — on ne peut se déconnecter sans sauvegarde réussie que si
+    // cet ordinateur ne contient aucune donnée.
+    final resumeLocal = widget.fraisScolaires.resumeSynchronisation();
+    final bool ordinateurVide = (resumeLocal['eleves'] ?? 0) == 0 &&
+        (resumeLocal['transactions'] ?? 0) == 0 &&
+        (resumeLocal['paiements_autres_frais'] ?? 0) == 0;
+
     final action = await showDialog<String>(
       context: context,
       barrierDismissible: false,
@@ -669,18 +692,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 backgroundColor: Colors.indigo, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(ctx, 'save_then_logout'),
           ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.logout),
-            label: const Text("Déconnecter sans sauvegarder"),
-            style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(ctx, 'logout_only'),
-          ),
+          if (ordinateurVide)
+            ElevatedButton.icon(
+              icon: const Icon(Icons.logout),
+              label: const Text("Déconnecter (aucune donnée ici)"),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(ctx, 'logout_only'),
+            ),
         ],
       ),
     );
 
     if (action == null || action == 'cancel') return;
+    if (action == 'logout_only' && !ordinateurVide) return;
 
     if (action == 'save_then_logout') {
       final appState = Provider.of<AppState>(context, listen: false);
@@ -716,35 +741,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final bool backupSuccess = backupResult['success'] == true;
 
       if (!backupSuccess) {
+        // ⚡ ÉTAPE 5 — déconnexion BLOQUÉE tant que la sauvegarde n'a pas
+        // réussi : les données de cet ordinateur ne sont pas effacées.
         if (mounted) {
-          final String errMsg = backupResult['error']?.toString() ?? "Erreur inconnue";
-          final forceLogout = await showDialog<bool>(
+          if (backupResult['code'] == 'ANOMALIE_FUSION') {
+            await afficherResumeSync(
+                context, widget.fraisScolaires, backupResult);
+            if (!mounted) return;
+          }
+          final String errMsg =
+              backupResult['error']?.toString() ?? "Erreur inconnue";
+          await showDialog<void>(
             context: context,
             builder: (ctx) => AlertDialog(
-              title: const Text("Échec de la sauvegarde"),
+              title: const Text("Déconnexion impossible"),
               content: Text(
-                "La sauvegarde sur le serveur a échoué :\n$errMsg\n\n"
-                    "Voulez-vous quand même vous déconnecter ?\n"
-                    "(Vos données ne seront plus sur cet ordinateur ; une copie "
-                    "de sécurité locale sera seulement conservée.)",
+                "La sauvegarde sur le serveur n'a pas réussi :\n$errMsg\n\n"
+                    "Pour ne perdre aucune donnée, la déconnexion n'est "
+                    "possible qu'après une sauvegarde réussie. Vos données "
+                    "restent sur cet ordinateur.\n\nVérifiez la connexion "
+                    "internet puis réessayez ; si le problème continue, "
+                    "contactez l'assistance.",
               ),
               actions: [
-                TextButton(
-                    onPressed: () => Navigator.pop(ctx, false),
-                    child: const Text("Annuler")),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red, foregroundColor: Colors.white),
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text("Déconnecter quand même"),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("Compris"),
                 ),
               ],
             ),
           );
-          if (forceLogout != true) return;
-        } else {
-          return;
         }
+        return;
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -3242,6 +3270,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
               mode: 'restore',
               icone: Icons.cloud_download,
               libelle: "Récupérer depuis le Serveur",
+            ),
+            const SizedBox(height: 10),
+            // ⚡ ÉTAPE 5 — journal et doublons
+            Wrap(
+              spacing: 10,
+              runSpacing: 6,
+              children: [
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.history),
+                  label: const Text("Journal de synchronisation"),
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => JournalSyncScreen(
+                          fraisScolaires: widget.fraisScolaires),
+                    ),
+                  ),
+                ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.people_outline),
+                  label: const Text("Vérifier les doublons"),
+                  onPressed: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => DoublonsScreen(
+                            fraisScolaires: widget.fraisScolaires),
+                      ),
+                    );
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ],
             ),
             const Divider(),
             const Text("Imprimante de Reçus (Epson TM-T20III — USB)",

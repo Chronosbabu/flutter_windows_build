@@ -27,6 +27,7 @@ import 'messages_parents_screen.dart';
 import 'receipt_layout_screen.dart';
 // ⚡ NOUVEAU — Retenues sur paiements (avant répartition par pourcentages)
 import 'retenues_screen.dart';
+import 'sync_protection.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -290,6 +291,14 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     if (!mounted) return;
 
     setState(() => _sosBackupEnCours = false);
+
+    // ⚡ ÉTAPE 5 — chiffres anormaux après la récupération automatique : rien
+    // n'a été envoyé ; l'utilisateur garde ou annule.
+    if (result['code'] == 'ANOMALIE_FUSION' ||
+        result['autreOrdinateur'] == true) {
+      await afficherResumeSync(context, fraisScolaires, result);
+      if (!mounted) return;
+    }
 
     final bool success = result['success'] == true;
     ScaffoldMessenger.of(context).showSnackBar(
