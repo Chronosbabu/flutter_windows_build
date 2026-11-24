@@ -562,7 +562,8 @@ void main() {
     fsB.currentData.eleves.add(pB);
     await pause();
     await payer(fsB, pB, 3000);
-    expect(pA.id, pB.id, reason: 'les deux appareils ont généré le même ID');
+    expect(pA.id, isNot(pB.id),
+        reason: 'étape 3 : chaque ordinateur a son propre code dans les ID');
 
     for (var tour = 0; tour < 3; tour++) {
       fsA = await a.ouvrir();
@@ -632,6 +633,72 @@ void main() {
       expect(elevesNommes(fs, 'MULUMBA').length, 1);
     }
   });
+
+  for (final bPremier in [false, true]) {
+    test('3c. filet de sécurité : MÊME ID forcé sur A et B '
+        '(${bPremier ? "B" : "A"} synchronise en premier) : ni mélange ni '
+        'multiplication, mêmes ID partout', () async {
+      await departCommun();
+      const idCommun = 'MU26E99';
+      var fsA = await a.ouvrir();
+      final pA = Eleve(
+          id: idCommun, nom: 'MULUMBA', postNom: 'Jean', prenom: 'Paul',
+          classe: '1ère', section: 'Primaire');
+      fsA.currentData.eleves.add(pA);
+      await payer(fsA, pA, 10000);
+      final f = AutreFrais(id: 'F1', nom: 'Tenue', montant: 12000);
+      fsA.autresFrais.add(f);
+      await fsA.saveData();
+      await fsA.payAutreFrais(frais: f, eleve: pA, montantSaisi: 4000);
+
+      var fsB = await b.ouvrir();
+      final pB = Eleve(
+          id: idCommun, nom: 'MUTOMBO', postNom: 'Marie', prenom: 'Claire',
+          classe: '1ère', section: 'Primaire');
+      fsB.currentData.eleves.add(pB);
+      await pause();
+      await payer(fsB, pB, 3000);
+
+      for (var tour = 0; tour < 3; tour++) {
+        if (bPremier) {
+          fsB = await b.ouvrir();
+          await synchroniser(fsB);
+          fsA = await a.ouvrir();
+          await synchroniser(fsA);
+        } else {
+          fsA = await a.ouvrir();
+          await synchroniser(fsA);
+          fsB = await b.ouvrir();
+          await synchroniser(fsB);
+        }
+      }
+      fsA = await a.ouvrir();
+      await recuperer(fsA);
+      fsB = await b.ouvrir();
+      await recuperer(fsB);
+
+      double argentDe(FraisScolaires fs, String nom) => elevesNommes(fs, nom)
+          .single
+          .transactions
+          .fold<double>(0, (s, t) => s + (t['amount'] as num));
+      for (final fs in [fsA, fsB]) {
+        expect(fs.currentData.eleves.length, 6);
+        expect(elevesNommes(fs, 'MULUMBA').length, 1);
+        expect(elevesNommes(fs, 'MUTOMBO').length, 1);
+        expect(argentDe(fs, 'MULUMBA'), 10000, reason: 'pas de mélange');
+        expect(argentDe(fs, 'MUTOMBO'), 3000, reason: 'pas de mélange');
+        expect(totalArgent(fs), 13000);
+        final ids = fs.currentData.eleves.map((e) => e.id).toSet();
+        expect(ids.length, 6, reason: 'ID uniques');
+        // Le paiement Autres Frais suit bien MULUMBA.
+        final mul = eleveParNom(fs, 'MULUMBA');
+        expect(fs.getAutresFraisPaiementsForYear().single.eleveId, mul.id);
+      }
+      expect(eleveParNom(fsA, 'MULUMBA').id, eleveParNom(fsB, 'MULUMBA').id,
+          reason: 'mêmes ID sur les deux ordinateurs');
+      expect(eleveParNom(fsA, 'MUTOMBO').id, eleveParNom(fsB, 'MUTOMBO').id);
+    });
+  }
 
   // =========================================================================
   // 4. SYMPTÔME 4 — envoi automatique des paiements (ParentSyncService) par

@@ -131,6 +131,24 @@ class FraisScolaires {
   Map<String, List<String>> optionsSections = {};
 
   int _localIdCounter = 0;
+  // ⚡ Code propre à CET ordinateur (2 lettres tirées au hasard une seule
+  // fois, gardées dans le fichier local, jamais envoyées au serveur). Il
+  // entre dans les identifiants d'élèves : deux ordinateurs qui inscrivent
+  // en même temps ne fabriquent plus le même identifiant.
+  String? _codeAppareil;
+
+  String get codeAppareil {
+    final actuel = _codeAppareil;
+    if (actuel != null && RegExp(r'^[A-Z]{2}$').hasMatch(actuel)) {
+      return actuel;
+    }
+    const lettres = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // sans I ni O
+    final r = Random.secure();
+    final code = String.fromCharCodes(
+        List.generate(2, (_) => lettres.codeUnitAt(r.nextInt(lettres.length))));
+    _codeAppareil = code;
+    return code;
+  }
 
   bool _isFlushingReceiptQueue = false;
 
@@ -427,7 +445,9 @@ class FraisScolaires {
     }
   }
 
-  String generateLocalStudentId(String nom) {
+  /// [idsReserves] : identifiants à éviter en plus de ceux de cet
+  /// ordinateur (par exemple ceux du serveur pendant une fusion).
+  String generateLocalStudentId(String nom, {Set<String>? idsReserves}) {
     final yearShort = currentYear.length >= 2
         ? currentYear.substring(currentYear.length - 2)
         : '26';
@@ -445,12 +465,15 @@ class FraisScolaires {
         .where((id) => id.isNotEmpty)
         .toSet();
 
+    final appareil = codeAppareil;
     _localIdCounter++;
-    String candidate = '$namePrefix$yearShort$schoolLetter$_localIdCounter';
+    String candidate =
+        '$namePrefix$yearShort$schoolLetter$appareil$_localIdCounter';
 
-    while (allIds.contains(candidate)) {
+    while (allIds.contains(candidate) ||
+        (idsReserves != null && idsReserves.contains(candidate))) {
       _localIdCounter++;
-      candidate = '$namePrefix$yearShort$schoolLetter$_localIdCounter';
+      candidate = '$namePrefix$yearShort$schoolLetter$appareil$_localIdCounter';
     }
     return candidate;
   }

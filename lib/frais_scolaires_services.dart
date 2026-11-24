@@ -1186,6 +1186,7 @@ extension FraisScolairesServices on FraisScolaires {
     } else {
       _localIdCounter = _inferCounterFromExistingIds();
     }
+    _codeAppareil = data['codeAppareil'] as String?;
     if (data['localAccessKeys'] != null) {
       localAccessKeys = (data['localAccessKeys'] as List<dynamic>)
           .map((e) => Map<String, dynamic>.from(e as Map))
@@ -1354,6 +1355,7 @@ extension FraisScolairesServices on FraisScolaires {
       'config':                  config.toJson(),
       'currentYear':             currentYear,
       'localIdCounter':          _localIdCounter,
+      'codeAppareil':            _codeAppareil,
       'lastSelectedClassFilter': lastSelectedClassFilter,
       'lastSelectedSectionFilter': lastSelectedSectionFilter,
       'lastReportCity': lastReportCity,
@@ -1888,6 +1890,47 @@ extension FraisScolairesServices on FraisScolaires {
 
   bool _syncVide(dynamic v) => v == null || v.toString().trim().isEmpty;
 
+  // ⚡ Vrai si les deux fiches ont au moins une transaction en commun (même
+  // identifiant) : c'est alors le même enfant, même si le nom a été corrigé.
+  bool _syncPartagentUnPaiement(Eleve a, Eleve b) {
+    final ids = a.transactions
+        .map((t) => t['id']?.toString().trim() ?? '')
+        .where((i) => i.isNotEmpty)
+        .toSet();
+    if (ids.isEmpty) return false;
+    return b.transactions
+        .any((t) => ids.contains(t['id']?.toString().trim() ?? ''));
+  }
+
+  // ⚡ Donne un nouvel ID à un élève de CET ordinateur (pendant une fusion,
+  // avant que les données du serveur ne soient ajoutées) : ses fiches des
+  // autres années, son éventuelle archive, ses paiements « autres frais » et
+  // ses reçus en attente le suivent.
+  void _syncRenommerEleveLocal(Eleve l, String nouveau) {
+    final String ancien = l.id;
+    for (final y in history.values) {
+      for (final e in y.eleves) {
+        if (e.id == ancien && (identical(e, l) || _syncMemeIdentite(e, l))) {
+          e.id = nouveau;
+        }
+      }
+    }
+    for (final e in elevesSupprimesData.eleves) {
+      if (e.id == ancien && _syncMemeIdentite(e, l)) e.id = nouveau;
+    }
+    l.id = nouveau;
+    final remap = <String, String>{ancien: nouveau};
+    for (final liste in autresFraisPaiementsByYear.values) {
+      for (final p in liste) {
+        _syncRemapperEleveIdPaiement(p, remap);
+      }
+    }
+    for (var i = 0; i < receiptQueue.length; i++) {
+      final r = receiptQueue[i];
+      if (r['eleveId'] == ancien) receiptQueue[i] = {...r, 'eleveId': nouveau};
+    }
+  }
+
   void _syncCopierInfosEleve(Eleve l, Eleve s) {
     final dynamic dl = l;
     final dynamic ds = s;
@@ -2129,7 +2172,6 @@ extension FraisScolairesServices on FraisScolaires {
 
   Future<void> mergeRestoredData(Map<String, dynamic> serverData) async {
     dernierAvertissementsFusion = <String>[];
-    final Set<String> baseEleves = _syncBase['eleves'] ?? <String>{};
     final Set<String> baseTx = _syncBase['tx'] ?? <String>{};
     final Set<String> baseDepenses = _syncBase['depenses'] ?? <String>{};
     final Set<String> baseEntrees = _syncBase['entrees'] ?? <String>{};
@@ -2200,6 +2242,12 @@ extension FraisScolairesServices on FraisScolaires {
             MapEntry(key, SchoolYearData.fromJson(value)),
       );
 
+      final Set<String> idsServeurToutesAnnees = {
+        for (final y in serverHistory.values)
+          for (final e in y.eleves)
+            if (e.id.isNotEmpty) e.id,
+      };
+
       for (var entry in serverHistory.entries) {
         final year           = entry.key;
         final serverYearData = entry.value;
@@ -2245,16 +2293,23 @@ extension FraisScolairesServices on FraisScolaires {
           }
           if (idx != -1) {
             final l = instantane[idx];
-            if (!_syncMemeIdentite(l, s) && !baseEleves.contains(s.id)) {
-              final String ancien = s.id;
-              final String nouveau = generateLocalStudentId(s.nom);
-              s.id = nouveau;
-              idRemap[ancien] = nouveau;
+            // ⚡ Même ID, noms différents et aucun paiement en commun : ce
+            // sont deux enfants différents (ID fabriqué en double par deux
+            // ordinateurs). On ne les fusionne JAMAIS (avant : les paiements
+            // de l'un passaient à l'autre). L'élève du serveur garde son ID ;
+            // l'élève de CET ordinateur reçoit un nouvel ID, pour que tous
+            // les ordinateurs finissent avec les mêmes identifiants.
+            if (!_syncMemeIdentite(l, s) && !_syncPartagentUnPaiement(l, s)) {
+              final String ancien = l.id;
+              final String nouveau = generateLocalStudentId(l.nom,
+                  idsReserves: idsServeurToutesAnnees);
+              _syncRenommerEleveLocal(l, nouveau);
               localEleves.add(s);
               dernierAvertissementsFusion.add(
                   "Deux élèves différents avaient le même ID ($ancien) : "
-                      "${s.nom} ${s.postNom} ${s.prenom} a reçu le nouvel ID "
-                      "$nouveau.");
+                      "${l.nom} ${l.postNom} ${l.prenom} (saisi sur cet "
+                      "ordinateur) a reçu le nouvel ID $nouveau ; "
+                      "${s.nom} ${s.postNom} ${s.prenom} garde l'ID $ancien.");
               continue;
             }
             pris[idx] = true;
