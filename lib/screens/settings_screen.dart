@@ -340,7 +340,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     final newPassController = TextEditingController();
     final confirmPassController = TextEditingController();
-    await showDialog(
+    final String? nouveau = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Nouveau mot de passe"),
@@ -383,17 +383,145 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 );
                 return;
               }
-              appState.setBackupPassword(newPass);
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("✅ Mot de passe changé avec succès")),
-              );
+              Navigator.pop(ctx, newPass);
             },
             child: const Text("Enregistrer"),
           ),
         ],
       ),
     );
+    if (nouveau == null || !mounted) return;
+    await _enregistrerNouveauMotDePasse(appState, nouveau);
+  }
+
+  // ⚡ Le changement est enregistré sur le SERVEUR (current_password) ; le
+  // mot de passe de cet ordinateur ne change qu'en cas de succès, pour que
+  // l'application et le serveur restent toujours d'accord.
+  Future<void> _enregistrerNouveauMotDePasse(
+      AppState appState, String nouveau) async {
+    final code = appState.schoolCode;
+    final ancien = appState.backupPassword;
+    if (code == null || code.isEmpty || ancien == null) {
+      // École jamais envoyée au serveur : seul cet ordinateur est concerné.
+      await appState.setBackupPassword(nouveau);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("✅ Mot de passe enregistré")),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+          content: Text("⏳ Enregistrement du nouveau mot de passe sur le "
+              "serveur..."),
+          duration: Duration(seconds: 2)),
+    );
+    setState(() => _syncEnCours = true);
+    Map<String, dynamic> r;
+    try {
+      r = await widget.fraisScolaires.changerMotDePasse(code, ancien, nouveau);
+    } catch (e) {
+      r = {'success': false, 'error': 'Erreur inattendue : $e'};
+    } finally {
+      if (mounted) setState(() => _syncEnCours = false);
+    }
+    if (!mounted) return;
+    if (r['success'] == true) {
+      await appState.setBackupPassword(nouveau);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("✅ Mot de passe changé sur le serveur et sur cet "
+              "ordinateur. Sur les autres ordinateurs, le nouveau mot de "
+              "passe sera demandé à la prochaine synchronisation."),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 6),
+        ),
+      );
+      return;
+    }
+    if (r['code'] == 'ANOMALIE_FUSION') {
+      await afficherResumeSync(context, widget.fraisScolaires, r);
+      if (!mounted) return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("❌ Mot de passe NON changé (l'ancien reste valable) : "
+            "${r['error'] ?? 'erreur inconnue'}\nUne connexion internet est "
+            "nécessaire pour changer le mot de passe."),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 8),
+      ),
+    );
+  }
+
+  // ⚡ Le serveur refuse le mot de passe de cet ordinateur : il a sans doute
+  // été changé sur un autre ordinateur. On demande le nouveau, on le vérifie
+  // auprès du serveur (sans rien modifier), puis on reprend l'opération.
+  Future<void> _demanderNouveauMotDePasse(String mode) async {
+    final appState = Provider.of<AppState>(context, listen: false);
+    final ctrl = TextEditingController();
+    final String? saisi = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Mot de passe refusé par le serveur"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              "Le mot de passe a peut-être été changé sur un autre "
+                  "ordinateur. Entrez le NOUVEAU mot de passe de l'école. "
+                  "Rien n'a été modifié.",
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: ctrl,
+              obscureText: true,
+              autofocus: true,
+              decoration:
+              const InputDecoration(labelText: "Nouveau mot de passe"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler")),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text("Vérifier et continuer")),
+        ],
+      ),
+    );
+    if (saisi == null || saisi.isEmpty || !mounted) return;
+    final v = await widget.fraisScolaires
+        .verifierMotDePasseServeur(appState.schoolCode!, saisi);
+    if (!mounted) return;
+    if (v['reseau'] == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("❌ Serveur injoignable : vérifiez internet."),
+            backgroundColor: Colors.red),
+      );
+      return;
+    }
+    if (v['valid'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("❌ Ce mot de passe n'est pas celui du serveur."),
+            backgroundColor: Colors.red),
+      );
+      return;
+    }
+    await appState.setBackupPassword(saisi);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+          content: Text("✅ Nouveau mot de passe enregistré sur cet "
+              "ordinateur."),
+          backgroundColor: Colors.green),
+    );
+    await _actionServeur(mode);
   }
 
   // ==========================================================================
@@ -581,6 +709,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await afficherResumeSync(context, widget.fraisScolaires, result);
       if (mounted) setState(() {});
       await _afficherAvertissementsFusion();
+      return;
+    }
+
+    if (result['code'] == 'MOT_DE_PASSE_REFUSE') {
+      await _demanderNouveauMotDePasse(mode);
       return;
     }
 

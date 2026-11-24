@@ -318,6 +318,55 @@ class TestSyncPaiements(unittest.TestCase):
         finally:
             serveur._MAX_TX_SUPPRIMEES = ancien
 
+    # -- changement du mot de passe (current_password) --
+    def backup_brut(self, mdp_donnees, current=None):
+        data = self.lire()
+        rev = data.pop('_revision')
+        data.pop('_tx_supprimees', None)
+        data['backup_password'] = mdp_donnees
+        corps = {'school_code': CODE, 'data': data, 'base_revision': rev}
+        if current is not None:
+            corps['current_password'] = current
+        return self.client.post('/backup', json=corps)
+
+    def restore(self, mdp):
+        return self.client.get(f'/restore?school_code={CODE}',
+                               headers={'X-Backup-Password': mdp})
+
+    def verifier(self, mdp):
+        return self.client.post('/verify_password',
+                                json={'school_code': CODE, 'password': mdp})
+
+    def test_changement_mot_de_passe_par_current_password(self):
+        NOUVEAU = 'nouveau-mdp-456'
+        r = self.backup_brut(NOUVEAU, current=MDP)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.lire()['backup_password'], NOUVEAU)
+        # Le serveur et l'application sont d'accord sur le NOUVEAU partout.
+        self.assertEqual(self.restore(MDP).status_code, 401)
+        self.assertEqual(self.restore(NOUVEAU).status_code, 200)
+        self.assertNotIn('backup_password', self.restore(NOUVEAU).get_json())
+        self.assertEqual(self.verifier(NOUVEAU).status_code, 200)
+        self.assertTrue(self.verifier(NOUVEAU).get_json()['valid'])
+        self.assertEqual(self.verifier(MDP).status_code, 401)
+        _, rep = self.envoyer([self.snap('E1', 'KABILA', [
+            tx('T8', '2026-11-24', 100)])], password=MDP)
+        self.assertTrue(rep['auth_refused'])
+        _, rep = self.envoyer([self.snap('E1', 'KABILA', [
+            tx('T8', '2026-11-24', 100)])], password=NOUVEAU)
+        self.assertFalse(rep['auth_refused'])
+        self.assertEqual(rep['changed'], 1)
+        # Sauvegardes suivantes avec le nouveau mot de passe seul.
+        r = self.backup_brut(NOUVEAU)
+        self.assertEqual(r.status_code, 200, r.get_json())
+
+    def test_changement_refuse_sans_bon_mot_de_passe_actuel(self):
+        for current in (None, 'faux'):
+            r = self.backup_brut('pirate-123', current=current)
+            self.assertEqual(r.status_code, 401, current)
+            self.assertEqual(self.lire()['backup_password'], MDP)
+            self.assertEqual(self.lire()['_revision'], 3, 'rien écrit')
+
     # -- /backup : version des paiements des parents --
     def test_backup_met_a_jour_version_des_eleves_modifies(self):
         data = self.lire()

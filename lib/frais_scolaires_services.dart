@@ -1971,6 +1971,104 @@ extension FraisScolairesServices on FraisScolaires {
       return res;
   }
 
+  // ==========================================================================
+  // ⚡ CHANGEMENT DU MOT DE PASSE — enregistré sur le SERVEUR
+  // Avant : le nouveau mot de passe n'était gardé que sur cet ordinateur ; le
+  // serveur gardait l'ancien et refusait ensuite les sauvegardes.
+  // Maintenant, en une seule opération :
+  //   1. récupération avec l'ANCIEN mot de passe (cet ordinateur est à jour,
+  //      rien de ce qu'ont saisi les autres ne se perd) ;
+  //   2. sauvegarde avec le NOUVEAU mot de passe et current_password =
+  //      ancien : le serveur enregistre le nouveau.
+  // L'application ne doit changer son mot de passe local QUE si le résultat
+  // est un succès (voir settings_screen).
+  // ==========================================================================
+  Future<Map<String, dynamic>> changerMotDePasse(
+      String schoolCodeParam, String ancien, String nouveau) async {
+    if (_syncBusy) return _syncOccupe();
+    nouveau = nouveau.trim();
+    if (nouveau.length < 6) {
+      return {
+        'success': false,
+        'error': 'Le mot de passe doit contenir au moins 6 caractères.',
+      };
+    }
+    if (nouveau == ancien) {
+      return {
+        'success': false,
+        'error': "Le nouveau mot de passe est identique à l'ancien.",
+      };
+    }
+    _syncBusy = true;
+    try {
+      Map<String, dynamic> r =
+      await _restoreInternal(schoolCodeParam, ancien);
+      if (r['success'] != true && r['notFound'] != true) {
+        if (r['code'] == 'MOT_DE_PASSE_REFUSE') {
+          r = {
+            ...r,
+            'error': "Le serveur refuse le mot de passe actuel : il a "
+                "peut-être déjà été changé sur un autre ordinateur.",
+          };
+        }
+        await _journaliserResultat('changement_mot_de_passe', r);
+        return r;
+      }
+      if (r['bloquant'] == true) {
+        final arret = _arretAnomalie(r);
+        await _journaliserResultat('changement_mot_de_passe', arret);
+        return arret;
+      }
+      var b = await _backupInternal(schoolCodeParam, nouveau,
+          motDePasseActuel: ancien);
+      if (b['success'] != true && b['code'] == 'STALE_REVISION') {
+        r = await _restoreInternal(schoolCodeParam, ancien);
+        if (r['success'] == true && r['bloquant'] != true) {
+          b = await _backupInternal(schoolCodeParam, nouveau,
+              motDePasseActuel: ancien);
+        } else {
+          b = r['bloquant'] == true ? _arretAnomalie(r) : r;
+        }
+      }
+      final res = {
+        ...b,
+        'motDePasseChange': b['success'] == true,
+        if (r['resume'] != null) 'resume': r['resume'],
+      };
+      await _journaliserResultat('changement_mot_de_passe', res);
+      return res;
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
+  /// Vérifie un mot de passe auprès du serveur (/verify_password), sans
+  /// rien télécharger ni modifier. Sert quand le mot de passe a été changé
+  /// sur un autre ordinateur. 'valid' : vrai / faux ; 'reseau' : faux si le
+  /// serveur n'a pas pu être joint.
+  Future<Map<String, dynamic>> verifierMotDePasseServeur(
+      String schoolCodeParam, String motDePasse) async {
+    try {
+      final response = await http
+          .post(
+        Uri.parse('$serverUrl/verify_password'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'school_code': schoolCodeParam.trim().toUpperCase(),
+          'password': motDePasse.trim(),
+        }),
+      )
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        final d = json.decode(response.body);
+        return {'valid': d is Map && d['valid'] == true, 'reseau': true};
+      }
+      return {'valid': false, 'reseau': true};
+    } catch (e) {
+      return {'valid': false, 'reseau': false, 'error': '$e'};
+    }
+  }
+
   Future<Map<String, dynamic>> restoreFromServer(
       String schoolCodeParam, String password) async {
     if (_syncBusy) return _syncOccupe();
@@ -2015,7 +2113,7 @@ extension FraisScolairesServices on FraisScolaires {
 
   Future<Map<String, dynamic>> _backupInternal(
       String schoolCodeParam, String password,
-      {bool force = false}) async {
+      {bool force = false, String? motDePasseActuel}) async {
     final normalizedCode = schoolCodeParam.trim().toUpperCase();
     try {
       schoolCode = normalizedCode;
@@ -2066,6 +2164,12 @@ extension FraisScolairesServices on FraisScolaires {
         corps['base_revision'] = _syncServerRevision;
       }
       if (force) corps['force'] = true;
+      // ⚡ Changement de mot de passe : le serveur accepte la sauvegarde si
+      // l'ANCIEN mot de passe est donné ici, et enregistre le nouveau
+      // (data.backup_password) — app.py, /backup.
+      if (motDePasseActuel != null && motDePasseActuel.isNotEmpty) {
+        corps['current_password'] = motDePasseActuel;
+      }
 
       final response = await http
           .post(
@@ -2117,7 +2221,11 @@ extension FraisScolairesServices on FraisScolaires {
         };
       }
       if (response.statusCode == 401) {
-        return {'success': false, 'error': 'Mot de passe incorrect'};
+        return {
+          'success': false,
+          'error': 'Mot de passe incorrect',
+          'code': 'MOT_DE_PASSE_REFUSE',
+        };
       }
       return {
         'success': false,
@@ -2155,7 +2263,11 @@ extension FraisScolairesServices on FraisScolaires {
         final data = json.decode(response.body);
         if (data['backup_password'] != null &&
             data['backup_password'] != password) {
-          return {'success': false, 'error': 'Mot de passe incorrect'};
+          return {
+          'success': false,
+          'error': 'Mot de passe incorrect',
+          'code': 'MOT_DE_PASSE_REFUSE',
+        };
         }
         _derniereCopieAvantRecuperation =
             await _creerCopieSecuriteLocale('avant_recuperation');
@@ -2195,7 +2307,11 @@ extension FraisScolairesServices on FraisScolaires {
         };
       }
       if (response.statusCode == 401) {
-        return {'success': false, 'error': 'Mot de passe incorrect'};
+        return {
+          'success': false,
+          'error': 'Mot de passe incorrect',
+          'code': 'MOT_DE_PASSE_REFUSE',
+        };
       }
       if (response.statusCode == 404) {
         return {

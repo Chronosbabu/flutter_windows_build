@@ -58,6 +58,7 @@ class FauxServeur {
     if (path == '/restore' && req.method == 'GET') return _restore(req);
     if (path == '/school/sync_student_payments') return _syncPaiements(req);
     if (path == '/school/push_promoter_summary') return _json(200, {});
+    if (path == '/verify_password') return _verifier(req);
     return _json(404, {'error': 'route inconnue en test : $path'});
   }
 
@@ -69,6 +70,13 @@ class FauxServeur {
     final base = body['base_revision'];
     final existing = ecoles[code];
     final serverRev = _rev(existing);
+    // app.py : mot de passe stocké = celui envoyé, OU current_password.
+    final stocke = existing?['backup_password'];
+    if (stocke != null &&
+        data['backup_password'] != stocke &&
+        body['current_password'] != stocke) {
+      return _json(401, {'error': 'Mot de passe incorrect'});
+    }
     if (existing != null && !force) {
       if (base != null && (base as num).toInt() != serverRev) {
         return _json(409, {
@@ -150,10 +158,25 @@ class FauxServeur {
     final code = (req.url.queryParameters['school_code'] ?? '').toLowerCase();
     final d = ecoles[code];
     if (d == null) return _json(404, {'error': 'Aucune sauvegarde trouvée'});
+    final donne = req.headers['X-Backup-Password'] ??
+        req.headers['x-backup-password'];
+    if (d['backup_password'] != null && donne != d['backup_password']) {
+      return _json(401, {'error': 'Mot de passe incorrect'});
+    }
     final out = _copie(d) as Map<String, dynamic>;
     out.remove('backup_password');
     out['revision'] = _rev(d);
     return _json(200, out);
+  }
+
+  http.Response _verifier(http.Request req) {
+    final body = json.decode(req.body) as Map<String, dynamic>;
+    final d = ecoles[(body['school_code'] as String).toLowerCase()];
+    if (d == null) return _json(404, {'error': 'Aucune sauvegarde trouvée'});
+    if (d['backup_password'] == body['password']) {
+      return _json(200, {'valid': true});
+    }
+    return _json(401, {'valid': false, 'error': 'Mot de passe incorrect'});
   }
 
   // true = route corrigée (étape 2) ; false = ancienne route.
@@ -307,12 +330,21 @@ late FauxServeur serveur;
 Future<T> avecServeur<T>(Future<T> Function() f) =>
     http.runWithClient(f, () => MockClient(serveur.gerer));
 
-Future<Map<String, dynamic>> sauvegarder(FraisScolaires fs) =>
-    avecServeur(() => fs.backupToServer(kCode, kMdp));
-Future<Map<String, dynamic>> recuperer(FraisScolaires fs) =>
-    avecServeur(() => fs.restoreFromServer(kCode, kMdp));
-Future<Map<String, dynamic>> synchroniser(FraisScolaires fs) =>
-    avecServeur(() => fs.syncWithServer(kCode, kMdp));
+Future<Map<String, dynamic>> sauvegarder(FraisScolaires fs,
+    [String mdp = kMdp]) =>
+    avecServeur(() => fs.backupToServer(kCode, mdp));
+Future<Map<String, dynamic>> recuperer(FraisScolaires fs,
+    [String mdp = kMdp]) =>
+    avecServeur(() => fs.restoreFromServer(kCode, mdp));
+Future<Map<String, dynamic>> synchroniser(FraisScolaires fs,
+    [String mdp = kMdp]) =>
+    avecServeur(() => fs.syncWithServer(kCode, mdp));
+
+// Serveur injoignable (pas d'internet).
+Future<T> horsLigne<T>(Future<T> Function() f) => http.runWithClient(
+    f,
+        () => MockClient(
+            (_) async => throw const SocketException('pas de réseau')));
 
 // Ce que ParentSyncService envoie automatiquement après un paiement
 // (_snapshot de lib/services/parent_sync_service.dart).
@@ -1383,5 +1415,105 @@ void main() {
     expect((d.single['ids'] as List).length, 2);
     expect(await fsA.reparerDoublonsSurs(), 0);
     expect(totalArgent(fsA), 4000);
+  });
+
+  // =========================================================================
+  // CHANGEMENT DU MOT DE PASSE — enregistré sur le serveur
+  // =========================================================================
+  String mdpServeur() =>
+      serveur.ecoles[kCode.toLowerCase()]!['backup_password'] as String;
+
+  test('MP-1. changement sur A : le serveur prend le nouveau ; B est refusé '
+      'avec l\'ancien, vérifie le nouveau et reprend sans rien perdre',
+      () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    await payer(fsB, eleveParNom(fsB, 'KABILA'), 1000);
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'MUKENDI'), 2000);
+    final r = await avecServeur(
+            () => fsA.changerMotDePasse(kCode, kMdp, 'nouveau-mdp'));
+    expect(r['success'], isTrue, reason: '$r');
+    expect(r['motDePasseChange'], isTrue);
+    expect(mdpServeur(), 'nouveau-mdp');
+
+    // A continue avec le nouveau mot de passe.
+    expect((await synchroniser(fsA, 'nouveau-mdp'))['success'], isTrue);
+
+    // B a encore l'ancien : refus clair, rien n'est modifié chez B.
+    fsB = await b.ouvrir();
+    final rb = await synchroniser(fsB);
+    expect(rb['success'], isFalse);
+    expect(rb['code'], 'MOT_DE_PASSE_REFUSE');
+    expect(totalArgent(fsB), 1000);
+    expect((await avecServeur(() =>
+        fsB.verifierMotDePasseServeur(kCode, kMdp)))['valid'], isFalse);
+    expect((await avecServeur(() =>
+        fsB.verifierMotDePasseServeur(kCode, 'nouveau-mdp')))['valid'], isTrue);
+    expect((await synchroniser(fsB, 'nouveau-mdp'))['success'], isTrue);
+
+    fsA = await a.ouvrir();
+    await recuperer(fsA, 'nouveau-mdp');
+    for (final fs in [fsA, fsB]) {
+      expect(totalArgent(fs), 3000);
+    }
+    expect(mdpServeur(), 'nouveau-mdp');
+    final j = await fsA.lireJournalSync(max: 50);
+    expect(j.any((e) => e['action'] == 'changement_mot_de_passe'), isTrue);
+    expect(json.encode(j), isNot(contains('nouveau-mdp')),
+        reason: 'jamais de mot de passe dans le journal');
+  });
+
+  test('MP-2. B avait sauvegardé entre-temps : le changement récupère '
+      'd\'abord, rien de B ne se perd', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    await payer(fsB, eleveParNom(fsB, 'ILUNGA'), 4000);
+    await sauvegarder(fsB);
+    final fsA = await a.ouvrir();
+    final r = await avecServeur(
+            () => fsA.changerMotDePasse(kCode, kMdp, 'nouveau-mdp'));
+    expect(r['success'], isTrue, reason: '$r');
+    expect(totalArgent(fsA), 4000);
+    final c = await Appareil('C').ouvrir();
+    await recuperer(c, 'nouveau-mdp');
+    expect(totalArgent(c), 4000);
+  });
+
+  test('MP-3. ancien mot de passe déjà refusé par le serveur : rien ne '
+      'change', () async {
+    await departCommun();
+    serveur.ecoles[kCode.toLowerCase()]!['backup_password'] = 'change-ailleurs';
+    final fsA = await a.ouvrir();
+    final r = await avecServeur(
+            () => fsA.changerMotDePasse(kCode, kMdp, 'nouveau-mdp'));
+    expect(r['success'], isFalse);
+    expect(r['code'], 'MOT_DE_PASSE_REFUSE');
+    expect(r['error'], contains('autre ordinateur'));
+    expect(mdpServeur(), 'change-ailleurs');
+  });
+
+  test('MP-4. sans internet : changement refusé, serveur inchangé', () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    final r = await horsLigne(
+            () => fsA.changerMotDePasse(kCode, kMdp, 'nouveau-mdp'));
+    expect(r['success'], isFalse);
+    expect(mdpServeur(), kMdp);
+    expect((await synchroniser(fsA))['success'], isTrue,
+        reason: "l'ancien mot de passe marche toujours");
+  });
+
+  test('MP-5. nouveau mot de passe trop court ou identique : refusé sans '
+      'appel au serveur', () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    final avant = serveur.nbBackups;
+    expect((await avecServeur(
+            () => fsA.changerMotDePasse(kCode, kMdp, 'abc')))['success'], isFalse);
+    expect((await avecServeur(
+            () => fsA.changerMotDePasse(kCode, kMdp, kMdp)))['success'], isFalse);
+    expect(serveur.nbBackups, avant);
+    expect(mdpServeur(), kMdp);
   });
 }
