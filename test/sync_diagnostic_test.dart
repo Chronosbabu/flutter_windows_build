@@ -1130,4 +1130,72 @@ void main() {
       expect(fs.currentData.eleves.length, 6);
     }
   });
+
+  // =========================================================================
+  // ÉTAPE 5a — copies de sécurité, journal, annulation d'une récupération
+  // =========================================================================
+  test('5a-1. les 30 copies de sécurité les plus récentes sont gardées',
+      () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    for (var i = 0; i < 35; i++) {
+      await recuperer(fsA);
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    expect(await fsA.nombreCopiesSecurite(), kNbCopiesSecurite);
+    expect(kNbCopiesSecurite, 30);
+  });
+
+  test('5a-2. journal : chaque opération est notée, avec « autre '
+      'ordinateur » quand il a fallu récupérer avant d\'envoyer', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    await payer(fsB, eleveParNom(fsB, 'KABILA'), 1000);
+    await sauvegarder(fsB);
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'MUKENDI'), 2000);
+    final r = await sauvegarder(fsA); // A est en retard -> récupère d'abord
+    expect(r['success'], isTrue);
+    expect(r['autreOrdinateur'], isTrue);
+    await synchroniser(fsA);
+    await fsA.clearLocalData();
+    fsA = await a.ouvrir();
+    final j = await fsA.lireJournalSync();
+    expect(j.map((e) => e['action']).toList(),
+        ['deconnexion', 'synchronisation', 'sauvegarde', 'sauvegarde'],
+        reason: 'du plus récent au plus ancien');
+    expect(j[2]['autre_ordinateur'], isTrue);
+    expect(j[2]['succes'], isTrue);
+    expect((j[0]['resume'] as Map)['eleves'], 4);
+  });
+
+  test('5a-3. annuler la dernière récupération remet exactement l\'état '
+      'd\'avant (données, révision)', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    eleveParNom(fsB, 'ILUNGA').adresse = 'Adresse B';
+    await payer(fsB, eleveParNom(fsB, 'ILUNGA'), 5000);
+    await synchroniser(fsB);
+
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'KABILA'), 1500);
+    final avant = etatCanonique(fsA);
+    final resumeAvant = fsA.resumeSynchronisation();
+    await recuperer(fsA);
+    expect(etatCanonique(fsA), isNot(avant));
+    final r = await fsA.annulerDerniereRecuperation();
+    expect(r['success'], isTrue, reason: '$r');
+    expect(etatCanonique(fsA), avant);
+    expect(fsA.resumeSynchronisation(), resumeAvant);
+    // L'état restauré est bien écrit sur le disque.
+    fsA = await a.ouvrir();
+    expect(etatCanonique(fsA), avant);
+    // La sauvegarde suivante doit d'abord récupérer à nouveau (révision
+    // d'avant) : rien de B ne se perd.
+    expect((await sauvegarder(fsA))['success'], isTrue);
+    fsB = await b.ouvrir();
+    await recuperer(fsB);
+    expect(totalArgent(fsB), 6500);
+    expect(eleveParNom(fsB, 'ILUNGA').adresse, 'Adresse B');
+  });
 }

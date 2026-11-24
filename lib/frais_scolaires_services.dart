@@ -11,6 +11,12 @@ Future<void> _saveChain = Future<void>.value();
 
 List<String> dernierAvertissementsFusion = <String>[];
 
+// ⚡ ÉTAPE 5 — protections de la synchronisation
+const int kNbCopiesSecurite = 30;
+const int kMaxLignesJournalSync = 1000;
+const String kFichierJournalSync = 'sync_journal.jsonl';
+String? _derniereCopieAvantRecuperation;
+
 extension FraisScolairesServices on FraisScolaires {
   bool get synchronisationEnCours => _syncBusy;
 
@@ -1020,20 +1026,196 @@ extension FraisScolairesServices on FraisScolaires {
       .replaceAll(':', '-')
       .replaceAll('.', '-');
 
-  Future<void> _creerCopieSecuriteLocale(String raison) async {
+  /// Copie de sécurité du fichier local. Attend la fin des enregistrements
+  /// en cours (la copie reflète exactement l'état en mémoire). Garde les
+  /// [kNbCopiesSecurite] plus récentes. Retourne le chemin de la copie.
+  Future<String?> _creerCopieSecuriteLocale(String raison) async {
     try {
+      await _saveChain.catchError((_) {});
       final dir = await getApplicationDocumentsDirectory();
       final src = File('${dir.path}/school_fees_data.json');
-      if (!await src.exists()) return;
-      await src.copy(
-          '${dir.path}/school_fees_data.safety_${_syncHorodatage()}_$raison.json');
+      if (!await src.exists()) return null;
+      final chemin =
+          '${dir.path}/school_fees_data.safety_${_syncHorodatage()}_$raison.json';
+      await src.copy(chemin);
       final copies = await _listerCopiesSecurite(dir);
-      for (int i = 0; i < copies.length - 10; i++) {
+      for (int i = 0; i < copies.length - kNbCopiesSecurite; i++) {
+        if (copies[i].path == chemin) continue;
         try {
           await copies[i].delete();
         } catch (_) {}
       }
+      return chemin;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// ⚡ Annule la dernière récupération : remet cet ordinateur exactement
+  /// dans l'état de la copie de sécurité faite juste avant (données,
+  /// révision et base de synchronisation comprises). Rien n'est envoyé au
+  /// serveur.
+  Future<Map<String, dynamic>> annulerDerniereRecuperation() async {
+    final chemin = _derniereCopieAvantRecuperation;
+    if (chemin == null || !await File(chemin).exists()) {
+      return {
+        'success': false,
+        'error': "Aucune récupération à annuler sur cet ordinateur (pas de "
+            "copie de sécurité récente).",
+      };
+    }
+    try {
+      final data =
+      json.decode(await File(chemin).readAsString()) as Map<String, dynamic>;
+      await _saveChain.catchError((_) {});
+      _resetEtatEnMemoire();
+      await _appliquerDonneesLocales(data);
+      _localLoadFailed = false;
+      await saveData();
+      _derniereCopieAvantRecuperation = null;
+      await _journaliserSync({
+        'action': 'annulation_recuperation',
+        'copie_securite': chemin,
+        'resume': resumeSynchronisation(),
+      });
+      return {'success': true, 'copie': chemin};
+    } catch (e) {
+      return {'success': false, 'error': 'Copie de sécurité illisible : $e'};
+    }
+  }
+
+  /// Nombre de copies de sécurité présentes sur cet ordinateur.
+  Future<int> nombreCopiesSecurite() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      return (await _listerCopiesSecurite(dir)).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  // ==========================================================================
+  // ⚡ ÉTAPE 5 — JOURNAL DE SYNCHRONISATION
+  // Une ligne JSON par opération (récupération, sauvegarde, déconnexion,
+  // annulation d'une récupération), dans sync_journal.jsonl à côté du fichier
+  // de données. Les [kMaxLignesJournalSync] dernières lignes sont gardées.
+  // ==========================================================================
+  Future<void> _journaliserSync(Map<String, dynamic> entree) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final f = File('${dir.path}/$kFichierJournalSync');
+      final ligne = json.encode({
+        'date': DateTime.now().toIso8601String(),
+        'ecole': schoolCode,
+        ...entree,
+      });
+      await f.writeAsString('$ligne\n', mode: FileMode.append, flush: true);
+      if (await f.length() > 2000000) {
+        final lignes = (await f.readAsLines())
+            .where((l) => l.trim().isNotEmpty)
+            .toList();
+        final garder = lignes.length > kMaxLignesJournalSync
+            ? lignes.sublist(lignes.length - kMaxLignesJournalSync)
+            : lignes;
+        await f.writeAsString('${garder.join('\n')}\n', flush: true);
+      }
     } catch (_) {}
+  }
+
+  /// ⚡ Résumé chiffré des données de cet ordinateur (toutes années) :
+  /// nombre d'élèves, de transactions, argent des frais scolaires et des
+  /// autres frais. Sert au résumé avant / après chaque récupération.
+  Map<String, num> resumeSynchronisation() {
+    int eleves = 0, tx = 0, af = 0;
+    double argent = 0, argentAf = 0;
+    for (final y in history.values) {
+      for (final e in y.eleves) {
+        eleves++;
+        for (final t in e.transactions) {
+          tx++;
+          argent += (t['amount'] as num?)?.toDouble() ?? 0.0;
+        }
+      }
+    }
+    for (final l in autresFraisPaiementsByYear.values) {
+      for (final p in l) {
+        af++;
+        argentAf += p.montant;
+      }
+    }
+    return {
+      'eleves': eleves,
+      'transactions': tx,
+      'argent': argent,
+      'paiements_autres_frais': af,
+      'argent_autres_frais': argentAf,
+    };
+  }
+
+  /// Même résumé, calculé sur les données reçues du serveur.
+  static Map<String, num> resumeDepuisJson(Map<String, dynamic> d) {
+    int eleves = 0, tx = 0, af = 0;
+    double argent = 0, argentAf = 0;
+    final h = d['history'];
+    if (h is Map) {
+      for (final y in h.values) {
+        final l = y is Map ? y['eleves'] : null;
+        if (l is! List) continue;
+        for (final e in l) {
+          if (e is! Map) continue;
+          eleves++;
+          final txs = e['transactions'];
+          if (txs is List) {
+            for (final t in txs) {
+              if (t is Map) {
+                tx++;
+                argent += (t['amount'] as num?)?.toDouble() ?? 0.0;
+              }
+            }
+          }
+        }
+      }
+    }
+    final ap = d['autresFraisPaiementsByYear'];
+    if (ap is Map) {
+      for (final l in ap.values) {
+        if (l is! List) continue;
+        for (final p in l) {
+          if (p is Map) {
+            af++;
+            argentAf += (p['montant'] as num?)?.toDouble() ?? 0.0;
+          }
+        }
+      }
+    }
+    return {
+      'eleves': eleves,
+      'transactions': tx,
+      'argent': argent,
+      'paiements_autres_frais': af,
+      'argent_autres_frais': argentAf,
+    };
+  }
+
+  /// Dernières entrées du journal, de la plus récente à la plus ancienne.
+  Future<List<Map<String, dynamic>>> lireJournalSync({int max = 200}) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final f = File('${dir.path}/$kFichierJournalSync');
+      if (!await f.exists()) return [];
+      final lignes = await f.readAsLines();
+      final out = <Map<String, dynamic>>[];
+      for (final l in lignes.reversed) {
+        if (out.length >= max) break;
+        if (l.trim().isEmpty) continue;
+        try {
+          out.add(Map<String, dynamic>.from(json.decode(l) as Map));
+        } catch (_) {}
+      }
+      return out;
+    } catch (_) {
+      return [];
+    }
   }
 
   Future<List<File>> _listerCopiesSecurite(Directory dir) async {
@@ -1432,7 +1614,12 @@ extension FraisScolairesServices on FraisScolaires {
       _dataFilePath = '${dir.path}/school_fees_data.json';
     }
     await _saveChain.catchError((_) {});
-    await _creerCopieSecuriteLocale('avant_deconnexion');
+    final copie = await _creerCopieSecuriteLocale('avant_deconnexion');
+    await _journaliserSync({
+      'action': 'deconnexion',
+      'copie_securite': copie,
+      'resume': resumeSynchronisation(),
+    });
     final file = File(_dataFilePath!);
     if (await file.exists()) {
       await file.delete();
@@ -1461,12 +1648,43 @@ extension FraisScolairesServices on FraisScolaires {
         'secondes (ne cliquez pas plusieurs fois).',
   };
 
+  Future<void> _journaliserResultat(
+      String action, Map<String, dynamic> r) async {
+    String? err = r['error']?.toString();
+    if (err != null && err.length > 300) err = '${err.substring(0, 300)}…';
+    await _journaliserSync({
+      'action': action,
+      'succes': r['success'] == true,
+      if (r['code'] != null) 'code': r['code'],
+      'erreur': ?err,
+      'revision': _syncServerRevision,
+      if (r['autreOrdinateur'] == true) 'autre_ordinateur': true,
+      if ((r['warnings'] as List?)?.isNotEmpty == true)
+        'avertissements': r['warnings'],
+      if (r['resume'] != null) 'resume': r['resume'],
+      if ((r['anomalies'] as List?)?.isNotEmpty == true)
+        'anomalies': r['anomalies'],
+    });
+  }
+
   Future<Map<String, dynamic>> backupToServer(
       String schoolCodeParam, String password,
       {bool force = false}) async {
     if (_syncBusy) return _syncOccupe();
     _syncBusy = true;
     try {
+      final r = await _backupToServerInterne(schoolCodeParam, password,
+          force: force);
+      await _journaliserResultat('sauvegarde', r);
+      return r;
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
+  Future<Map<String, dynamic>> _backupToServerInterne(
+      String schoolCodeParam, String password,
+      {bool force = false}) async {
       if (_localLoadFailed && !force) {
         return {
           'success': false,
@@ -1485,14 +1703,19 @@ extension FraisScolairesServices on FraisScolaires {
       var res = await _backupInternal(schoolCodeParam, password, force: force);
 
       if (res['success'] != true && res['code'] == 'STALE_REVISION') {
+        // ⚡ Un autre ordinateur a sauvegardé entre-temps : on récupère et
+        // on fusionne ses données avant d'envoyer, et on le dit clairement.
         final r = await _restoreInternal(schoolCodeParam, password);
-        if (r['success'] != true) return r;
+        if (r['success'] != true) return {...r, 'autreOrdinateur': true};
         res = await _backupInternal(schoolCodeParam, password);
+        res = {
+          ...res,
+          'autreOrdinateur': true,
+          'warnings': r['warnings'] ?? const <String>[],
+          if (r['resume'] != null) 'resume': r['resume'],
+        };
       }
       return res;
-    } finally {
-      _syncBusy = false;
-    }
   }
 
   Future<Map<String, dynamic>> restoreFromServer(
@@ -1500,7 +1723,9 @@ extension FraisScolairesServices on FraisScolaires {
     if (_syncBusy) return _syncOccupe();
     _syncBusy = true;
     try {
-      return await _restoreInternal(schoolCodeParam, password);
+      final r = await _restoreInternal(schoolCodeParam, password);
+      await _journaliserResultat('recuperation', r);
+      return r;
     } finally {
       _syncBusy = false;
     }
@@ -1512,9 +1737,19 @@ extension FraisScolairesServices on FraisScolaires {
     _syncBusy = true;
     try {
       final r = await _restoreInternal(schoolCodeParam, password);
-      if (r['success'] != true && r['notFound'] != true) return r;
+      if (r['success'] != true && r['notFound'] != true) {
+        await _journaliserResultat('synchronisation', r);
+        return r;
+      }
       final b = await _backupInternal(schoolCodeParam, password);
-      return {...b, 'restored': r['success'] == true};
+      final res = {
+        ...b,
+        'restored': r['success'] == true,
+        'warnings': r['warnings'] ?? const <String>[],
+        if (r['resume'] != null) 'resume': r['resume'],
+      };
+      await _journaliserResultat('synchronisation', res);
+      return res;
     } finally {
       _syncBusy = false;
     }
@@ -1663,7 +1898,8 @@ extension FraisScolairesServices on FraisScolaires {
             data['backup_password'] != password) {
           return {'success': false, 'error': 'Mot de passe incorrect'};
         }
-        await _creerCopieSecuriteLocale('avant_recuperation');
+        _derniereCopieAvantRecuperation =
+            await _creerCopieSecuriteLocale('avant_recuperation');
         schoolCode = normalizedCode;
         await mergeRestoredData(data);
         await saveData();
