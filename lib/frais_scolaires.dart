@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
 import 'services/epson_printer_service.dart';
 import 'dart:math';
+import 'package:crypto/crypto.dart';
 
 part 'frais_scolaires_modeles.dart';
 part 'frais_scolaires_rapports.dart';

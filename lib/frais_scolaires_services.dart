@@ -1780,7 +1780,46 @@ extension FraisScolairesServices on FraisScolaires {
       'entrees': ent,
       'signataires': sig,
       'admins': adm,
+      'infos': {
+        for (final y in history.values)
+          for (final e in y.eleves)
+            if (e.id.isNotEmpty) '${e.id}|${_syncEmpreinteInfos(e)}',
+      },
+      'afp': {
+        for (final l in autresFraisPaiementsByYear.values)
+          for (final p in l)
+            if (p.id.isNotEmpty) '${p.id}|${_syncEmpreinteAfp(p)}',
+      },
     };
+  }
+
+  // ⚡ ÉTAPE 4 — EMPREINTES DES MODIFICATIONS
+  // À chaque synchronisation, on garde l'empreinte des infos de chaque élève
+  // et de chaque paiement « autres frais ». À la fusion suivante, on sait
+  // ainsi QUI a modifié : cet ordinateur, le serveur (un autre ordinateur),
+  // ou les deux.
+  String _syncEmpreinte(String s) =>
+      sha1.convert(utf8.encode(s)).toString().substring(0, 16);
+
+  String _syncEmpreinteInfos(Eleve e) {
+    final champs = e.customFields.keys.toList()..sort();
+    return _syncEmpreinte(json.encode([
+      e.nom, e.postNom, e.prenom, e.pereNom, e.mereNom, e.adresse,
+      e.dateNaissance, e.photoBase64 ?? '',
+      [for (final k in champs) [k, e.customFields[k]]],
+    ]));
+  }
+
+  String _syncEmpreinteAfp(AutreFraisPaiement p) =>
+      _syncEmpreinte(json.encode(p.toJson()));
+
+  Map<String, String> _syncLireEmpreintes(Set<String>? entrees) {
+    final m = <String, String>{};
+    for (final x in entrees ?? const <String>{}) {
+      final i = x.lastIndexOf('|');
+      if (i > 0) m[x.substring(0, i)] = x.substring(i + 1);
+    }
+    return m;
   }
 
   Map<String, Set<String>> _syncIdsDepuisServeur(Map<String, dynamic> d) {
@@ -1856,6 +1895,38 @@ extension FraisScolairesServices on FraisScolaires {
         }
       }
     }
+    final infos = <String>{};
+    if (h is Map) {
+      for (final y in h.values) {
+        if (y is Map && y['eleves'] is List) {
+          for (final e in (y['eleves'] as List)) {
+            if (e is! Map) continue;
+            try {
+              final el = Eleve.fromJson(Map<String, dynamic>.from(e));
+              if (el.id.isNotEmpty) {
+                infos.add('${el.id}|${_syncEmpreinteInfos(el)}');
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    }
+    final afp = <String>{};
+    final ap = d['autresFraisPaiementsByYear'];
+    if (ap is Map) {
+      for (final l in ap.values) {
+        if (l is List) {
+          for (final x in l) {
+            if (x is! Map) continue;
+            try {
+              final p =
+              AutreFraisPaiement.fromJson(Map<String, dynamic>.from(x));
+              if (p.id.isNotEmpty) afp.add('${p.id}|${_syncEmpreinteAfp(p)}');
+            } catch (_) {}
+          }
+        }
+      }
+    }
     return {
       'eleves': eleves,
       'tx': tx,
@@ -1863,6 +1934,8 @@ extension FraisScolairesServices on FraisScolaires {
       'entrees': ent,
       'signataires': sig,
       'admins': adm,
+      'infos': infos,
+      'afp': afp,
     };
   }
 
@@ -2091,8 +2164,43 @@ extension FraisScolairesServices on FraisScolaires {
     return resultat;
   }
 
+  // ⚡ ÉTAPE 4 — infos d'un élève (noms, parents, adresse, naissance, photo,
+  // champs libres) : la version modifiée gagne.
+  void _syncFusionnerInfos(Eleve l, Eleve s, String? empreinteBase) {
+    final String hl = _syncEmpreinteInfos(l);
+    final String hs = _syncEmpreinteInfos(s);
+    if (hl == hs) return;
+    if (empreinteBase != null && hl == empreinteBase) {
+      // Seul le serveur (un autre ordinateur) a modifié : on prend tout.
+      l
+        ..nom = s.nom
+        ..postNom = s.postNom
+        ..prenom = s.prenom
+        ..pereNom = s.pereNom
+        ..mereNom = s.mereNom
+        ..adresse = s.adresse
+        ..dateNaissance = s.dateNaissance
+        ..photoBase64 = s.photoBase64
+        ..customFields = Map<String, String>.from(s.customFields);
+      return;
+    }
+    if (empreinteBase != null && hs == empreinteBase) {
+      return; // seul cet ordinateur a modifié : il l'enverra
+    }
+    // Modifié des deux côtés (ou première synchronisation) : on garde cet
+    // ordinateur et on complète seulement les champs vides.
+    _syncCopierInfosEleve(l, s);
+    if (empreinteBase != null && _syncEmpreinteInfos(l) != hs) {
+      dernierAvertissementsFusion.add(
+          "Les informations de ${l.nom} ${l.postNom} ${l.prenom} (${l.id}) "
+              "ont été modifiées sur cet ordinateur ET sur un autre : la "
+              "version de cet ordinateur a été gardée. Vérifiez sa fiche.");
+    }
+  }
+
   bool _syncFusionnerEleve(
-      Eleve localEleve, Eleve serverEleve, Set<String> baseTx) {
+      Eleve localEleve, Eleve serverEleve, Set<String> baseTx,
+      [Map<String, String> baseInfos = const {}]) {
     if (localEleve.id.isEmpty && serverEleve.id.isNotEmpty) {
       localEleve.id = serverEleve.id;
     }
@@ -2110,7 +2218,8 @@ extension FraisScolairesServices on FraisScolaires {
     }
     localEleve.moisDebloque ??= serverEleve.moisDebloque;
 
-    _syncCopierInfosEleve(localEleve, serverEleve);
+    _syncFusionnerInfos(
+        localEleve, serverEleve, baseInfos[serverEleve.id]);
 
     final List<Map<String, dynamic>> txLocales =
     List<Map<String, dynamic>>.from(localEleve.transactions);
@@ -2173,6 +2282,9 @@ extension FraisScolairesServices on FraisScolaires {
   Future<void> mergeRestoredData(Map<String, dynamic> serverData) async {
     dernierAvertissementsFusion = <String>[];
     final Set<String> baseTx = _syncBase['tx'] ?? <String>{};
+    final Map<String, String> baseInfos =
+    _syncLireEmpreintes(_syncBase['infos']);
+    final Map<String, String> baseAfp = _syncLireEmpreintes(_syncBase['afp']);
     final Set<String> baseDepenses = _syncBase['depenses'] ?? <String>{};
     final Set<String> baseEntrees = _syncBase['entrees'] ?? <String>{};
     final Set<String> baseSignataires = _syncBase['signataires'] ?? <String>{};
@@ -2313,7 +2425,9 @@ extension FraisScolairesServices on FraisScolaires {
               continue;
             }
             pris[idx] = true;
-            if (_syncFusionnerEleve(l, s, baseTx)) besoinRecalcul = true;
+            if (_syncFusionnerEleve(l, s, baseTx, baseInfos)) {
+              besoinRecalcul = true;
+            }
             continue;
           }
 
@@ -2331,7 +2445,9 @@ extension FraisScolairesServices on FraisScolaires {
             pris[idx] = true;
             final l = instantane[idx];
             if (s.id.isNotEmpty && s.id != l.id) idRemap[s.id] = l.id;
-            if (_syncFusionnerEleve(l, s, baseTx)) besoinRecalcul = true;
+            if (_syncFusionnerEleve(l, s, baseTx, baseInfos)) {
+              besoinRecalcul = true;
+            }
             continue;
           }
 
@@ -2495,11 +2611,30 @@ extension FraisScolairesServices on FraisScolaires {
         }
 
         if (autresFraisPaiementsByYear.containsKey(year)) {
-          final existingIds =
-          autresFraisPaiementsByYear[year]!.map((p) => p.id).toSet();
+          final locaux = autresFraisPaiementsByYear[year]!;
+          final existingIds = locaux.map((p) => p.id).toSet();
           for (var p in serverList) {
             if (!existingIds.contains(p.id)) {
-              autresFraisPaiementsByYear[year]!.add(p);
+              locaux.add(p);
+              continue;
+            }
+            // ⚡ ÉTAPE 4 — paiement modifié (montant...) sur un autre
+            // ordinateur et pas sur celui-ci : on prend la version du serveur.
+            final String? hBase = baseAfp[p.id];
+            if (hBase == null) continue;
+            final i = locaux.indexWhere((x) => x.id == p.id);
+            if (i < 0) continue;
+            final String hLocal = _syncEmpreinteAfp(locaux[i]);
+            final String hServeur = _syncEmpreinteAfp(p);
+            if (hLocal == hBase && hServeur != hBase) {
+              locaux[i] = p;
+            } else if (hLocal != hBase &&
+                hServeur != hBase &&
+                hLocal != hServeur) {
+              dernierAvertissementsFusion.add(
+                  "Un paiement « ${p.autreFraisNom} » a été modifié sur cet "
+                      "ordinateur ET sur un autre : la version de cet "
+                      "ordinateur a été gardée (${locaux[i].montant.toStringAsFixed(0)} FC).");
             }
           }
         } else {

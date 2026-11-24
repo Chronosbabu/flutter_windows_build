@@ -531,6 +531,53 @@ void main() {
         reason: 'valeur sur le serveur après la sauvegarde de A');
   });
 
+  test('2c. infos modifiées sur A ET sur B : A garde sa version, complète '
+      'les champs vides, et un avertissement est affiché', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    eleveParNom(fsB, 'ILUNGA')
+      ..pereNom = 'Version B'
+      ..adresse = 'Adresse B';
+    await fsB.saveData();
+    await synchroniser(fsB);
+    var fsA = await a.ouvrir();
+    eleveParNom(fsA, 'ILUNGA').pereNom = 'Version A';
+    await fsA.saveData();
+    final r = await recuperer(fsA);
+    expect(eleveParNom(fsA, 'ILUNGA').pereNom, 'Version A');
+    expect(eleveParNom(fsA, 'ILUNGA').adresse, 'Adresse B');
+    expect((r['warnings'] as List).join(' '), contains('ILUNGA'));
+  });
+
+  test('2d. nom corrigé sur B : la correction arrive sur A', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    final e = eleveParNom(fsB, 'MUKENDI');
+    final id = e.id;
+    e.prenom = 'Prenom1 Corrigé';
+    await fsB.saveData();
+    await synchroniser(fsB);
+    var fsA = await a.ouvrir();
+    await synchroniser(fsA);
+    final ea = fsA.currentData.eleves.firstWhere((x) => x.id == id);
+    expect(ea.prenom, 'Prenom1 Corrigé');
+    expect(fsA.currentData.eleves.length, 4);
+  });
+
+  test('2e. modification faite sur A seulement : la récupération ne '
+      'l\'écrase pas, et elle part au serveur', () async {
+    await departCommun();
+    var fsA = await a.ouvrir();
+    eleveParNom(fsA, 'KABILA').mereNom = 'Maman K (A)';
+    await fsA.saveData();
+    await recuperer(fsA);
+    expect(eleveParNom(fsA, 'KABILA').mereNom, 'Maman K (A)');
+    await sauvegarder(fsA);
+    final fsB = await b.ouvrir();
+    await recuperer(fsB);
+    expect(eleveParNom(fsB, 'KABILA').mereNom, 'Maman K (A)');
+  });
+
   // =========================================================================
   // 3. SYMPTÔMES 1 et 5 — deux appareils inscrivent chacun un élève hors
   //    ligne : même préfixe de nom -> MÊME ID local.
