@@ -24,6 +24,7 @@ dependencies:
   image: ^4.1.7
   fl_chart: ^0.69.0
   crypto: ^3.0.3
+  archive: ^4.0.9
 
 dev_dependencies:
   flutter_test:

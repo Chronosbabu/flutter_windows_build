@@ -11,6 +11,8 @@ import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
 import '../services/registre_eleves_pdf.dart';
+import '../services/export_excel_eleves.dart';
+import 'package:open_file/open_file.dart';
 import '../utils/age_utils.dart';
 import 'import_eleves_json.dart';
 
@@ -480,6 +482,11 @@ class _StudentListScreenState extends State<StudentListScreen> {
         onPressed: _openExportDialog,
       ),
       IconButton(
+        icon: const Icon(Icons.grid_on, color: Colors.greenAccent),
+        tooltip: "Générer un fichier Excel des élèves (enregistré sur le Bureau)",
+        onPressed: _openExcelExportDialog,
+      ),
+      IconButton(
         icon: const Icon(Icons.flash_on, color: Colors.amber),
         tooltip: "Saisie rapide des informations des élèves",
         onPressed: _openFastEntry,
@@ -815,6 +822,222 @@ class _StudentListScreenState extends State<StudentListScreen> {
               : "Erreur : ${result['error']}",
         ),
         backgroundColor: result['success'] == true ? null : Colors.red,
+      ),
+    );
+  }
+
+  // ⚡ NOUVEAU — Export Excel des élèves vers le Bureau.
+  Future<void> _openExcelExportDialog() async {
+    final fs = widget.fraisScolaires;
+    final filtrees = _filteredEleves();
+    final toute = fs.currentData.eleves;
+    final description = _descriptionFiltres();
+    bool toutEcole = filtrees.length == toute.length;
+
+    final base = ExportExcelEleves.colonnesDeBase();
+    final extras = ExportExcelEleves.colonnesSupplementaires(fs, toute);
+    final cochees = <String>{for (final c in base) c.id};
+
+    // 1) Confirmation : « Voulez-vous générer le fichier ? » + choix.
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          Widget caseColonne(ColonneExcel c) => CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: cochees.contains(c.id),
+                onChanged: (v) => setD(() {
+                  if (v == true) {
+                    cochees.add(c.id);
+                  } else {
+                    cochees.remove(c.id);
+                  }
+                }),
+                title: Text(c.titre, style: const TextStyle(fontSize: 13)),
+              );
+
+          return AlertDialog(
+            title: const Text("Générer le fichier Excel ?"),
+            content: SizedBox(
+              width: 480,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Voulez-vous générer un fichier Excel des élèves ? "
+                      "Il sera enregistré directement sur le Bureau de cet "
+                      "ordinateur. Les informations manquantes resteront vides.",
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 8),
+                    RadioListTile<bool>(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      value: false,
+                      groupValue: toutEcole,
+                      onChanged: (v) => setD(() => toutEcole = v ?? false),
+                      title: Text(
+                          "Selon les filtres actuels (${filtrees.length} élève(s))",
+                          style: const TextStyle(fontSize: 13.5)),
+                      subtitle: Text(
+                        description.isEmpty
+                            ? "Aucun filtre : tous les élèves affichés"
+                            : description,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    RadioListTile<bool>(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      value: true,
+                      groupValue: toutEcole,
+                      onChanged: (v) => setD(() => toutEcole = v ?? true),
+                      title: Text("Toute l'école (${toute.length} élève(s))",
+                          style: const TextStyle(fontSize: 13.5)),
+                    ),
+                    const Divider(),
+                    const Text("Colonnes du fichier",
+                        style: TextStyle(
+                            fontSize: 13.5, fontWeight: FontWeight.bold)),
+                    ...base.map(caseColonne),
+                    if (extras.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      const Text("Autres informations (facultatif)",
+                          style: TextStyle(
+                              fontSize: 13.5, fontWeight: FontWeight.bold)),
+                      ...extras.map(caseColonne),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text("Non"),
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.grid_on),
+                label: const Text("Oui, générer"),
+                onPressed: cochees.isEmpty
+                    ? null
+                    : () => Navigator.pop(ctx, true),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    final liste = ExportExcelEleves.ordonner(
+        fs, toutEcole ? List<Eleve>.from(toute) : _filteredEleves());
+    if (liste.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("Aucun élève ne correspond aux filtres choisis.")),
+      );
+      return;
+    }
+
+    // 2) Nom du fichier.
+    final suggestion = toutEcole
+        ? "Liste des élèves"
+        : "Liste des élèves ${selectedClassFilter ?? selectedSectionFilter ?? ''}"
+            .trim();
+    final controller = TextEditingController(text: suggestion);
+    controller.selection =
+        TextSelection(baseOffset: 0, extentOffset: suggestion.length);
+    String? erreur;
+
+    final String? nom = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          void valider() {
+            final propre =
+                ExportExcelEleves.nomDeFichierPropre(controller.text);
+            if (propre.isEmpty) {
+              setD(() => erreur = "Entrez un nom de fichier.");
+              return;
+            }
+            Navigator.pop(ctx, propre);
+          }
+
+          return AlertDialog(
+            title: const Text("Nom du fichier Excel"),
+            content: SizedBox(
+              width: 420,
+              child: TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: "Nom du fichier",
+                  suffixText: ".xlsx",
+                  errorText: erreur,
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (_) {
+                  if (erreur != null) setD(() => erreur = null);
+                },
+                onSubmitted: (_) => valider(),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("Annuler"),
+              ),
+              ElevatedButton(
+                onPressed: valider,
+                child: const Text("Valider"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    controller.dispose();
+    if (nom == null || !mounted) return;
+
+    // 3) Génération + enregistrement sur le Bureau.
+    final colonnes = [
+      ...base.where((c) => cochees.contains(c.id)),
+      ...extras.where((c) => cochees.contains(c.id)),
+    ];
+    final result = await ExportExcelEleves.genererSurBureau(
+      nomFichier: nom,
+      titreFeuille: toutEcole
+          ? "Élèves"
+          : (selectedClassFilter ?? selectedSectionFilter ?? "Élèves"),
+      colonnes: colonnes,
+      eleves: liste,
+    );
+
+    if (!mounted) return;
+    final succes = result['success'] == true;
+    final chemin = result['path'] as String?;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 6),
+        content: Text(
+          succes
+              ? "✅ Fichier Excel enregistré sur le Bureau (${liste.length} élève(s)) :\n$chemin"
+              : "Erreur : ${result['error']}",
+        ),
+        backgroundColor: succes ? Colors.green.shade700 : Colors.red,
+        action: succes && chemin != null
+            ? SnackBarAction(
+                label: "Ouvrir",
+                textColor: Colors.white,
+                onPressed: () => OpenFile.open(chemin),
+              )
+            : null,
       ),
     );
   }
