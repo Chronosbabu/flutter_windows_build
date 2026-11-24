@@ -16,6 +16,10 @@ const int kNbCopiesSecurite = 30;
 const int kMaxLignesJournalSync = 1000;
 const String kFichierJournalSync = 'sync_journal.jsonl';
 String? _derniereCopieAvantRecuperation;
+// Résumé chiffré (élèves, argent...) au moment de la dernière
+// synchronisation réussie : sert à vérifier qu'une fusion n'invente ni ne
+// perd rien.
+Map<String, num>? _syncBaseResume;
 
 extension FraisScolairesServices on FraisScolaires {
   bool get synchronisationEnCours => _syncBusy;
@@ -1197,6 +1201,142 @@ extension FraisScolairesServices on FraisScolaires {
     };
   }
 
+  /// Résultat renvoyé quand une récupération a donné des chiffres anormaux :
+  /// rien n'est envoyé au serveur ; l'utilisateur choisit de garder ou
+  /// d'annuler (annulerDerniereRecuperation).
+  Map<String, dynamic> _arretAnomalie(Map<String, dynamic> r) => {
+    ...r,
+    'success': false,
+    'code': 'ANOMALIE_FUSION',
+    'error': "Chiffres anormaux après la récupération : RIEN n'a été envoyé "
+        "au serveur. Vérifiez le résumé, puis gardez ou annulez la "
+        "récupération.",
+  };
+
+  Map<String, List<Eleve>> _historiqueDepuisJson(dynamic d) {
+    final out = <String, List<Eleve>>{};
+    final h = d is Map ? d['history'] : null;
+    if (h is! Map) return out;
+    h.forEach((annee, y) {
+      try {
+        out[annee.toString()] =
+            SchoolYearData.fromJson(Map<String, dynamic>.from(y as Map)).eleves;
+      } catch (_) {}
+    });
+    return out;
+  }
+
+  /// Clés « année|nom complet » des élèves présents en plusieurs fiches
+  /// (identifiants différents) la même année.
+  Set<String> _clesDoublonsEleves(Map<String, dynamic> parAnnee) {
+    final out = <String>{};
+    parAnnee.forEach((annee, v) {
+      final List<Eleve> eleves =
+      v is SchoolYearData ? v.eleves : (v as List<Eleve>);
+      final parNom = <String, Set<String>>{};
+      for (final e in eleves) {
+        final cle = _cleNomEleve(e);
+        if (cle.replaceAll('_', '').trim().isEmpty) continue;
+        parNom.putIfAbsent(cle, () => <String>{}).add(e.id);
+      }
+      parNom.forEach((cle, ids) {
+        if (ids.length > 1) out.add('$annee|$cle');
+      });
+    });
+    return out;
+  }
+
+  /// ⚡ Contrôle d'une fusion. Une fusion correcte ne peut pas dépasser
+  /// « cet ordinateur + serveur − dernière synchronisation commune » (tout
+  /// ce qui est commun n'est compté qu'une fois) ; elle ne doit pas non
+  /// plus tomber nettement en dessous de ce que cet ordinateur avait.
+  static List<Map<String, dynamic>> controlerFusion({
+    required Map<String, num> avant,
+    required Map<String, num> serveur,
+    required Map<String, num>? base,
+    required Map<String, num> apres,
+    Set<String> doublonsAvant = const {},
+    Set<String> doublonsServeur = const {},
+    Set<String> doublonsApres = const {},
+  }) {
+    final anomalies = <Map<String, dynamic>>[];
+    String fmt(num v) => v.toStringAsFixed(0);
+    const libelles = {
+      'eleves': "nombre d'élèves",
+      'argent': 'argent des frais scolaires (FC)',
+      'argent_autres_frais': 'argent des autres frais (FC)',
+    };
+    libelles.forEach((cle, libelle) {
+      final num a = avant[cle] ?? 0;
+      final num s = serveur[cle] ?? 0;
+      final num p = apres[cle] ?? 0;
+      final num? b = base?[cle];
+      final bool eleves = cle == 'eleves';
+      num tol(num ref) => eleves
+          ? 0
+          : (ref.abs() * 0.005 < 500 ? 500 : ref.abs() * 0.005);
+      // Partie commune connue = dernière synchronisation, bornée par ce
+      // que chacun possède encore.
+      num commun = b ?? 0;
+      if (commun > a) commun = a;
+      if (commun > s) commun = s;
+      if (commun < 0) commun = 0;
+      final num maxi = a + s - commun;
+      if (p > maxi + tol(maxi)) {
+        anomalies.add({
+          'niveau': 'bloquant',
+          'cle': cle,
+          'message': "Hausse inexpliquée du $libelle : ${fmt(p)} après la "
+              "fusion, alors que cet ordinateur en avait ${fmt(a)} et le "
+              "serveur ${fmt(s)} (maximum possible ${fmt(maxi)}). Risque de "
+              "doublons.",
+        });
+      }
+      // Baisse par rapport à CET ordinateur : des données qu'il avait ont
+      // disparu (annulées ailleurs... ou effacées du serveur par un autre
+      // ordinateur).
+      if (p < a * 0.9 - tol(a)) {
+        anomalies.add({
+          'niveau': 'bloquant',
+          'cle': cle,
+          'message': "Baisse importante du $libelle : ${fmt(p)} après la "
+              "fusion, alors que cet ordinateur en avait ${fmt(a)} (serveur : "
+              "${fmt(s)}). Des données ont peut-être été effacées sur le "
+              "serveur.",
+        });
+      } else if (p < a - tol(a)) {
+        anomalies.add({
+          'niveau': 'attention',
+          'cle': cle,
+          'message': "Baisse du $libelle : ${fmt(a)} → ${fmt(p)} "
+              "(paiements annulés sur un autre ordinateur ?).",
+        });
+      }
+    });
+    final nouveaux = doublonsApres.difference(doublonsAvant);
+    final crees = nouveaux.difference(doublonsServeur);
+    final venus = nouveaux.intersection(doublonsServeur);
+    if (crees.isNotEmpty) {
+      anomalies.add({
+        'niveau': 'bloquant',
+        'cle': 'doublons',
+        'message': "La fusion a créé ${crees.length} élève(s) en double "
+            "(même nom, identifiants différents) : "
+            "${crees.map((c) => c.split('|').last.replaceAll('_', ' ').trim()).take(5).join(', ')}.",
+      });
+    }
+    if (venus.isNotEmpty) {
+      anomalies.add({
+        'niveau': 'attention',
+        'cle': 'doublons',
+        'message': "Le serveur contient déjà ${venus.length} élève(s) en "
+            "double : ${venus.map((c) => c.split('|').last.replaceAll('_', ' ').trim()).take(5).join(', ')}. "
+            "Utilisez « Vérifier les doublons ».",
+      });
+    }
+    return anomalies;
+  }
+
   /// Dernières entrées du journal, de la plus récente à la plus ancienne.
   Future<List<Map<String, dynamic>>> lireJournalSync({int max = 200}) async {
     try {
@@ -1264,6 +1404,7 @@ extension FraisScolairesServices on FraisScolaires {
     _syncServerRevision = null;
     _syncBase = <String, Set<String>>{};
     _syncBaseConfigJson = null;
+    _syncBaseResume = null;
   }
 
   Future<void> _appliquerDonneesLocales(Map<String, dynamic> data) async {
@@ -1444,6 +1585,13 @@ extension FraisScolairesServices on FraisScolaires {
       });
     }
     _syncBaseConfigJson = data['syncBaseConfig'] as String?;
+    final dynamic br = data['syncBaseResume'];
+    _syncBaseResume = br is Map
+        ? {
+      for (final e in br.entries)
+        if (e.value is num) e.key.toString(): e.value as num,
+    }
+        : null;
 
     await _assignMissingIds();
   }
@@ -1530,6 +1678,7 @@ extension FraisScolairesServices on FraisScolaires {
     _syncServerRevision  = null;
     _syncBase            = <String, Set<String>>{};
     _syncBaseConfigJson  = null;
+    _syncBaseResume      = null;
   }
 
   Map<String, dynamic> _construireJsonLocal() {
@@ -1578,6 +1727,7 @@ extension FraisScolairesServices on FraisScolaires {
       'serverRevision': _syncServerRevision,
       'syncBase': _syncBase.map((k, v) => MapEntry(k, v.toList())),
       'syncBaseConfig': _syncBaseConfigJson,
+      'syncBaseResume': _syncBaseResume,
     };
   }
 
@@ -1698,6 +1848,7 @@ extension FraisScolairesServices on FraisScolaires {
       if (_syncServerRevision == null && !force) {
         final r = await _restoreInternal(schoolCodeParam, password);
         if (r['success'] != true && r['notFound'] != true) return r;
+        if (r['bloquant'] == true) return _arretAnomalie(r);
       }
 
       var res = await _backupInternal(schoolCodeParam, password, force: force);
@@ -1707,6 +1858,9 @@ extension FraisScolairesServices on FraisScolaires {
         // on fusionne ses données avant d'envoyer, et on le dit clairement.
         final r = await _restoreInternal(schoolCodeParam, password);
         if (r['success'] != true) return {...r, 'autreOrdinateur': true};
+        if (r['bloquant'] == true) {
+          return {..._arretAnomalie(r), 'autreOrdinateur': true};
+        }
         res = await _backupInternal(schoolCodeParam, password);
         res = {
           ...res,
@@ -1740,6 +1894,11 @@ extension FraisScolairesServices on FraisScolaires {
       if (r['success'] != true && r['notFound'] != true) {
         await _journaliserResultat('synchronisation', r);
         return r;
+      }
+      if (r['bloquant'] == true) {
+        final arret = _arretAnomalie(r);
+        await _journaliserResultat('synchronisation', arret);
+        return arret;
       }
       final b = await _backupInternal(schoolCodeParam, password);
       final res = {
@@ -1828,6 +1987,7 @@ extension FraisScolairesServices on FraisScolaires {
         final dynamic rev = responseData['revision'];
         if (rev is num) _syncServerRevision = rev.toInt();
         _syncBase = _syncIdsDepuisEtatLocal();
+        _syncBaseResume = resumeSynchronisation();
         _syncBaseConfigJson = _syncCanon(config.toJson());
         _localLoadFailed = false;
         await saveData();
@@ -1901,11 +2061,38 @@ extension FraisScolairesServices on FraisScolaires {
         _derniereCopieAvantRecuperation =
             await _creerCopieSecuriteLocale('avant_recuperation');
         schoolCode = normalizedCode;
+
+        // ⚡ ÉTAPE 5 — résumé avant / serveur / après + contrôle
+        final avant = resumeSynchronisation();
+        final base = _syncBaseResume == null
+            ? null
+            : Map<String, num>.from(_syncBaseResume!);
+        final serveurResume = FraisScolairesServices.resumeDepuisJson(
+            data as Map<String, dynamic>);
+        final doublonsAvant = _clesDoublonsEleves(history);
+        final doublonsServeur = _clesDoublonsEleves(_historiqueDepuisJson(data));
+
         await mergeRestoredData(data);
         await saveData();
+
+        final apres = resumeSynchronisation();
+        final anomalies = controlerFusion(
+          avant: avant,
+          serveur: serveurResume,
+          base: base,
+          apres: apres,
+          doublonsAvant: doublonsAvant,
+          doublonsServeur: doublonsServeur,
+          doublonsApres: _clesDoublonsEleves(history),
+        );
+        final bool bloquant =
+        anomalies.any((a) => a['niveau'] == 'bloquant');
         return {
           'success': true,
           'warnings': List<String>.from(dernierAvertissementsFusion),
+          'resume': {'avant': avant, 'serveur': serveurResume, 'apres': apres},
+          'anomalies': anomalies,
+          'bloquant': bloquant,
         };
       }
       if (response.statusCode == 401) {
@@ -2982,6 +3169,7 @@ extension FraisScolairesServices on FraisScolaires {
     final dynamic rev = serverData['revision'] ?? serverData['_revision'];
     if (rev is num) _syncServerRevision = rev.toInt();
     _syncBase = _syncIdsDepuisServeur(serverData);
+    _syncBaseResume = FraisScolairesServices.resumeDepuisJson(serverData);
     _syncBaseConfigJson = cfgServeur;
     _localLoadFailed = false;
   }

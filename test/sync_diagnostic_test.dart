@@ -1198,4 +1198,117 @@ void main() {
     expect(totalArgent(fsB), 6500);
     expect(eleveParNom(fsB, 'ILUNGA').adresse, 'Adresse B');
   });
+
+  // =========================================================================
+  // ÉTAPE 5b — résumé avant / après, contrôle, blocage
+  // =========================================================================
+  test('5b-1. récupération normale : résumé exact, aucune anomalie', () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    await payer(fsB, eleveParNom(fsB, 'KABILA'), 4000);
+    await synchroniser(fsB);
+    final fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'MUKENDI'), 1000);
+    final r = await recuperer(fsA);
+    expect(r['success'], isTrue);
+    expect(r['bloquant'], isFalse);
+    expect(r['anomalies'], isEmpty);
+    final res = r['resume'] as Map;
+    expect((res['avant'] as Map)['argent'], 1000);
+    expect((res['serveur'] as Map)['argent'], 4000);
+    expect((res['apres'] as Map)['argent'], 5000);
+    expect((res['apres'] as Map)['eleves'], 4);
+  });
+
+  test('5b-2. serveur appauvri par un autre ordinateur : la synchronisation '
+      's\'arrête AVANT d\'envoyer, puis annulation possible', () async {
+    await departCommun();
+    var fsA = await a.ouvrir();
+    for (final nom in ['KABILA', 'MUKENDI', 'TSHIBANDA', 'ILUNGA']) {
+      await payer(fsA, eleveParNom(fsA, nom), 10000);
+      await pause();
+    }
+    expect((await synchroniser(fsA))['success'], isTrue);
+    // Un ancien ordinateur a écrasé le serveur en perdant 3 paiements sur 4.
+    final serv = serveur.ecoles[kCode.toLowerCase()]!;
+    final eleves = ((serv['history'] as Map)[fsA.currentYear] as Map)['eleves']
+    as List;
+    for (final e in eleves.skip(1)) {
+      (e as Map)['transactions'] = [];
+      e['paid'] = {};
+    }
+    serv['_revision'] = (serv['_revision'] as int) + 1;
+    final backupsAvant = serveur.nbBackups;
+    final etatAvant = etatCanonique(fsA);
+
+    fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'KABILA'), 500);
+    final etatAvantSync = etatCanonique(fsA);
+    final r = await synchroniser(fsA);
+    expect(r['success'], isFalse);
+    expect(r['code'], 'ANOMALIE_FUSION');
+    expect((r['anomalies'] as List).first['niveau'], 'bloquant');
+    expect(serveur.nbBackups, backupsAvant, reason: 'rien envoyé au serveur');
+
+    final ann = await fsA.annulerDerniereRecuperation();
+    expect(ann['success'], isTrue);
+    expect(etatCanonique(fsA), etatAvantSync);
+    expect(etatAvant, isNot(etatAvantSync));
+    final j = await fsA.lireJournalSync(max: 2);
+    expect(j.first['action'], 'annulation_recuperation');
+    expect(j[1]['code'], 'ANOMALIE_FUSION');
+  });
+
+  test('5b-3. une annulation faite sur un autre ordinateur : simple '
+      'avertissement, la synchronisation continue', () async {
+    await departCommun();
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'KABILA'), 2000);
+    for (final nom in ['MUKENDI', 'TSHIBANDA', 'ILUNGA']) {
+      for (var k = 0; k < 3; k++) {
+        await payer(fsA, eleveParNom(fsA, nom), 10000);
+        await pause();
+      }
+    }
+    await synchroniser(fsA);
+    var fsB = await b.ouvrir();
+    await recuperer(fsB);
+    final k = eleveParNom(fsB, 'KABILA');
+    k.transactions.clear();
+    k.paid.clear();
+    await fsB.saveData();
+    await synchroniser(fsB);
+    fsA = await a.ouvrir();
+    final r = await synchroniser(fsA);
+    expect(r['success'], isTrue, reason: '$r');
+    final niveaux = (r['anomalies'] as List?)?.map((x) => x['niveau']) ?? [];
+    expect(niveaux, isNot(contains('bloquant')));
+    expect(totalArgent(fsA), 90000);
+  });
+
+  test('5b-4. contrôle des chiffres (cas types)', () {
+    List<String> niveaux(Map<String, num> avant, Map<String, num> serveur,
+        Map<String, num>? base, Map<String, num> apres) =>
+        FraisScolairesServices.controlerFusion(
+            avant: avant, serveur: serveur, base: base, apres: apres)
+            .map((x) => '${x['cle']}:${x['niveau']}')
+            .toList();
+    Map<String, num> r(num e, num a) => {'eleves': e, 'argent': a};
+    // union normale
+    expect(niveaux(r(4, 1000), r(4, 4000), r(4, 0), r(4, 5000)), isEmpty);
+    // reconnexion (ordinateur vide)
+    expect(niveaux(r(0, 0), r(4, 4000), null, r(4, 4000)), isEmpty);
+    // multiplication : 13 000 attendus, 16 000 obtenus
+    expect(niveaux(r(5, 10000), r(5, 3000), r(4, 0), r(6, 16000)),
+        contains('argent:bloquant'));
+    // élèves multipliés
+    expect(niveaux(r(4, 0), r(4, 0), r(4, 0), r(8, 0)),
+        contains('eleves:bloquant'));
+    // grosse perte
+    expect(niveaux(r(4, 40000), r(4, 10000), r(4, 40000), r(4, 10000)),
+        contains('argent:bloquant'));
+    // petite baisse (annulation ailleurs)
+    expect(niveaux(r(4, 40000), r(4, 38000), r(4, 40000), r(4, 38000)),
+        ['argent:attention']);
+  });
 }
