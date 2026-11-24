@@ -1516,4 +1516,120 @@ void main() {
     expect(serveur.nbBackups, avant);
     expect(mdpServeur(), kMdp);
   });
+
+  // =========================================================================
+  // SORTIE SÛRE SANS INTERNET — export complet, déconnexion, import
+  // =========================================================================
+  String cheminExport() =>
+      '${Directory.systemTemp.createTempSync('export_cle_usb_').path}/'
+          'sauvegarde.json';
+
+  test('EX-1. sans internet : export vérifié, déconnexion, reconnexion, '
+      'récupération puis import : rien n\'est perdu, rien n\'est doublé',
+      () async {
+    await departCommun();
+    var fsB = await b.ouvrir();
+    await payer(fsB, eleveParNom(fsB, 'TSHIBANDA'), 3000);
+    await synchroniser(fsB);
+
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'KABILA'), 6000);
+    eleveParNom(fsA, 'KABILA').pereNom = 'Papa K';
+    final f = AutreFrais(id: 'F1', nom: 'Tenue', montant: 12000);
+    fsA.autresFrais.add(f);
+    await fsA.saveData();
+    await fsA.payAutreFrais(
+        frais: f, eleve: eleveParNom(fsA, 'KABILA'), montantSaisi: 4000);
+
+    // Pas d'internet : la sauvegarde échoue.
+    expect((await horsLigne(() => fsA.backupToServer(kCode, kMdp)))['success'],
+        isFalse);
+    final chemin = cheminExport();
+    final ex = await fsA.exporterSauvegardeComplete(chemin);
+    expect(ex['success'], isTrue, reason: '$ex');
+    final texte = File(chemin).readAsStringSync();
+    expect(texte, isNot(contains(kMdp)), reason: 'jamais le mot de passe');
+    await fsA.clearLocalData();
+
+    // Reconnexion (internet revenu) : récupération du serveur, puis import.
+    fsA = await a.ouvrir();
+    await recuperer(fsA);
+    expect(totalArgent(fsA), 3000, reason: 'seulement ce que le serveur a');
+    final im = await fsA.importerSauvegardeComplete(chemin);
+    expect(im['success'], isTrue, reason: '$im');
+    expect(im['mode'], 'fusion');
+    expect(im['bloquant'], isFalse, reason: '${im['anomalies']}');
+    expect(totalArgent(fsA), 9000);
+    expect(fsA.currentData.eleves.length, 4);
+    expect(eleveParNom(fsA, 'KABILA').pereNom, 'Papa K');
+    expect(fsA.getAutresFraisPaiementsForYear().single.montant, 4000);
+
+    // Importer une deuxième fois ne change rien.
+    final avant = etatCanonique(fsA);
+    await fsA.importerSauvegardeComplete(chemin);
+    expect(etatCanonique(fsA), avant);
+
+    // La sauvegarde suivante envoie ce qui manquait.
+    expect((await sauvegarder(fsA))['success'], isTrue);
+    fsB = await b.ouvrir();
+    await recuperer(fsB);
+    expect(totalArgent(fsB), 9000);
+    expect(fsB.getAutresFraisPaiementsForYear().single.montant, 4000);
+  });
+
+  test('EX-2. import sur l\'ordinateur encore vide : état exact d\'avant la '
+      'déconnexion, puis synchronisation normale', () async {
+    await departCommun();
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'MUKENDI'), 2500);
+    final avant = etatCanonique(fsA);
+    final chemin = cheminExport();
+    expect((await fsA.exporterSauvegardeComplete(chemin))['success'], isTrue);
+    await fsA.clearLocalData();
+    fsA = await a.ouvrir();
+    final im = await fsA.importerSauvegardeComplete(chemin);
+    expect(im['success'], isTrue);
+    expect(im['mode'], 'restauration');
+    expect(etatCanonique(fsA), avant);
+    expect((await synchroniser(fsA))['success'], isTrue);
+    final fsB = await b.ouvrir();
+    await recuperer(fsB);
+    expect(totalArgent(fsB), 2500);
+  });
+
+  test('EX-3. fichier invalide ou d\'une autre école : refusé, rien ne '
+      'change', () async {
+    await departCommun();
+    final fsA = await a.ouvrir();
+    final avant = etatCanonique(fsA);
+    final dir = Directory.systemTemp.createTempSync('export_invalide_').path;
+    File('$dir/pasunexport.json').writeAsStringSync('{"history": {}}');
+    File('$dir/casse.json').writeAsStringSync('{ pas du json');
+    final autre = cheminExport();
+    await fsA.exporterSauvegardeComplete(autre);
+    final d = json.decode(File(autre).readAsStringSync()) as Map;
+    d['schoolCode'] = 'AUTREECOLE';
+    File(autre).writeAsStringSync(json.encode(d));
+    for (final c in ['$dir/pasunexport.json', '$dir/casse.json', autre]) {
+      final r = await fsA.importerSauvegardeComplete(c);
+      expect(r['success'], isFalse, reason: c);
+    }
+    expect(etatCanonique(fsA), avant);
+  });
+
+  test('EX-4. un import peut être annulé', () async {
+    await departCommun();
+    var fsA = await a.ouvrir();
+    await payer(fsA, eleveParNom(fsA, 'ILUNGA'), 7000);
+    final chemin = cheminExport();
+    await fsA.exporterSauvegardeComplete(chemin);
+    await fsA.clearLocalData();
+    fsA = await a.ouvrir();
+    await recuperer(fsA);
+    final avantImport = etatCanonique(fsA);
+    await fsA.importerSauvegardeComplete(chemin);
+    expect(etatCanonique(fsA), isNot(avantImport));
+    expect((await fsA.annulerDerniereRecuperation())['success'], isTrue);
+    expect(etatCanonique(fsA), avantImport);
+  });
 }

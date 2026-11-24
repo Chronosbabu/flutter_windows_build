@@ -2069,6 +2069,184 @@ extension FraisScolairesServices on FraisScolaires {
     }
   }
 
+  // ==========================================================================
+  // ⚡ SORTIE SÛRE SANS INTERNET — export complet sur disque / import
+  // ==========================================================================
+  /// Écrit TOUT l'état de cet ordinateur (données, révision, base de
+  /// synchronisation) dans [chemin], puis relit le fichier et le compare à
+  /// l'état en mémoire. 'success' n'est vrai que si la relecture est
+  /// identique. Le mot de passe n'est jamais écrit dans ce fichier.
+  Future<Map<String, dynamic>> exporterSauvegardeComplete(String chemin) async {
+    try {
+      await _saveChain.catchError((_) {});
+      history[currentYear] = currentData;
+      final resume = resumeSynchronisation();
+      final donnees = <String, dynamic>{
+        ..._construireJsonLocal(),
+        '_exportComplet': 1,
+        '_exporteLe': DateTime.now().toIso8601String(),
+        '_resume': resume,
+      };
+      final texte = json.encode(donnees);
+      final tmp = File('$chemin.tmp');
+      await tmp.writeAsString(texte, flush: true);
+      final cible = File(chemin);
+      if (await cible.exists()) await cible.delete();
+      await tmp.rename(chemin);
+
+      // Vérification : relecture complète.
+      final relu =
+      json.decode(await File(chemin).readAsString()) as Map<String, dynamic>;
+      final resumeRelu = FraisScolairesServices.resumeDepuisJson(relu);
+      final bool identique = _syncCanon(relu['history']) ==
+          _syncCanon(json.decode(json.encode(donnees['history']))) &&
+          _syncCanon(resumeRelu) == _syncCanon(resume) &&
+          _syncCanon(relu['autresFraisPaiementsByYear']) ==
+              _syncCanon(json.decode(
+                  json.encode(donnees['autresFraisPaiementsByYear'])));
+      final res = {
+        'success': identique,
+        'chemin': chemin,
+        'resume': resume,
+        if (!identique)
+          'error': "Le fichier écrit ne correspond pas aux données : ne vous "
+              "déconnectez pas, réessayez sur un autre disque.",
+      };
+      await _journaliserSync({
+        'action': 'export_complet',
+        'succes': identique,
+        'fichier': chemin,
+        'resume': resume,
+      });
+      return res;
+    } catch (e) {
+      return {
+        'success': false,
+        'error': "Impossible d'écrire le fichier : $e",
+      };
+    }
+  }
+
+  /// Réintègre un export complet.
+  ///  • Cet ordinateur est vide (juste après la reconnexion, avant toute
+  ///    récupération) : il reprend exactement l'état de l'export.
+  ///  • Sinon : FUSION sans rien supprimer (aucune base commune : ni les
+  ///    paiements ni les élèves de l'un ou l'autre côté ne sont considérés
+  ///    comme supprimés). La configuration, la révision et la base de
+  ///    synchronisation de cet ordinateur sont gardées : la prochaine
+  ///    sauvegarde enverra ce qui manquait au serveur.
+  /// Une copie de sécurité est faite avant ; annulerDerniereRecuperation()
+  /// annule l'import. Le résultat contient le même résumé / contrôle que
+  /// les récupérations.
+  Future<Map<String, dynamic>> importerSauvegardeComplete(String chemin) async {
+    if (_syncBusy) return _syncOccupe();
+    Map<String, dynamic> export;
+    try {
+      export =
+      json.decode(await File(chemin).readAsString()) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'error': 'Fichier illisible : $e'};
+    }
+    if (export['_exportComplet'] != 1 || export['history'] is! Map) {
+      return {
+        'success': false,
+        'error': "Ce fichier n'est pas un export complet de l'application.",
+      };
+    }
+    final String? codeExport = export['schoolCode'] as String?;
+    if (codeExport != null &&
+        schoolCode != null &&
+        codeExport.trim().toUpperCase() != schoolCode!.trim().toUpperCase()) {
+      return {
+        'success': false,
+        'error': "Cet export appartient à une autre école ($codeExport).",
+      };
+    }
+
+    _syncBusy = true;
+    try {
+      await _saveChain.catchError((_) {});
+      final avant = resumeSynchronisation();
+      final exportResume = FraisScolairesServices.resumeDepuisJson(export);
+      _derniereCopieAvantRecuperation =
+          await _creerCopieSecuriteLocale('avant_import');
+      final bool vide = avant['eleves'] == 0 &&
+          avant['transactions'] == 0 &&
+          avant['paiements_autres_frais'] == 0;
+
+      if (vide) {
+        final code = schoolCode;
+        final codeOrdinateur = _codeAppareil;
+        _resetEtatEnMemoire();
+        await _appliquerDonneesLocales(export);
+        schoolCode ??= code;
+        // Le code d'ordinateur (identifiants d'élèves) reste celui de CET
+        // ordinateur s'il en a déjà un.
+        if (codeOrdinateur != null) _codeAppareil = codeOrdinateur;
+        _localLoadFailed = false;
+      } else {
+        // On garde l'état de synchronisation de cet ordinateur.
+        final revision = _syncServerRevision;
+        final base = _syncBase;
+        final baseConfig = _syncBaseConfigJson;
+        final baseResume = _syncBaseResume;
+        final annee = currentYear;
+        final code = schoolCode;
+        final configLocale = config;
+        _syncBase = <String, Set<String>>{};
+        _syncBaseConfigJson = _syncCanon(
+            SchoolConfig.fromJson(
+                Map<String, dynamic>.from(export['config'] as Map? ?? {}))
+                .toJson());
+        try {
+          await mergeRestoredData({
+            ...export,
+            'revision': null,
+            '_revision': null,
+          });
+        } finally {
+          _syncServerRevision = revision;
+          _syncBase = base;
+          _syncBaseConfigJson = baseConfig;
+          _syncBaseResume = baseResume;
+          config = configLocale;
+          schoolCode = code;
+          if (currentYear != annee) {
+            history[currentYear] = currentData;
+            currentYear = annee;
+            currentData =
+                history[annee] ?? (history[annee] = SchoolYearData(eleves: []));
+          }
+        }
+      }
+      await saveData();
+
+      final apres = resumeSynchronisation();
+      final anomalies = controlerFusion(
+        avant: avant,
+        serveur: exportResume,
+        base: null,
+        apres: apres,
+      );
+      final res = {
+        'success': true,
+        'mode': vide ? 'restauration' : 'fusion',
+        'warnings': vide
+            ? const <String>[]
+            : List<String>.from(dernierAvertissementsFusion),
+        'resume': {'avant': avant, 'serveur': exportResume, 'apres': apres},
+        'anomalies': anomalies,
+        'bloquant': anomalies.any((a) => a['niveau'] == 'bloquant'),
+      };
+      await _journaliserResultat('import_export', res);
+      return res;
+    } catch (e) {
+      return {'success': false, 'error': "Import impossible : $e"};
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
   Future<Map<String, dynamic>> restoreFromServer(
       String schoolCodeParam, String password) async {
     if (_syncBusy) return _syncOccupe();

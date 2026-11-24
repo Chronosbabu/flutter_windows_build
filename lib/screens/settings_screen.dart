@@ -884,7 +884,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           }
           final String errMsg =
               backupResult['error']?.toString() ?? "Erreur inconnue";
-          await showDialog<void>(
+          final String? choix = await showDialog<String>(
             context: context,
             builder: (ctx) => AlertDialog(
               title: const Text("Déconnexion impossible"),
@@ -893,19 +893,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     "Pour ne perdre aucune donnée, la déconnexion n'est "
                     "possible qu'après une sauvegarde réussie. Vos données "
                     "restent sur cet ordinateur.\n\nVérifiez la connexion "
-                    "internet puis réessayez ; si le problème continue, "
-                    "contactez l'assistance.",
+                    "internet puis réessayez.\n\nSans internet, vous pouvez "
+                    "EXPORTER toutes les données dans un fichier (clé USB...), "
+                    "puis vous déconnecter. Après la reconnexion : "
+                    "Paramètres › « Importer un export ».",
               ),
               actions: [
-                ElevatedButton(
+                TextButton(
                   onPressed: () => Navigator.pop(ctx),
-                  child: const Text("Compris"),
+                  child: const Text("Fermer"),
+                ),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.save_alt),
+                  label: const Text("Exporter sur le disque puis se "
+                      "déconnecter"),
+                  onPressed: () => Navigator.pop(ctx, 'exporter'),
                 ),
               ],
             ),
           );
+          if (choix != 'exporter' || !mounted) return;
+          if (!await _exporterAvantDeconnexion()) return;
+          if (!mounted) return;
+        } else {
+          return;
         }
-        return;
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -930,6 +942,106 @@ class _SettingsScreenState extends State<SettingsScreen> {
         MaterialPageRoute(builder: (_) => const RecoveryScreen()),
             (route) => false,
       );
+    }
+  }
+
+  // ⚡ SORTIE SÛRE SANS INTERNET : export complet vérifié, puis
+  // confirmation. Retourne vrai si l'utilisateur peut se déconnecter.
+  Future<bool> _exporterAvantDeconnexion() async {
+    final fs = widget.fraisScolaires;
+    final date = DateTime.now().toIso8601String().split('T').first;
+    final location = await getSaveLocation(
+      suggestedName:
+      'sauvegarde_${fs.schoolCode ?? 'ecole'}_${date}_complete.json',
+      acceptedTypeGroups: [
+        const XTypeGroup(label: 'Export', extensions: ['json'])
+      ],
+    );
+    if (location == null || !mounted) return false;
+    final r = await fs.exporterSauvegardeComplete(location.path);
+    if (!mounted) return false;
+    if (r['success'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("❌ Export NON vérifié — vous restez connecté : "
+              "${r['error']}"),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 8),
+        ),
+      );
+      return false;
+    }
+    final resume = r['resume'] as Map;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Export vérifié"),
+        content: Text(
+          "Toutes les données de cet ordinateur ont été écrites et relues "
+              "dans :\n${r['chemin']}\n\n"
+              "${resume['eleves']} élève(s), ${resume['transactions']} "
+              "paiement(s), ${(resume['argent'] as num).toStringAsFixed(0)} FC "
+              "de frais scolaires, "
+              "${(resume['argent_autres_frais'] as num).toStringAsFixed(0)} FC "
+              "d'autres frais.\n\n"
+              "GARDEZ CE FICHIER (copiez-le sur une clé USB). Après la "
+              "reconnexion, ouvrez Paramètres › « Importer un export » : "
+              "ces données seront fusionnées avec celles du serveur.\n\n"
+              "Se déconnecter maintenant ?",
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Rester connecté")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Se déconnecter"),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _importerExport() async {
+    final file = await openFile(acceptedTypeGroups: [
+      const XTypeGroup(label: 'Export', extensions: ['json'])
+    ]);
+    if (file == null || !mounted) return;
+    setState(() => _syncEnCours = true);
+    Map<String, dynamic> r;
+    try {
+      r = await widget.fraisScolaires.importerSauvegardeComplete(file.path);
+    } finally {
+      if (mounted) setState(() => _syncEnCours = false);
+    }
+    if (!mounted) return;
+    if (r['success'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text("❌ ${r['error']}"), backgroundColor: Colors.red),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(r['mode'] == 'restauration'
+            ? "✅ Export réintégré : cet ordinateur est revenu à son état "
+            "d'avant la déconnexion."
+            : "✅ Export fusionné avec les données du serveur. Cliquez sur "
+            "« Synchroniser » pour envoyer ce qui manquait au serveur."),
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 6),
+      ),
+    );
+    await afficherResumeSync(context, widget.fraisScolaires, r);
+    if (mounted) {
+      setState(() {
+        selectedYear = widget.fraisScolaires.currentYear;
+      });
     }
   }
 
@@ -3420,6 +3532,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           fraisScolaires: widget.fraisScolaires),
                     ),
                   ),
+                ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.upload_file),
+                  label: const Text("Importer un export"),
+                  onPressed: _syncEnCours ? null : _importerExport,
                 ),
                 OutlinedButton.icon(
                   icon: const Icon(Icons.people_outline),
