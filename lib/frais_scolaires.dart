@@ -19,6 +19,7 @@ part 'frais_scolaires_rapports.dart';
 part 'frais_scolaires_services.dart';
 part 'frais_scolaires_ordre.dart';
 part 'frais_scolaires_messagerie.dart';
+part 'frais_scolaires_retenues.dart';
 const String serverUrl = "https://jsinf.onrender.com";
 
 class AutreFraisStatut {
@@ -55,6 +56,9 @@ class FraisScolaires {
   String? lastSelectedSectionFilter;
   String? schoolCode;
   Map<String, List<Depense>> depensesByYear = {};
+  // ⚡ NOUVEAU — entrées d'argent (apports de caisse), stockées par année
+  // scolaire comme les dépenses.
+  Map<String, List<Entree>> entreesByYear = {};
   List<AutreFrais> autresFrais = [];
   Map<String, List<AutreFraisPaiement>> autresFraisPaiementsByYear = {};
   Set<String> paiementsAutresFraisAnnules = {};
@@ -101,6 +105,27 @@ class FraisScolaires {
 
   String? get currentSchoolMonthName {
     final idx = _schoolMonthIndexForToday();
+    if (idx < 0 || idx >= months.length) return null;
+    return months[idx];
+  }
+
+  // ⚡ NOUVEAU — même logique que _schoolMonthIndexForToday mais pour une
+  // date arbitraire (utilisé pour proposer le mois d'imputation par défaut
+  // d'une dépense, selon sa date).
+  int _schoolMonthIndexForDate(DateTime date) {
+    final calendarMonth = date.month;
+    if (calendarMonth >= 9 && calendarMonth <= 12) {
+      return calendarMonth - 9;
+    } else if (calendarMonth >= 1 && calendarMonth <= 6) {
+      return calendarMonth + 3;
+    }
+    return -1;
+  }
+
+  /// Nom du mois scolaire (Septembre à Juin) correspondant à [date], ou null
+  /// si la date tombe en dehors de l'année scolaire (juillet/août).
+  String? schoolMonthNameForDate(DateTime date) {
+    final idx = _schoolMonthIndexForDate(date);
     if (idx < 0 || idx >= months.length) return null;
     return months[idx];
   }
@@ -1289,7 +1314,10 @@ class FraisScolaires {
     final y = year ?? currentYear;
     final now = DateTime.now();
     return (depensesByYear[y] ?? [])
-        .where((d) => d.date.year == now.year && d.date.month == now.month)
+        .where((d) {
+      final eff = _depenseDateEffective(d);
+      return eff.year == now.year && eff.month == now.month;
+    })
         .fold(0.0, (sum, d) => sum + d.montant);
   }
 
@@ -1312,17 +1340,19 @@ class FraisScolaires {
               0.0, (s, e) => s + (e.paid[m] ?? 0)) ??
               0.0),
     );
-    return totalCollecte - getTotalDepenses(y);
+    return totalCollecte - getTotalDepenses(y) + getTotalEntrees(y);
   }
 
   double getSoldeNetForPeriod(String period, [String? year]) {
     switch (period) {
       case 'today':
         return getMoneyCollectedForPeriod('today') -
-            getTotalDepensesToday(year);
+            getTotalDepensesToday(year) +
+            getTotalEntreesToday(year);
       case 'month':
         return getMoneyCollectedForPeriod('month') -
-            getTotalDepensesThisMonth(year);
+            getTotalDepensesThisMonth(year) +
+            getTotalEntreesThisMonth(year);
       case 'year':
       default:
         return getSoldeNetActuel(year);
@@ -1359,6 +1389,17 @@ class FraisScolaires {
     return true;
   }
 
+  // ⚡ NOUVEAU — date à utiliser pour tous les calculs mensuels : le mois
+  // d'imputation choisi manuellement s'il existe, sinon la date réelle de la
+  // dépense (comportement d'origine, conservé pour les dépenses existantes).
+  DateTime _depenseDateEffective(Depense d) {
+    final m = d.moisImputation;
+    if (m != null && m.trim().isNotEmpty) {
+      return _dateRepereMois(m);
+    }
+    return d.date;
+  }
+
   List<Depense> getDepensesForPeriod(
       String period, {
         String? year,
@@ -1375,7 +1416,8 @@ class FraisScolaires {
           okPeriode = d.date.toString().split(' ')[0] == todayStr;
           break;
         case 'month':
-          okPeriode = d.date.year == now.year && d.date.month == now.month;
+          final eff = _depenseDateEffective(d);
+          okPeriode = eff.year == now.year && eff.month == now.month;
           break;
         case 'year':
         default:
@@ -1415,7 +1457,22 @@ class FraisScolaires {
     final double totalCollecte =
     collecteBySection.values.fold(0.0, (a, b) => a + b);
 
+    // ⚡ Retenues : elles sortent avant les pourcentages des rubriques.
+    double totalRetenues = 0.0;
+    retenuesParSection(period).forEach((s, v) {
+      if (sectionFilter == null || s == sectionFilter) totalRetenues += v;
+    });
+    final double baseRepartition = totalCollecte - totalRetenues;
+
     final depenses = getDepensesForPeriod(
+      period,
+      year: year,
+      sectionFilter: sectionFilter,
+      classFilter: classFilter,
+    );
+    // ⚡ NOUVEAU — entrées d'argent de la période (actives + annulées, pour
+    // l'affichage ; seules les actives sont comptées dans les totaux).
+    final entrees = getEntreesForPeriod(
       period,
       year: year,
       sectionFilter: sectionFilter,
@@ -1429,7 +1486,7 @@ class FraisScolaires {
       rub[nom] = RubriqueStat(
         rubrique: nom,
         pourcentage: admin.pourcentage,
-        collecte: totalCollecte * (admin.pourcentage / 100),
+        collecte: baseRepartition * (admin.pourcentage / 100),
       );
     }
 
@@ -1478,6 +1535,41 @@ class FraisScolaires {
       }
     }
 
+    double entreesGlobales = 0;
+    double entreesIndependantes = 0;
+    double entreesMixtes = 0;
+
+    for (final e in entrees) {
+      if (e.annulee) continue; // non comptées, seulement affichées
+      final cle = e.rubriqueAffichee;
+      final r = rub.putIfAbsent(
+        cle,
+            () => RubriqueStat(rubrique: cle, pourcentage: 0, collecte: 0),
+      );
+      if (e.portee == kDepenseGlobale) {
+        if (sectionFilter == null) {
+          r.entreesGlobales += e.montant;
+          entreesGlobales += e.montant;
+        }
+      } else {
+        final parts = repartitionEntreeParSection(e);
+        parts.forEach((s, amt) {
+          if (sectionFilter != null && s != sectionFilter) return;
+          final st = secStats.putIfAbsent(
+              s, () => SectionStat(section: s, collecte: 0));
+          if (e.portee == kDepenseIndependante) {
+            r.entreesIndependantes += amt;
+            st.entreesIndependantes += amt;
+            entreesIndependantes += amt;
+          } else {
+            r.entreesMixtes += amt;
+            st.entreesMixtes += amt;
+            entreesMixtes += amt;
+          }
+        });
+      }
+    }
+
     return DepensePeriodeStats(
       period: period,
       depenses: depenses,
@@ -1488,6 +1580,11 @@ class FraisScolaires {
       independantes: independantes,
       mixtes: mixtes,
       globalesExclues: sectionFilter != null,
+      retenues: totalRetenues,
+      entrees: entrees,
+      entreesGlobales: entreesGlobales,
+      entreesIndependantes: entreesIndependantes,
+      entreesMixtes: entreesMixtes,
     );
   }
 
@@ -1505,12 +1602,17 @@ class FraisScolaires {
       }
     }
     final collecteSec = getTotalBySection();
+    // ⚡ Les retenues sortent avant les pourcentages.
+    final retenuesSec = retenuesParSection('year');
     double collecte = 0;
     if (portee == kDepenseGlobale) {
-      collecte = collecteSec.values.fold(0.0, (a, b) => a + b) * pct / 100;
+      final double brut = collecteSec.values.fold(0.0, (a, b) => a + b);
+      final double ret = retenuesSec.values.fold(0.0, (a, b) => a + b);
+      collecte = (brut - ret) * pct / 100;
     } else {
       for (final s in sections) {
-        collecte += (collecteSec[s] ?? 0) * pct / 100;
+        collecte +=
+            ((collecteSec[s] ?? 0) - (retenuesSec[s] ?? 0)) * pct / 100;
       }
     }
 
@@ -1526,7 +1628,23 @@ class FraisScolaires {
         }
       }
     }
-    return collecte - depense;
+
+    // ⚡ NOUVEAU — les entrées actives de cette rubrique augmentent le solde
+    // disponible.
+    double entree = 0;
+    for (final e in (entreesByYear[currentYear] ?? [])) {
+      if (e.annulee || e.rubrique.trim() != rubrique.trim()) continue;
+      if (portee == kDepenseGlobale) {
+        entree += e.montant;
+      } else {
+        final parts = repartitionEntreeParSection(e);
+        for (final s in sections) {
+          entree += parts[s] ?? 0;
+        }
+      }
+    }
+
+    return collecte - depense + entree;
   }
 
   Future<Depense> addDepense({
@@ -1538,6 +1656,7 @@ class FraisScolaires {
     List<String>? classes,
     String rubrique = '',
     DateTime? date,
+    String? moisImputation,
   }) async {
     final depense = Depense(
       id: 'DEP${DateTime.now().millisecondsSinceEpoch}',
@@ -1549,6 +1668,7 @@ class FraisScolaires {
       sections: portee == kDepenseGlobale ? [] : (sections ?? []),
       classes: portee == kDepenseGlobale ? [] : (classes ?? []),
       rubrique: rubrique.trim(),
+      moisImputation: moisImputation,
     );
     depensesByYear.putIfAbsent(currentYear, () => []).add(depense);
     await saveData();
@@ -1563,6 +1683,7 @@ class FraisScolaires {
     List<String>? classes,
     String rubrique = '',
     DateTime? date,
+    String? moisImputation,
   }) async {
     final sections = getSectionsPourOption(option);
     if (sections.isEmpty) {
@@ -1577,6 +1698,7 @@ class FraisScolaires {
       classes: classes,
       rubrique: rubrique,
       date: date,
+      moisImputation: moisImputation,
     );
   }
 
@@ -1603,10 +1725,301 @@ class FraisScolaires {
     await saveData();
   }
 
+  /// ⚡ NOUVEAU — modifie le mois d'imputation d'une dépense existante.
+  /// [moisImputation] null = revenir au comportement par défaut (utiliser
+  /// la date de la dépense).
+  Future<void> updateDepenseMoisImputation(
+      String id,
+      String? moisImputation, [
+        String? year,
+      ]) async {
+    final y = year ?? currentYear;
+    final list = depensesByYear[y];
+    if (list == null) return;
+    for (final d in list) {
+      if (d.id == id) {
+        d.moisImputation = moisImputation;
+        break;
+      }
+    }
+    await saveData();
+  }
+
   Future<void> clearDepensesForYear([String? year]) async {
     final y = year ?? currentYear;
     depensesByYear[y] = [];
     await saveData();
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — ENTRÉES D'ARGENT (apports de caisse)
+  // --------------------------------------------------------------------------
+  // Même esprit que les dépenses, mais en sens inverse : une entrée AUGMENTE
+  // le reste d'une rubrique et le solde de caisse. Elle n'est JAMAIS soumise
+  // aux pourcentages des administrations, ne touche pas la base de
+  // répartition des frais scolaires, ni les retenues, ni les soldes élèves.
+  // Une entrée n'est jamais supprimée : seulement annulée (elle reste
+  // visible, marquée, et n'est plus comptée dans les totaux).
+  // ==========================================================================
+
+  Map<String, double> repartitionEntreeParSection(Entree e) {
+    if (e.portee == kDepenseGlobale || e.sections.isEmpty) return {};
+    final part = e.montant / e.sections.length;
+    return {for (final s in e.sections) s: part};
+  }
+
+  bool _entreeConcerneFiltre(
+      Entree e, String? sectionFilter, String? classFilter) {
+    if (e.portee == kDepenseGlobale) return true;
+    if (sectionFilter != null && !e.sections.contains(sectionFilter)) {
+      return false;
+    }
+    if (classFilter != null &&
+        e.classes.isNotEmpty &&
+        !e.classes.contains(classFilter)) {
+      return false;
+    }
+    return true;
+  }
+
+  // Date à utiliser pour les calculs mensuels : le mois d'imputation choisi
+  // s'il existe, sinon la date réelle de l'entrée (même logique que pour les
+  // dépenses, voir _depenseDateEffective).
+  DateTime _entreeDateEffective(Entree e) {
+    final m = e.moisImputation;
+    if (m != null && m.trim().isNotEmpty) {
+      return _dateRepereMois(m);
+    }
+    return e.date;
+  }
+
+  List<Entree> getEntreesForYear([String? year]) {
+    final y = year ?? currentYear;
+    final list = List<Entree>.from(entreesByYear[y] ?? []);
+    list.sort((a, b) => b.date.compareTo(a.date));
+    return list;
+  }
+
+  /// Total des entrées ACTIVES (non annulées) de l'année.
+  double getTotalEntrees([String? year]) {
+    final y = year ?? currentYear;
+    return (entreesByYear[y] ?? [])
+        .where((e) => !e.annulee)
+        .fold(0.0, (sum, e) => sum + e.montant);
+  }
+
+  double getTotalEntreesParType(String type, [String? year]) {
+    final y = year ?? currentYear;
+    return (entreesByYear[y] ?? [])
+        .where((e) => !e.annulee && e.type == type)
+        .fold(0.0, (sum, e) => sum + e.montant);
+  }
+
+  double getTotalEntreesToday([String? year]) {
+    final y = year ?? currentYear;
+    final today = DateTime.now().toString().split(' ')[0];
+    return (entreesByYear[y] ?? [])
+        .where((e) => !e.annulee && e.date.toString().split(' ')[0] == today)
+        .fold(0.0, (sum, e) => sum + e.montant);
+  }
+
+  double getTotalEntreesThisMonth([String? year]) {
+    final y = year ?? currentYear;
+    final now = DateTime.now();
+    return (entreesByYear[y] ?? [])
+        .where((e) {
+      if (e.annulee) return false;
+      final eff = _entreeDateEffective(e);
+      return eff.year == now.year && eff.month == now.month;
+    })
+        .fold(0.0, (sum, e) => sum + e.montant);
+  }
+
+  /// Total déjà retourné (entrées actives de type "retour de reliquat") pour
+  /// une dépense donnée. Sert à plafonner un nouveau retour.
+  double totalEntreesRetourPourDepense(String depenseId, [String? year]) {
+    final y = year ?? currentYear;
+    return (entreesByYear[y] ?? [])
+        .where((e) =>
+    !e.annulee &&
+        e.type == kEntreeRetourReliquat &&
+        e.depenseLieeId == depenseId)
+        .fold(0.0, (sum, e) => sum + e.montant);
+  }
+
+  /// Entrées (actives ET annulées, pour l'affichage détaillé) correspondant à
+  /// une période ('today', 'month', 'year') et à des filtres optionnels.
+  List<Entree> getEntreesForPeriod(
+      String period, {
+        String? year,
+        String? sectionFilter,
+        String? classFilter,
+      }) {
+    final y = year ?? currentYear;
+    final now = DateTime.now();
+    final todayStr = now.toString().split(' ')[0];
+    final list = (entreesByYear[y] ?? []).where((e) {
+      bool okPeriode;
+      switch (period) {
+        case 'today':
+          okPeriode = e.date.toString().split(' ')[0] == todayStr;
+          break;
+        case 'month':
+          final eff = _entreeDateEffective(e);
+          okPeriode = eff.year == now.year && eff.month == now.month;
+          break;
+        case 'year':
+        default:
+          okPeriode = true;
+      }
+      return okPeriode && _entreeConcerneFiltre(e, sectionFilter, classFilter);
+    }).toList();
+    list.sort((a, b) => a.date.compareTo(b.date));
+    return list;
+  }
+
+  /// Ajoute une entrée d'argent. Retourne `null` si tout va bien, sinon un
+  /// message d'erreur à afficher (rien n'est enregistré dans ce cas).
+  Future<String?> addEntree({
+    required double montant,
+    required String type,
+    required String justification,
+    String motif = '',
+    String enregistrePar = 'Direction',
+    String rubrique = '',
+    String portee = kDepenseGlobale,
+    List<String>? sections,
+    List<String>? classes,
+    DateTime? date,
+    String? moisImputation,
+    String? depenseLieeId,
+  }) async {
+    if (montant <= 0) {
+      return 'Le montant doit être supérieur à zéro.';
+    }
+    if (justification.trim().isEmpty) {
+      return 'La justification est obligatoire.';
+    }
+    if (rubrique.trim().isEmpty) {
+      return 'Veuillez choisir la rubrique.';
+    }
+    final sectionsFinales = portee == kDepenseGlobale ? <String>[] : (sections ?? []);
+    if (portee == kDepenseIndependante && sectionsFinales.isEmpty) {
+      return 'Veuillez choisir la section concernée.';
+    }
+    if (portee == kDepenseMixte && sectionsFinales.length < 2) {
+      return 'Une entrée mixte doit concerner au moins deux sections.';
+    }
+
+    String? depenseLieeFinale;
+    if (type == kEntreeRetourReliquat) {
+      if (depenseLieeId == null || depenseLieeId.trim().isEmpty) {
+        return "Veuillez choisir la dépense d'origine pour un retour de "
+            "reliquat.";
+      }
+      Depense? origine;
+      for (final d in (depensesByYear[currentYear] ?? [])) {
+        if (d.id == depenseLieeId) {
+          origine = d;
+          break;
+        }
+      }
+      if (origine == null) {
+        return "Dépense d'origine introuvable.";
+      }
+      final double dejaRetourne = totalEntreesRetourPourDepense(depenseLieeId);
+      final double disponible = origine.montant - dejaRetourne;
+      // Blocage strict : un retour de reliquat ne peut jamais dépasser ce
+      // qu'il reste à rendre sur la dépense d'origine.
+      if (montant > disponible + 0.009) {
+        return "Ce retour (${formatMontant(montant)} FC) dépasse le "
+            "reliquat encore disponible sur cette dépense "
+            "(${formatMontant(disponible)} FC déjà retourné : "
+            "${formatMontant(dejaRetourne)} FC).";
+      }
+      depenseLieeFinale = depenseLieeId;
+    }
+
+    final entree = Entree(
+      id: 'ENT${DateTime.now().millisecondsSinceEpoch}',
+      date: date ?? DateTime.now(),
+      montant: montant,
+      type: type,
+      rubrique: rubrique.trim(),
+      justification: justification.trim(),
+      motif: motif.trim(),
+      enregistrePar: enregistrePar,
+      portee: portee,
+      sections: sectionsFinales,
+      classes: portee == kDepenseGlobale ? [] : (classes ?? []),
+      moisImputation: moisImputation,
+      depenseLieeId: depenseLieeFinale,
+    );
+    entreesByYear.putIfAbsent(currentYear, () => []).add(entree);
+
+    // ⚡ Journalisation, comme pour les paiements (adminAuditLog). Les champs
+    // pensés pour les élèves sont réemployés : eleveId -> id de l'entrée,
+    // eleveNomComplet -> description, classe -> portée, mois -> imputation.
+    adminAuditLog.add(AdminAuditLog(
+      id: 'AUD${DateTime.now().millisecondsSinceEpoch}',
+      action: 'entree_ajoutee',
+      eleveId: entree.id,
+      eleveNomComplet:
+      'Entrée : ${entree.typeLabel} — ${entree.rubriqueAffichee} '
+          '(${formatMontant(entree.montant)} FC)',
+      classe: entree.portee,
+      mois: entree.moisImputation ?? '',
+      montantAvant: 0,
+      montantApres: entree.montant,
+    ));
+
+    await saveData();
+    return null;
+  }
+
+  /// Annule une entrée (motif obligatoire). L'entrée reste visible dans
+  /// l'historique, marquée "annulée", et n'est plus comptée nulle part.
+  /// Retourne `null` si tout va bien, sinon un message d'erreur.
+  Future<String?> annulerEntree(
+      String id,
+      String motif, [
+        String? year,
+      ]) async {
+    if (motif.trim().isEmpty) {
+      return "Le motif d'annulation est obligatoire.";
+    }
+    final y = year ?? currentYear;
+    final list = entreesByYear[y];
+    if (list == null) return 'Entrée introuvable.';
+    Entree? entree;
+    for (final e in list) {
+      if (e.id == id) {
+        entree = e;
+        break;
+      }
+    }
+    if (entree == null) return 'Entrée introuvable.';
+    if (entree.annulee) return 'Cette entrée est déjà annulée.';
+
+    entree.annulee = true;
+    entree.dateAnnulation = DateTime.now();
+    entree.motifAnnulation = motif.trim();
+
+    adminAuditLog.add(AdminAuditLog(
+      id: 'AUD${DateTime.now().millisecondsSinceEpoch}',
+      action: 'entree_annulee',
+      eleveId: entree.id,
+      eleveNomComplet:
+      'Entrée : ${entree.typeLabel} — ${entree.rubriqueAffichee} '
+          '(motif : ${motif.trim()})',
+      classe: entree.portee,
+      mois: entree.moisImputation ?? '',
+      montantAvant: entree.montant,
+      montantApres: 0,
+    ));
+
+    await saveData();
+    return null;
   }
 
   List<AutreFrais> getAutresFrais() {
@@ -2435,10 +2848,13 @@ class FraisScolaires {
         total = getStudentsBySection(option)
             .fold(0.0, (sum, e) => sum + getStudentTotalPaid(e));
     }
+    // ⚡ Les retenues sortent AVANT les pourcentages.
+    final double retenues = retenuePourSectionPeriode(option, period);
     return RepartitionDetail(
       label: option,
       total: total,
-      parAdministration: calculateAdminDistribution(total),
+      retenues: retenues,
+      parAdministration: calculateAdminDistribution(total - retenues),
     );
   }
 
@@ -2479,18 +2895,23 @@ class FraisScolaires {
       String option, String period) {
     final students = getStudentsBySection(option);
     final Map<String, double> totalsByLabel = {};
+    final Map<String, double> retenuesByLabel = {};
     for (var e in students) {
       final label = _sousSectionLabelFor(e);
       final montant = _getStudentAmountForPeriod(e, period);
       totalsByLabel[label] = (totalsByLabel[label] ?? 0) + montant;
+      retenuesByLabel[label] =
+          (retenuesByLabel[label] ?? 0) + retenueEleve(e, period);
     }
-    final details = totalsByLabel.entries
-        .map((entry) => RepartitionDetail(
-      label: entry.key,
-      total: entry.value,
-      parAdministration: calculateAdminDistribution(entry.value),
-    ))
-        .toList();
+    final details = totalsByLabel.entries.map((entry) {
+      final double ret = retenuesByLabel[entry.key] ?? 0.0;
+      return RepartitionDetail(
+        label: entry.key,
+        total: entry.value,
+        retenues: ret,
+        parAdministration: calculateAdminDistribution(entry.value - ret),
+      );
+    }).toList();
     details.sort((a, b) {
       final aBase = a.label.startsWith("Éducation de Base");
       final bBase = b.label.startsWith("Éducation de Base");

@@ -169,10 +169,26 @@ extension FraisScolairesServices on FraisScolaires {
     paiementsValides.fold(0.0, (sum, p) => sum + p.montant);
     final Map<String, double> moneyThisYearBySection = getTotalBySection();
 
-    final adminDistToday = calculateAdminDistribution(moneyTodayPrincipal);
+    // ⚡ Retenues : elles sortent AVANT les pourcentages des administrations.
+    final Map<String, double> retenuesTodayBySection =
+    retenuesParSection('today');
+    final Map<String, double> retenuesMonthBySection =
+    retenuesParSection('month');
+    final Map<String, double> retenuesYearBySection =
+    retenuesParSection('year');
+    final double retenuesToday =
+    retenuesTodayBySection.values.fold(0.0, (s, v) => s + v);
+    final double retenuesThisMonth =
+    retenuesMonthBySection.values.fold(0.0, (s, v) => s + v);
+    final double retenuesThisYear =
+    retenuesYearBySection.values.fold(0.0, (s, v) => s + v);
+
+    final adminDistToday =
+    calculateAdminDistribution(moneyTodayPrincipal - retenuesToday);
     final adminDistThisMonth =
-    calculateAdminDistribution(moneyThisMonthPrincipal);
-    final adminDistThisYear = calculateAdminDistribution(totalPrincipalYear);
+    calculateAdminDistribution(moneyThisMonthPrincipal - retenuesThisMonth);
+    final adminDistThisYear =
+    calculateAdminDistribution(totalPrincipalYear - retenuesThisYear);
 
     final autresFraisAdminDistToday =
     calculateAutresFraisAdminDistribution(moneyTodayAutresFrais);
@@ -182,19 +198,22 @@ extension FraisScolairesServices on FraisScolaires {
     calculateAutresFraisAdminDistribution(totalAutresFraisYear);
 
     Map<String, Map<String, double>> distBySection(
-        Map<String, double> amountsBySection) {
+        Map<String, double> amountsBySection,
+        Map<String, double> retenuesBySection) {
       final result = <String, Map<String, double>>{};
       amountsBySection.forEach((section, amount) {
-        result[section] = calculateAdminDistribution(amount);
+        result[section] = calculateAdminDistribution(
+            amount - (retenuesBySection[section] ?? 0.0));
       });
       return result;
     }
 
-    final adminDistributionTodayBySection = distBySection(moneyTodayBySection);
+    final adminDistributionTodayBySection =
+    distBySection(moneyTodayBySection, retenuesTodayBySection);
     final adminDistributionThisMonthBySection =
-    distBySection(moneyThisMonthBySection);
+    distBySection(moneyThisMonthBySection, retenuesMonthBySection);
     final adminDistributionThisYearBySection =
-    distBySection(moneyThisYearBySection);
+    distBySection(moneyThisYearBySection, retenuesYearBySection);
 
     final Map<String, int> studentsBySection = {};
     final Map<String, int> studentsByClass = {};
@@ -290,6 +309,9 @@ extension FraisScolairesServices on FraisScolaires {
       'schoolName': config.schoolName,
       'currentYear': currentYear,
       'currentMonthName': currentSchoolMonthName ?? '',
+      'retenuesToday': retenuesToday,
+      'retenuesThisMonth': retenuesThisMonth,
+      'retenuesThisYear': retenuesThisYear,
       'generatedAt': DateTime.now().toIso8601String(),
 
       'moneyToday': moneyTodayPrincipal + moneyTodayAutresFrais,
@@ -331,6 +353,9 @@ extension FraisScolairesServices on FraisScolaires {
         kDepenseIndependante: getTotalDepensesParPortee(kDepenseIndependante),
         kDepenseMixte: getTotalDepensesParPortee(kDepenseMixte),
       },
+      // ⚡ NOUVEAU — entrées d'argent (apports de caisse), déjà incluses dans
+      // 'soldeNet' ci-dessous.
+      'totalEntrees': getTotalEntrees(),
       'soldeNet': getSoldeNetActuel(),
     };
   }
@@ -679,6 +704,10 @@ extension FraisScolairesServices on FraisScolaires {
             (key, value) =>
             MapEntry(key, value.map((d) => d.toJson()).toList()),
       ),
+      'entreesByYear': entreesByYear.map(
+            (key, value) =>
+            MapEntry(key, value.map((e) => e.toJson()).toList()),
+      ),
       'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
       'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
             (key, value) =>
@@ -1009,6 +1038,7 @@ extension FraisScolairesServices on FraisScolaires {
     lastReportCity = null;
     schoolCode  = null;
     depensesByYear = {};
+    entreesByYear = {};
     autresFrais = [];
     autresFraisPaiementsByYear = {};
     paiementsAutresFraisAnnules = {};
@@ -1068,6 +1098,19 @@ extension FraisScolairesServices on FraisScolaires {
               key,
               (value as List<dynamic>)
                   .map((e) => Depense.fromJson(e as Map<String, dynamic>))
+                  .toList(),
+            ),
+          );
+    }
+    // ⚡ NOUVEAU — absent des anciennes sauvegardes : entreesByYear reste {}
+    // (valeur par défaut du champ), aucune erreur.
+    if (data['entreesByYear'] != null) {
+      entreesByYear =
+          (data['entreesByYear'] as Map<String, dynamic>).map(
+                (key, value) => MapEntry(
+              key,
+              (value as List<dynamic>)
+                  .map((e) => Entree.fromJson(e as Map<String, dynamic>))
                   .toList(),
             ),
           );
@@ -1300,6 +1343,10 @@ extension FraisScolairesServices on FraisScolaires {
             (key, value) =>
             MapEntry(key, value.map((d) => d.toJson()).toList()),
       ),
+      'entreesByYear': entreesByYear.map(
+            (key, value) =>
+            MapEntry(key, value.map((e) => e.toJson()).toList()),
+      ),
       'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
       'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
             (key, value) =>
@@ -1469,6 +1516,10 @@ extension FraisScolairesServices on FraisScolaires {
         'depensesByYear': depensesByYear.map(
               (key, value) =>
               MapEntry(key, value.map((d) => d.toJson()).toList()),
+        ),
+        'entreesByYear': entreesByYear.map(
+              (key, value) =>
+              MapEntry(key, value.map((e) => e.toJson()).toList()),
         ),
         'autresFrais': autresFrais.map((f) => f.toJson()).toList(),
         'autresFraisPaiementsByYear': autresFraisPaiementsByYear.map(
@@ -1667,6 +1718,7 @@ extension FraisScolairesServices on FraisScolaires {
     final eleves = <String>{};
     final tx = <String>{};
     final dep = <String>{};
+    final ent = <String>{};
     final sig = <String>{};
     final adm = <String>{};
     for (final y in history.values) {
@@ -1684,6 +1736,12 @@ extension FraisScolairesServices on FraisScolaires {
         if (id.isNotEmpty) dep.add(id);
       }
     }
+    for (final liste in entreesByYear.values) {
+      for (final e in liste) {
+        final id = e.id.toString();
+        if (id.isNotEmpty) ent.add(id);
+      }
+    }
     for (final s in signataires) {
       final id = s.id.toString();
       if (id.isNotEmpty) sig.add(id);
@@ -1696,6 +1754,7 @@ extension FraisScolairesServices on FraisScolaires {
       'eleves': eleves,
       'tx': tx,
       'depenses': dep,
+      'entrees': ent,
       'signataires': sig,
       'admins': adm,
     };
@@ -1705,6 +1764,7 @@ extension FraisScolairesServices on FraisScolaires {
     final eleves = <String>{};
     final tx = <String>{};
     final dep = <String>{};
+    final ent = <String>{};
     final sig = <String>{};
     final adm = <String>{};
 
@@ -1742,6 +1802,19 @@ extension FraisScolairesServices on FraisScolaires {
         }
       }
     }
+    final ey = d['entreesByYear'];
+    if (ey is Map) {
+      for (final l in ey.values) {
+        if (l is List) {
+          for (final x in l) {
+            if (x is Map) {
+              final id = x['id']?.toString() ?? '';
+              if (id.isNotEmpty) ent.add(id);
+            }
+          }
+        }
+      }
+    }
     final sg = d['signataires'];
     if (sg is List) {
       for (final x in sg) {
@@ -1764,6 +1837,7 @@ extension FraisScolairesServices on FraisScolaires {
       'eleves': eleves,
       'tx': tx,
       'depenses': dep,
+      'entrees': ent,
       'signataires': sig,
       'admins': adm,
     };
@@ -2037,6 +2111,7 @@ extension FraisScolairesServices on FraisScolaires {
     final Set<String> baseEleves = _syncBase['eleves'] ?? <String>{};
     final Set<String> baseTx = _syncBase['tx'] ?? <String>{};
     final Set<String> baseDepenses = _syncBase['depenses'] ?? <String>{};
+    final Set<String> baseEntrees = _syncBase['entrees'] ?? <String>{};
     final Set<String> baseSignataires = _syncBase['signataires'] ?? <String>{};
     final Set<String> baseAdmins = _syncBase['admins'] ?? <String>{};
 
@@ -2234,6 +2309,62 @@ extension FraisScolairesServices on FraisScolaires {
           );
         } else {
           depensesByYear[year] = serverList;
+        }
+      }
+    }
+
+    // ⚡ NOUVEAU — entrées d'argent : fusion par id comme les dépenses, avec
+    // une garde supplémentaire : une entrée annulée sur CET ordinateur OU sur
+    // le serveur reste annulée après la fusion (la fusion par id garde par
+    // défaut l'objet LOCAL quand l'id existe des deux côtés, ce qui pourrait
+    // sinon "oublier" une annulation faite ailleurs).
+    if (serverData['entreesByYear'] != null) {
+      final serverEntrees =
+      (serverData['entreesByYear'] as Map<String, dynamic>).map(
+            (key, value) => MapEntry(
+          key,
+          (value as List<dynamic>)
+              .map((e) => Entree.fromJson(e as Map<String, dynamic>))
+              .toList(),
+        ),
+      );
+
+      for (var entry in serverEntrees.entries) {
+        final year       = entry.key;
+        final serverList = entry.value;
+
+        final Map<String, Entree> annuleesConnues = {};
+        for (final e in (entreesByYear[year] ?? [])) {
+          if (e.annulee && e.id.isNotEmpty) annuleesConnues[e.id] = e;
+        }
+        for (final e in serverList) {
+          if (e.annulee &&
+              e.id.isNotEmpty &&
+              !annuleesConnues.containsKey(e.id)) {
+            annuleesConnues[e.id] = e;
+          }
+        }
+
+        if (entreesByYear.containsKey(year)) {
+          entreesByYear[year] = _syncFusionnerListeParId<Entree>(
+            locale: entreesByYear[year]!,
+            serveur: serverList,
+            idDe: (e) => e.id.toString(),
+            base: baseEntrees,
+          );
+        } else {
+          entreesByYear[year] = serverList;
+        }
+
+        if (annuleesConnues.isNotEmpty) {
+          for (final e in entreesByYear[year]!) {
+            final ref = annuleesConnues[e.id];
+            if (ref != null && !e.annulee) {
+              e.annulee = true;
+              e.dateAnnulation = ref.dateAnnulation;
+              e.motifAnnulation = ref.motifAnnulation;
+            }
+          }
         }
       }
     }

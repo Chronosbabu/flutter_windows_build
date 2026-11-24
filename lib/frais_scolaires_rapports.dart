@@ -243,11 +243,15 @@ extension FraisScolairesRapports on FraisScolaires {
 
   /// Construit les statistiques de dépenses à partir d'une collecte par
   /// section et d'une liste de dépenses déjà filtrées.
+  /// ⚡ [retenuesParSection] : retenues déduites avant les pourcentages des
+  /// rubriques (administrations).
   DepensePeriodeStats _construireStatsDepenses({
     required String period,
     required Map<String, double> collecteAll,
     required List<Depense> depenses,
     String? sectionFilter,
+    Map<String, double> retenuesParSection = const {},
+    List<Entree> entrees = const [],
   }) {
     final collecteBySection = <String, double>{};
     collecteAll.forEach((s, v) {
@@ -258,6 +262,12 @@ extension FraisScolairesRapports on FraisScolaires {
     final double totalCollecte =
     collecteBySection.values.fold(0.0, (a, b) => a + b);
 
+    double totalRetenues = 0.0;
+    retenuesParSection.forEach((s, v) {
+      if (sectionFilter == null || s == sectionFilter) totalRetenues += v;
+    });
+    final double baseRepartition = totalCollecte - totalRetenues;
+
     final Map<String, RubriqueStat> rub = {};
     for (final admin in config.administrations) {
       final nom = admin.nom.trim();
@@ -265,7 +275,7 @@ extension FraisScolairesRapports on FraisScolaires {
       rub[nom] = RubriqueStat(
         rubrique: nom,
         pourcentage: admin.pourcentage,
-        collecte: totalCollecte * (admin.pourcentage / 100),
+        collecte: baseRepartition * (admin.pourcentage / 100),
       );
     }
 
@@ -315,6 +325,41 @@ extension FraisScolairesRapports on FraisScolaires {
       }
     }
 
+    double entreesGlobales = 0;
+    double entreesIndependantes = 0;
+    double entreesMixtes = 0;
+
+    for (final e in entrees) {
+      if (e.annulee) continue; // non comptées, seulement affichées
+      final cle = e.rubriqueAffichee;
+      final r = rub.putIfAbsent(
+        cle,
+            () => RubriqueStat(rubrique: cle, pourcentage: 0, collecte: 0),
+      );
+      if (e.portee == kDepenseGlobale) {
+        if (sectionFilter == null) {
+          r.entreesGlobales += e.montant;
+          entreesGlobales += e.montant;
+        }
+      } else {
+        final parts = repartitionEntreeParSection(e);
+        parts.forEach((s, amt) {
+          if (sectionFilter != null && s != sectionFilter) return;
+          final st = secStats.putIfAbsent(
+              s, () => SectionStat(section: s, collecte: 0));
+          if (e.portee == kDepenseIndependante) {
+            r.entreesIndependantes += amt;
+            st.entreesIndependantes += amt;
+            entreesIndependantes += amt;
+          } else {
+            r.entreesMixtes += amt;
+            st.entreesMixtes += amt;
+            entreesMixtes += amt;
+          }
+        });
+      }
+    }
+
     return DepensePeriodeStats(
       period: period,
       depenses: depenses,
@@ -325,6 +370,11 @@ extension FraisScolairesRapports on FraisScolaires {
       independantes: independantes,
       mixtes: mixtes,
       globalesExclues: sectionFilter != null,
+      retenues: totalRetenues,
+      entrees: entrees,
+      entreesGlobales: entreesGlobales,
+      entreesIndependantes: entreesIndependantes,
+      entreesMixtes: entreesMixtes,
     );
   }
 
@@ -336,17 +386,30 @@ extension FraisScolairesRapports on FraisScolaires {
       }) {
     final repere = _dateRepereMois(mois);
     final depenses = (depensesByYear[currentYear] ?? []).where((d) {
+      final eff = _depenseDateEffective(d);
       final bool okPeriode =
-          d.date.year == repere.year && d.date.month == repere.month;
+          eff.year == repere.year && eff.month == repere.month;
       return okPeriode && _depenseConcerneFiltre(d, sectionFilter, classFilter);
     }).toList();
     depenses.sort((a, b) => a.date.compareTo(b.date));
+
+    // ⚡ NOUVEAU — entrées d'argent du même mois (mois d'imputation pris en
+    // compte, comme pour les dépenses).
+    final entrees = (entreesByYear[currentYear] ?? []).where((e) {
+      final eff = _entreeDateEffective(e);
+      final bool okPeriode =
+          eff.year == repere.year && eff.month == repere.month;
+      return okPeriode && _entreeConcerneFiltre(e, sectionFilter, classFilter);
+    }).toList();
+    entrees.sort((a, b) => a.date.compareTo(b.date));
 
     return _construireStatsDepenses(
       period: 'month',
       collecteAll: _collecteMoisParSection(mois),
       depenses: depenses,
       sectionFilter: sectionFilter,
+      retenuesParSection: _retenuesRapportParSection('month', mois: mois),
+      entrees: entrees,
     );
   }
 
@@ -367,7 +430,90 @@ extension FraisScolairesRapports on FraisScolaires {
         classFilter: classFilter,
       ),
       sectionFilter: sectionFilter,
+      retenuesParSection: _retenuesRapportParSection(period),
+      entrees: getEntreesForPeriod(
+        period,
+        sectionFilter: sectionFilter,
+        classFilter: classFilter,
+      ),
     );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — RAPPORT PDF « DÉPENSES UNIQUEMENT »
+  // --------------------------------------------------------------------------
+  // Génère un PDF ne contenant QUE la partie dépenses (totaux, rubriques,
+  // sections, détail, reste en caisse) pour UNE période choisie par
+  // l'utilisateur, sans le reste du rapport (liste des élèves, etc.).
+  // Réutilise les mêmes fonctions de calcul que le rapport PDF complet
+  // (_computeDepensesStatsMois / computeDepensesStats / _construireStatsDepenses
+  // via _buildDepensesPeriodeSection), donc les chiffres sont identiques,
+  // mois d'imputation et retenues inclus.
+  // ==========================================================================
+
+  /// [period] : 'today', 'month' ou 'year'.
+  /// [mois] : mois scolaire (ex. "Octobre"), requis si [period] == 'month'.
+  /// Retourne {'success': false, 'empty': true, ...} si aucune dépense
+  /// n'existe sur la période choisie (pas de PDF généré dans ce cas).
+  Future<Map<String, dynamic>> generateDepensesOnlyPdf({
+    required String filename,
+    required String period,
+    String? mois,
+    String? sectionFilter,
+    String? city,
+  }) async {
+    await rapportPersonnalise.charger();
+
+    final String? moisSel = (period == 'month' &&
+        mois != null &&
+        mois.trim().isNotEmpty &&
+        months.contains(mois))
+        ? mois
+        : null;
+
+    final DepensePeriodeStats stats;
+    final String titre;
+
+    if (moisSel != null) {
+      stats = _computeDepensesStatsMois(moisSel, sectionFilter: sectionFilter);
+      titre = "RAPPORT DES DÉPENSES — ${_libelleMoisCalendrier(moisSel)}";
+    } else {
+      final String periodeCalc = period == 'today' ? 'today' : 'year';
+      stats = _rapportPersonnaliseEnVigueur
+          ? _computeDepensesStatsRapport(periodeCalc, sectionFilter: sectionFilter)
+          : computeDepensesStats(periodeCalc, sectionFilter: sectionFilter);
+      titre = periodeCalc == 'today'
+          ? "RAPPORT DES DÉPENSES — AUJOURD'HUI"
+          : "RAPPORT DES DÉPENSES — ANNÉE $currentYear";
+    }
+
+    if (stats.depenses.isEmpty) {
+      return {
+        'success': false,
+        'empty': true,
+        'error': 'Aucune dépense enregistrée pour cette période.',
+      };
+    }
+
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
+        build: (pw.Context context) => [
+          ..._buildCenteredReportHeader(
+            title: titre,
+            subtitle: sectionFilter != null
+                ? "Section : $sectionFilter — Année scolaire $currentYear"
+                : 'Année scolaire $currentYear',
+          ),
+          ..._buildDepensesPeriodeSection(stats, sectionFilter: sectionFilter),
+          ..._buildSignatureSection(city),
+        ],
+      ),
+    );
+
+    return await _savePdf(pdf, filename, 'depenses');
   }
 
   // ==========================================================================
@@ -599,7 +745,9 @@ extension FraisScolairesRapports on FraisScolaires {
   }
 
   List<pw.Widget> _buildRepartitionParOption(
-      List<Eleve> students, Map<String, double> totalBySection,
+      List<Eleve> students,
+      Map<String, double> totalBySection,
+      Map<String, double> retenueBySection,
       [String? moisCible]) {
     if (!aDesOptionsActives) return [];
     if (config.administrations.isEmpty || totalBySection.isEmpty) return [];
@@ -610,6 +758,7 @@ extension FraisScolairesRapports on FraisScolaires {
     final admins = config.administrations;
 
     final List<double> totaux = [];
+    final List<double> retenues = [];
     final List<int> effectifs = [];
     final List<String> taux = [];
     final List<Eleve> tousLesEleves = [];
@@ -617,18 +766,23 @@ extension FraisScolairesRapports on FraisScolaires {
     for (final g in groupes) {
       final double total = g.sections
           .fold<double>(0.0, (sum, s) => sum + (totalBySection[s] ?? 0));
+      final double ret = g.sections
+          .fold<double>(0.0, (sum, s) => sum + (retenueBySection[s] ?? 0));
       final List<Eleve> elevesGroupe = students
           .where((e) =>
       g.sections.contains(e.section) &&
           (totalBySection[e.section] ?? 0) > 0)
           .toList();
       totaux.add(total);
+      retenues.add(ret);
       effectifs.add(elevesGroupe.length);
       taux.add(_tauxMensuelLabel(elevesGroupe, moisCible));
       tousLesEleves.addAll(elevesGroupe);
     }
 
     final double totalGeneral = totaux.fold(0.0, (sum, v) => sum + v);
+    final double retenueGenerale = retenues.fold(0.0, (sum, v) => sum + v);
+    final bool avecRetenues = retenueGenerale > 0.0001;
     final int effectifGeneral = effectifs.fold(0, (sum, v) => sum + v);
     final String tauxGeneral = _tauxMensuelLabel(tousLesEleves, moisCible);
 
@@ -648,11 +802,26 @@ extension FraisScolairesRapports on FraisScolaires {
         ...totaux.map((t) => formatMontant(t)),
         formatMontant(totalGeneral),
       ],
+      if (avecRetenues)
+        [
+          'Retenues avant répartition (FC)',
+          ...retenues.map((t) => formatMontant(t)),
+          formatMontant(retenueGenerale),
+        ],
+      if (avecRetenues)
+        [
+          'Montant réparti (FC)',
+          for (var i = 0; i < totaux.length; i++)
+            formatMontant(totaux[i] - retenues[i]),
+          formatMontant(totalGeneral - retenueGenerale),
+        ],
       for (final a in admins)
         [
           '${a.nom} (${_pctLabel(a.pourcentage)}%)',
-          ...totaux.map((t) => formatMontant(t * a.pourcentage / 100)),
-          formatMontant(totalGeneral * a.pourcentage / 100),
+          for (var i = 0; i < totaux.length; i++)
+            formatMontant((totaux[i] - retenues[i]) * a.pourcentage / 100),
+          formatMontant(
+              (totalGeneral - retenueGenerale) * a.pourcentage / 100),
         ],
     ];
 
@@ -670,7 +839,8 @@ extension FraisScolairesRapports on FraisScolaires {
       pw.Text(
         "Regroupement des sections en options : chaque colonne réunit "
             "toutes les sections de l'option. Les sections qui ne sont dans "
-            "aucune option figurent chacune dans leur propre colonne.",
+            "aucune option figurent chacune dans leur propre colonne."
+            "${avecRetenues ? " Les pourcentages sont calculés sur le montant restant après retenues." : ""}",
         style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
       ),
       pw.SizedBox(height: 10),
@@ -721,13 +891,18 @@ extension FraisScolairesRapports on FraisScolaires {
     if (config.administrations.isEmpty || students.isEmpty) return [];
 
     final Map<String, double> totalBySection = {};
+    final Map<String, double> retenueBySection = {};
     for (final e in students) {
       totalBySection[e.section] =
           (totalBySection[e.section] ?? 0) +
               _montantEleve(e, period, moisCible);
+      retenueBySection[e.section] = (retenueBySection[e.section] ?? 0) +
+          _retenueRapportEleve(e, period, moisCible);
     }
     totalBySection.removeWhere((_, v) => v <= 0);
     if (totalBySection.isEmpty) return [];
+    retenueBySection.removeWhere((s, _) => !totalBySection.containsKey(s));
+    final bool avecRetenues = retenueBySection.values.any((v) => v > 0.0001);
 
     final List<String> sectionsOrdonnees = [
       ...config.sections.where((s) => totalBySection.containsKey(s)),
@@ -741,6 +916,7 @@ extension FraisScolairesRapports on FraisScolaires {
       'Section',
       'Effectif',
       'Montant Total (FC)',
+      if (avecRetenues) 'Retenues (FC)',
       ...config.administrations
           .map((a) => '${a.nom}\n(${a.pourcentage.toStringAsFixed(0)}%)'),
     ];
@@ -755,11 +931,13 @@ extension FraisScolairesRapports on FraisScolaires {
     final rows = <List<String>>[];
     for (final section in sectionsOrdonnees) {
       final double total = totalBySection[section] ?? 0;
-      final dist = calculateAdminDistribution(total);
+      final double retenue = retenueBySection[section] ?? 0;
+      final dist = calculateAdminDistribution(total - retenue);
       rows.add([
         section,
         '${effectifParSection[section] ?? 0}',
         total.toStringAsFixed(0),
+        if (avecRetenues) retenue.toStringAsFixed(0),
         ...config.administrations
             .map((a) => (dist[a.nom] ?? 0).toStringAsFixed(0)),
       ]);
@@ -767,14 +945,18 @@ extension FraisScolairesRapports on FraisScolaires {
 
     final double totalGeneral =
     totalBySection.values.fold(0.0, (sum, v) => sum + v);
+    final double retenueGenerale =
+    retenueBySection.values.fold(0.0, (sum, v) => sum + v);
     final int effectifGeneral =
     effectifParSection.values.fold(0, (sum, v) => sum + v);
-    final distGenerale = calculateAdminDistribution(totalGeneral);
+    final distGenerale =
+    calculateAdminDistribution(totalGeneral - retenueGenerale);
 
     final columnWidths = _buildColumnWidths([
       1.7,
       0.9,
       1.5,
+      if (avecRetenues) 1.2,
       ...List<double>.filled(config.administrations.length, 1.3),
     ]);
     final double cellFontSize = _tableCellFontSize(headers.length);
@@ -790,7 +972,8 @@ extension FraisScolairesRapports on FraisScolaires {
         "Détail du montant collecté et de sa répartition entre "
             "administrations, section par section. Le total général "
             "toutes sections et classes confondues figure dans le "
-            "tableau récapitulatif juste en dessous.",
+            "tableau récapitulatif juste en dessous."
+            "${avecRetenues ? " Les retenues sont déduites avant le calcul des pourcentages." : ""}",
         style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
       ),
       pw.SizedBox(height: 10),
@@ -817,7 +1000,8 @@ extension FraisScolairesRapports on FraisScolaires {
       ),
       pw.SizedBox(height: 16),
 
-      ..._buildRepartitionParOption(students, totalBySection, moisCible),
+      ..._buildRepartitionParOption(
+          students, totalBySection, retenueBySection, moisCible),
 
       pw.Container(
         width: double.infinity,
@@ -843,18 +1027,21 @@ extension FraisScolairesRapports on FraisScolaires {
             pw.TableHelper.fromTextArray(
               headers: [
                 'Montant Total (FC)',
+                if (avecRetenues) 'Retenues (FC)',
                 ...config.administrations.map((a) =>
                 '${a.nom}\n(${a.pourcentage.toStringAsFixed(0)}%)'),
               ],
               data: [
                 [
                   totalGeneral.toStringAsFixed(0),
+                  if (avecRetenues) retenueGenerale.toStringAsFixed(0),
                   ...config.administrations.map(
                           (a) => (distGenerale[a.nom] ?? 0).toStringAsFixed(0)),
                 ],
               ],
               columnWidths: _buildColumnWidths([
                 1.5,
+                if (avecRetenues) 1.2,
                 ...List<double>.filled(config.administrations.length, 1.3),
               ]),
               headerStyle: pw.TextStyle(
@@ -1079,6 +1266,11 @@ extension FraisScolairesRapports on FraisScolaires {
           children: [
             _pdfLigneMontant("Total collecté $periodeCourte",
                 s.totalCollecte, PdfColors.green800, gras: true),
+            if (s.retenues > 0.0001)
+              _pdfLigneMontant(
+                  "Dont retenues déduites avant répartition (rubriques)",
+                  s.retenues,
+                  PdfColors.orange800),
             pw.Divider(thickness: 0.4, color: PdfColors.red200),
             if (!s.globalesExclues)
               _pdfLigneMontant("Dépenses globales (toute l'école)",
@@ -1090,8 +1282,16 @@ extension FraisScolairesRapports on FraisScolaires {
             pw.Divider(thickness: 0.4, color: PdfColors.red200),
             _pdfLigneMontant("TOTAL DES DÉPENSES $periodeCourte".toUpperCase(),
                 s.totalDepenses, PdfColors.red800, gras: true),
+            if (s.totalEntrees > 0.0001)
+              _pdfLigneMontant(
+                  "TOTAL DES ENTRÉES D'ARGENT $periodeCourte".toUpperCase(),
+                  s.totalEntrees,
+                  PdfColors.green800,
+                  gras: true),
             _pdfLigneMontant(
-              "RESTE APRÈS DÉPENSES",
+              s.totalEntrees > 0.0001
+                  ? "RESTE APRÈS DÉPENSES ET ENTRÉES"
+                  : "RESTE APRÈS DÉPENSES",
               s.reste,
               s.reste >= 0 ? PdfColors.indigo900 : PdfColors.red800,
               gras: true,
@@ -1114,6 +1314,7 @@ extension FraisScolairesRapports on FraisScolaires {
         style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
       ));
     } else {
+      final bool avecEntreesRub = s.rubriques.any((r) => r.totalEntrees > 0);
       final rowsRub = s.rubriques
           .map((r) => [
         r.rubrique,
@@ -1125,12 +1326,13 @@ extension FraisScolairesRapports on FraisScolaires {
         formatMontant(r.independantes),
         formatMontant(r.mixtes),
         formatMontant(r.total),
+        if (avecEntreesRub) formatMontant(r.totalEntrees),
         formatMontant(r.reste),
       ])
           .toList();
       widgets.add(
         pw.TableHelper.fromTextArray(
-          headers: const [
+          headers: [
             'Rubrique',
             'Taux',
             'Collecté (FC)',
@@ -1138,10 +1340,15 @@ extension FraisScolairesRapports on FraisScolaires {
             'Dép. indépendantes',
             'Dép. mixtes',
             'Total dépensé',
+            if (avecEntreesRub) 'Entrées (FC)',
             'Reste (FC)',
           ],
           data: rowsRub,
-          columnWidths: _buildColumnWidths([2.0, 0.7, 1.3, 1.2, 1.4, 1.2, 1.3, 1.3]),
+          columnWidths: _buildColumnWidths([
+            2.0, 0.7, 1.3, 1.2, 1.4, 1.2, 1.3,
+            if (avecEntreesRub) 1.2,
+            1.3,
+          ]),
           headerStyle: _pdfHeaderDepenseStyle(),
           headerDecoration: const pw.BoxDecoration(color: PdfColors.red700),
           headerAlignment: pw.Alignment.center,
@@ -1159,13 +1366,16 @@ extension FraisScolairesRapports on FraisScolaires {
       final double totColl =
       s.rubriques.fold(0.0, (a, r) => a + r.collecte);
       final double totDep = s.rubriques.fold(0.0, (a, r) => a + r.total);
+      final double totEnt =
+      s.rubriques.fold(0.0, (a, r) => a + r.totalEntrees);
       widgets.add(pw.SizedBox(height: 3));
       widgets.add(pw.Align(
         alignment: pw.Alignment.centerRight,
         child: pw.Text(
           "TOTAL : collecté ${formatMontant(totColl)} FC  |  "
               "dépensé ${formatMontant(totDep)} FC  |  "
-              "reste ${formatMontant(totColl - totDep)} FC",
+              "${avecEntreesRub ? 'entrées ${formatMontant(totEnt)} FC  |  ' : ''}"
+              "reste ${formatMontant(totColl - totDep + totEnt)} FC",
           style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
         ),
       ));
@@ -1184,6 +1394,8 @@ extension FraisScolairesRapports on FraisScolaires {
         style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
       ));
     } else {
+      final bool avecEntreesSec =
+      sectionsActives.any((x) => x.totalEntrees > 0);
       final rowsSec = sectionsActives
           .map((x) => [
         x.section,
@@ -1191,21 +1403,27 @@ extension FraisScolairesRapports on FraisScolaires {
         formatMontant(x.independantes),
         formatMontant(x.mixtes),
         formatMontant(x.total),
+        if (avecEntreesSec) formatMontant(x.totalEntrees),
         formatMontant(x.reste),
       ])
           .toList();
       widgets.add(
         pw.TableHelper.fromTextArray(
-          headers: const [
+          headers: [
             'Section',
             'Collecté (FC)',
             'Dép. indépendantes',
             'Dép. mixtes (part)',
             'Total dépensé',
+            if (avecEntreesSec) 'Entrées (FC)',
             'Reste (FC)',
           ],
           data: rowsSec,
-          columnWidths: _buildColumnWidths([2.2, 1.4, 1.5, 1.4, 1.4, 1.4]),
+          columnWidths: _buildColumnWidths([
+            2.2, 1.4, 1.5, 1.4, 1.4,
+            if (avecEntreesSec) 1.3,
+            1.4,
+          ]),
           headerStyle: _pdfHeaderDepenseStyle(),
           headerDecoration: const pw.BoxDecoration(color: PdfColors.red700),
           headerAlignment: pw.Alignment.center,
@@ -1312,6 +1530,9 @@ extension FraisScolairesRapports on FraisScolaires {
       }
     }
 
+    widgets.add(pw.SizedBox(height: 12));
+    widgets.addAll(_buildEntreesSection(s, periodeCourte));
+
     widgets.add(pw.SizedBox(height: 10));
     widgets.add(
       pw.Container(
@@ -1329,7 +1550,10 @@ extension FraisScolairesRapports on FraisScolaires {
           mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
           children: [
             pw.Text(
-              "RESTE EN CAISSE APRÈS DÉPENSES $periodeCourte".toUpperCase(),
+              (s.totalEntrees > 0.0001
+                  ? "RESTE EN CAISSE APRÈS DÉPENSES ET ENTRÉES $periodeCourte"
+                  : "RESTE EN CAISSE APRÈS DÉPENSES $periodeCourte")
+                  .toUpperCase(),
               style: pw.TextStyle(
                   fontSize: 11, fontWeight: pw.FontWeight.bold),
             ),
@@ -1346,6 +1570,178 @@ extension FraisScolairesRapports on FraisScolaires {
       ),
     );
     widgets.add(pw.SizedBox(height: 22));
+    return widgets;
+  }
+
+  Depense? _depenseParId(String? id) {
+    if (id == null) return null;
+    for (final d in (depensesByYear[currentYear] ?? [])) {
+      if (d.id == id) return d;
+    }
+    return null;
+  }
+
+  /// ⚡ NOUVEAU — section "Entrées d'argent" (apports de caisse) d'un rapport
+  /// dépenses : totaux (actifs uniquement), par rubrique, détail complet
+  /// (actives + annulées, ces dernières signalées à part et exclues des
+  /// totaux).
+  List<pw.Widget> _buildEntreesSection(
+      DepensePeriodeStats s, String periodeCourte) {
+    final widgets = <pw.Widget>[];
+
+    widgets.add(pw.Text(
+      "4. Entrées d'argent (apports de caisse) — "
+          "${periodeCourte.toUpperCase()}",
+      style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+    ));
+    widgets.add(pw.SizedBox(height: 4));
+
+    if (s.entrees.isEmpty) {
+      widgets.add(pw.Text(
+        "Aucune entrée d'argent enregistrée sur cette période.",
+        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.grey700),
+      ));
+      return widgets;
+    }
+
+    final entreesAnnulees = s.entrees.where((e) => e.annulee).toList();
+    final double totalAnnule =
+    entreesAnnulees.fold(0.0, (a, e) => a + e.montant);
+
+    widgets.add(
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(10),
+        decoration: pw.BoxDecoration(
+          color: PdfColors.green50,
+          border: pw.Border.all(color: PdfColors.green200, width: 0.8),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+        ),
+        child: pw.Column(
+          children: [
+            _pdfLigneMontant("Entrées globales (toute l'école)",
+                s.entreesGlobales, PdfColors.grey900),
+            _pdfLigneMontant("Entrées indépendantes (une section)",
+                s.entreesIndependantes, PdfColors.grey900),
+            _pdfLigneMontant("Entrées mixtes (plusieurs sections)",
+                s.entreesMixtes, PdfColors.grey900),
+            pw.Divider(thickness: 0.4, color: PdfColors.green200),
+            _pdfLigneMontant(
+                "TOTAL DES ENTRÉES $periodeCourte".toUpperCase(),
+                s.totalEntrees,
+                PdfColors.green800,
+                gras: true),
+            if (entreesAnnulees.isNotEmpty)
+              _pdfLigneMontant(
+                "Dont entrées annulées (non comptées ci-dessus)",
+                totalAnnule,
+                PdfColors.grey700,
+              ),
+          ],
+        ),
+      ),
+    );
+    widgets.add(pw.SizedBox(height: 10));
+
+    final Map<String, double> parRubrique = {};
+    for (final e in s.entrees) {
+      if (e.annulee) continue;
+      final cle = e.rubriqueAffichee;
+      parRubrique[cle] = (parRubrique[cle] ?? 0) + e.montant;
+    }
+    if (parRubrique.isNotEmpty) {
+      widgets.add(pw.Text(
+        "Par rubrique",
+        style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
+      ));
+      widgets.add(pw.SizedBox(height: 3));
+      widgets.add(
+        pw.TableHelper.fromTextArray(
+          headers: const ['Rubrique', 'Montant (FC)'],
+          data: [
+            for (final entry in parRubrique.entries)
+              [entry.key, formatMontant(entry.value)],
+            ['TOTAL', formatMontant(s.totalEntrees)],
+          ],
+          columnWidths: _buildColumnWidths([3.0, 1.4]),
+          headerStyle: _pdfHeaderDepenseStyle(),
+          headerDecoration: const pw.BoxDecoration(color: PdfColors.green700),
+          headerAlignment: pw.Alignment.center,
+          cellStyle: const pw.TextStyle(fontSize: 8.5),
+          cellAlignment: pw.Alignment.centerLeft,
+          cellAlignments: {1: pw.Alignment.centerRight},
+          cellPadding:
+          const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+          oddRowDecoration: const pw.BoxDecoration(color: PdfColors.green50),
+        ),
+      );
+      widgets.add(pw.SizedBox(height: 10));
+    }
+
+    widgets.add(pw.Text(
+      "Détail des entrées",
+      style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
+    ));
+    widgets.add(pw.SizedBox(height: 3));
+
+    final rowsDet = <List<String>>[];
+    for (var i = 0; i < s.entrees.length; i++) {
+      final e = s.entrees[i];
+      final Depense? liee = _depenseParId(e.depenseLieeId);
+      rowsDet.add([
+        '${i + 1}',
+        e.dateFormatee,
+        e.typeLabel,
+        e.rubriqueAffichee,
+        e.justification,
+        formatMontant(e.montant),
+        liee != null ? liee.motif : '-',
+        e.annulee ? 'ANNULÉE' : 'Active',
+      ]);
+    }
+    widgets.add(
+      pw.TableHelper.fromTextArray(
+        headers: const [
+          'N°',
+          'Date et heure',
+          'Type',
+          'Rubrique',
+          'Justification',
+          'Montant (FC)',
+          'Dépense liée',
+          'Statut',
+        ],
+        data: rowsDet,
+        columnWidths: _buildColumnWidths(
+            [0.4, 1.5, 1.3, 1.3, 2.6, 1.1, 1.6, 0.9]),
+        headerStyle: _pdfHeaderDepenseStyle(),
+        headerDecoration: const pw.BoxDecoration(color: PdfColors.green700),
+        headerAlignment: pw.Alignment.center,
+        cellStyle: const pw.TextStyle(fontSize: 8),
+        cellAlignment: pw.Alignment.centerLeft,
+        cellAlignments: {
+          0: pw.Alignment.center,
+          5: pw.Alignment.centerRight,
+          7: pw.Alignment.center,
+        },
+        cellPadding:
+        const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+        oddRowDecoration: const pw.BoxDecoration(color: PdfColors.green50),
+      ),
+    );
+
+    if (entreesAnnulees.isNotEmpty) {
+      widgets.add(pw.SizedBox(height: 3));
+      widgets.add(pw.Text(
+        "Note : les entrées marquées ANNULÉE apparaissent ci-dessus pour "
+            "traçabilité mais ne sont comptées dans aucun total.",
+        style: pw.TextStyle(
+            fontSize: 8.5,
+            fontStyle: pw.FontStyle.italic,
+            color: PdfColors.grey700),
+      ));
+    }
+
     return widgets;
   }
 
@@ -1415,8 +1811,19 @@ extension FraisScolairesRapports on FraisScolaires {
             pw.Text(
               "• Chaque dépense apparaît dans le rapport correspondant à SA "
                   "PROPRE DATE (celle indiquée à l'enregistrement, ou "
-                  "corrigée ensuite dans l'historique), et non à la date à "
-                  "laquelle elle a été saisie dans l'application.",
+                  "corrigée ensuite dans l'historique) — sauf si un MOIS "
+                  "D'IMPUTATION a été choisi manuellement, auquel cas c'est "
+                  "ce mois qui est utilisé. Dans tous les cas, cela ne "
+                  "concerne jamais la date à laquelle elle a été saisie dans "
+                  "l'application.",
+              style: const pw.TextStyle(fontSize: 9),
+            ),
+            pw.Text(
+              "• Une ENTRÉE D'ARGENT (retour de reliquat, don, subvention...) "
+                  "AUGMENTE le reste de sa rubrique et le reste en caisse, "
+                  "sans jamais passer par les pourcentages des "
+                  "administrations. Une entrée annulée apparaît dans le "
+                  "détail mais n'est comptée dans aucun total.",
               style: const pw.TextStyle(fontSize: 9),
             ),
           ],
@@ -1909,7 +2316,14 @@ extension FraisScolairesRapports on FraisScolaires {
 
     final double total              = students.fold(
         0.0, (sum, e) => sum + _montantEleve(e, periodePourMontant, moisSel));
-    final adminDistribution         = calculateAdminDistribution(total);
+    // ⚡ Retenues prélevées avant la répartition par pourcentages.
+    final double totalRetenues = students.fold(
+        0.0,
+            (sum, e) =>
+        sum + _retenueRapportEleve(e, periodePourMontant, moisSel));
+    final double totalNet = total - totalRetenues;
+    final bool afficherRetenues = totalRetenues > 0.0001;
+    final adminDistribution         = calculateAdminDistribution(totalNet);
     // ⚡ Totaux de l'école exprimés en montants de rapport si la fonction est
     // active (sinon : mêmes valeurs qu'avant).
     final double totalMoisEcole     = moisSel != null
@@ -1925,6 +2339,7 @@ extension FraisScolairesRapports on FraisScolaires {
 
     final headers = [
       'ID', 'Nom Complet', 'Section', 'Classe', 'Montant Payé (FC)',
+      if (afficherRetenues) 'Retenues (FC)',
       if (showMoisConcerne) 'Mois Concerné(s)',
       ...config.administrations.map(
               (a) => '${a.nom} (${a.pourcentage.toStringAsFixed(0)}%)'),
@@ -1962,6 +2377,8 @@ extension FraisScolairesRapports on FraisScolaires {
 
     final rows = studentsTriesPourListe.map((e) {
       final montant = _montantEleve(e, periodePourMontant, moisSel);
+      final retenue = _retenueRapportEleve(e, periodePourMontant, moisSel);
+      final net = montant - retenue;
       final row = [
         e.id.isNotEmpty ? e.id : "N/A",
         "${e.nom} ${e.postNom} ${e.prenom}",
@@ -1969,6 +2386,9 @@ extension FraisScolairesRapports on FraisScolaires {
         e.classe,
         montant.toStringAsFixed(0),
       ];
+      if (afficherRetenues) {
+        row.add(retenue.toStringAsFixed(0));
+      }
       if (showMoisConcerne) {
         final moisConcernes = getMoisPayesPourDate(e);
         row.add(moisConcernes.isNotEmpty
@@ -1976,8 +2396,7 @@ extension FraisScolairesRapports on FraisScolaires {
             : (currentSchoolMonthName ?? '-'));
       }
       for (var admin in config.administrations) {
-        row.add(
-            (montant * (admin.pourcentage / 100)).toStringAsFixed(0));
+        row.add((net * (admin.pourcentage / 100)).toStringAsFixed(0));
       }
       return row;
     }).toList();
@@ -1990,6 +2409,7 @@ extension FraisScolairesRapports on FraisScolaires {
       1.1,
       1.3,
       1.3,
+      if (afficherRetenues) 1.1,
       if (showMoisConcerne) 1.7,
       ...List<double>.filled(config.administrations.length, 1.3),
     ];
@@ -2025,6 +2445,25 @@ extension FraisScolairesRapports on FraisScolaires {
                     color: PdfColors.indigo900,
                   ),
                 ),
+                if (afficherRetenues) ...[
+                  pw.SizedBox(height: 3),
+                  pw.Text(
+                    "Retenues prélevées avant répartition : "
+                        "${formatMontant(totalRetenues)} FC",
+                    style: const pw.TextStyle(
+                        fontSize: 11, color: PdfColors.orange800),
+                  ),
+                  pw.SizedBox(height: 2),
+                  pw.Text(
+                    "Montant réparti aux administrations : "
+                        "${formatMontant(totalNet)} FC",
+                    style: pw.TextStyle(
+                      fontSize: 11,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PdfColors.indigo900,
+                    ),
+                  ),
+                ],
                 pw.SizedBox(height: 5),
                 pw.Text(
                   "Total ce Mois ($currentMonthName) : "
@@ -2136,6 +2575,9 @@ extension FraisScolairesRapports on FraisScolaires {
             ),
           ),
 
+          if (afficherRetenues)
+            ..._buildRetenuesSection(students, periodePourMontant, moisSel),
+
           if (includeDepenses)
             ..._buildDepensesReportSections(
               sectionFilter: sectionFilter,
@@ -2150,7 +2592,6 @@ extension FraisScolairesRapports on FraisScolaires {
 
     return await _savePdf(pdf, filename, reportType);
   }
-
   Future<Map<String, dynamic>> _generateStudentListPdf({
     required String filename,
     String? sectionFilter,

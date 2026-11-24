@@ -19,6 +19,15 @@ const String kDepenseMixte = 'mixte';
 const String kRubriqueAutre = 'Autre';
 const String kRubriqueNonAffectee = 'Non affectée';
 
+// ⚡ NOUVEAU — ENTRÉES D'ARGENT (apports de caisse)
+// La "portée" d'une entrée réutilise volontairement les mêmes constantes que
+// les dépenses (kDepenseGlobale/Independante/Mixte) : c'est exactement le
+// même concept (toute l'école / une section / plusieurs sections).
+const String kEntreeRetourReliquat = 'retour_reliquat';
+const String kEntreeDon = 'don';
+const String kEntreeSubvention = 'subvention';
+const String kEntreeAutre = 'autre_apport';
+
 String formatMontant(double v) {
   final neg = v < -0.5;
   final s = v.abs().round().toString();
@@ -40,6 +49,10 @@ class Depense {
   List<String> sections;
   List<String> classes;
   String rubrique;
+  // ⚡ NOUVEAU — mois scolaire choisi manuellement pour l'imputation dans les
+  // rapports mensuels (ex. "Octobre"). null = on utilise la date de la
+  // dépense comme avant (compatibilité avec les dépenses existantes).
+  String? moisImputation;
 
   Depense({
     required this.id,
@@ -51,6 +64,7 @@ class Depense {
     List<String>? sections,
     List<String>? classes,
     this.rubrique = '',
+    this.moisImputation,
   })  : sections = sections ?? [],
         classes = classes ?? [];
 
@@ -77,6 +91,7 @@ class Depense {
           .toList() ??
           [],
       rubrique: json['rubrique'] as String? ?? '',
+      moisImputation: json['moisImputation'] as String?,
     );
   }
 
@@ -90,6 +105,7 @@ class Depense {
     'sections': sections,
     'classes': classes,
     'rubrique': rubrique,
+    'moisImputation': moisImputation,
   };
 
   String get dateFormatee {
@@ -127,6 +143,146 @@ class Depense {
   }
 }
 
+// ⚡ NOUVEAU — ENTRÉE D'ARGENT (apport de caisse)
+// Même esprit que Depense : une ligne séparée et justifiée dans le livre de
+// caisse. On ne modifie jamais une dépense pour "simuler" un retour d'argent
+// — on enregistre une Entree distincte, éventuellement liée à une dépense
+// (depenseLieeId) pour un retour de reliquat.
+class Entree {
+  String id;
+  DateTime date;
+  double montant;
+  String type; // kEntreeRetourReliquat / kEntreeDon / kEntreeSubvention / kEntreeAutre
+  String rubrique;
+  String justification; // OBLIGATOIRE, non vide
+  String motif; // nom court, facultatif
+  String enregistrePar;
+  String portee; // kDepenseGlobale / kDepenseIndependante / kDepenseMixte
+  List<String> sections;
+  List<String> classes;
+  String? moisImputation;
+  String? depenseLieeId; // id de la Depense d'origine (retour de reliquat)
+  bool annulee;
+  DateTime? dateAnnulation;
+  String? motifAnnulation;
+
+  Entree({
+    required this.id,
+    required this.date,
+    required this.montant,
+    required this.type,
+    this.rubrique = '',
+    required this.justification,
+    this.motif = '',
+    this.enregistrePar = 'Direction',
+    this.portee = kDepenseGlobale,
+    List<String>? sections,
+    List<String>? classes,
+    this.moisImputation,
+    this.depenseLieeId,
+    this.annulee = false,
+    this.dateAnnulation,
+    this.motifAnnulation,
+  })  : sections = sections ?? [],
+        classes = classes ?? [];
+
+  factory Entree.fromJson(Map<String, dynamic> json) {
+    final String porteeRaw = json['portee'] as String? ?? kDepenseGlobale;
+    final String portee = (porteeRaw == kDepenseIndependante ||
+        porteeRaw == kDepenseMixte)
+        ? porteeRaw
+        : kDepenseGlobale;
+    return Entree(
+      id: json['id'] as String? ?? '',
+      date: DateTime.tryParse(json['date'] as String? ?? '') ??
+          DateTime.now(),
+      montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+      type: json['type'] as String? ?? kEntreeAutre,
+      rubrique: json['rubrique'] as String? ?? '',
+      justification: json['justification'] as String? ?? '',
+      motif: json['motif'] as String? ?? '',
+      enregistrePar: json['enregistrePar'] as String? ?? 'Direction',
+      portee: portee,
+      sections: (json['sections'] as List<dynamic>?)
+          ?.map((e) => e.toString())
+          .toList() ??
+          [],
+      classes: (json['classes'] as List<dynamic>?)
+          ?.map((e) => e.toString())
+          .toList() ??
+          [],
+      moisImputation: json['moisImputation'] as String?,
+      depenseLieeId: json['depenseLieeId'] as String?,
+      annulee: json['annulee'] as bool? ?? false,
+      dateAnnulation: json['dateAnnulation'] != null
+          ? DateTime.tryParse(json['dateAnnulation'] as String)
+          : null,
+      motifAnnulation: json['motifAnnulation'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'date': date.toIso8601String(),
+    'montant': montant,
+    'type': type,
+    'rubrique': rubrique,
+    'justification': justification,
+    'motif': motif,
+    'enregistrePar': enregistrePar,
+    'portee': portee,
+    'sections': sections,
+    'classes': classes,
+    'moisImputation': moisImputation,
+    'depenseLieeId': depenseLieeId,
+    'annulee': annulee,
+    'dateAnnulation': dateAnnulation?.toIso8601String(),
+    'motifAnnulation': motifAnnulation,
+  };
+
+  String get dateFormatee {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(date.day)}/${two(date.month)}/${date.year} à '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+
+  String get typeLabel {
+    switch (type) {
+      case kEntreeRetourReliquat:
+        return 'Retour de reliquat';
+      case kEntreeDon:
+        return 'Don';
+      case kEntreeSubvention:
+        return 'Subvention';
+      case kEntreeAutre:
+      default:
+        return 'Autre apport';
+    }
+  }
+
+  String get porteeLabel {
+    switch (portee) {
+      case kDepenseIndependante:
+        return 'Indépendante';
+      case kDepenseMixte:
+        return 'Mixte';
+      case kDepenseGlobale:
+      default:
+        return 'Globale';
+    }
+  }
+
+  String get rubriqueAffichee =>
+      rubrique.trim().isEmpty ? kRubriqueNonAffectee : rubrique.trim();
+
+  String get sectionsLabel {
+    if (portee == kDepenseGlobale || sections.isEmpty) {
+      return "Toute l'école";
+    }
+    return sections.join(', ');
+  }
+}
+
 class RubriqueStat {
   final String rubrique;
   final double pourcentage;
@@ -134,6 +290,11 @@ class RubriqueStat {
   double globales = 0;
   double independantes = 0;
   double mixtes = 0;
+  // ⚡ NOUVEAU — entrées d'argent actives (non annulées) attribuées à cette
+  // rubrique, mêmes découpages que les dépenses.
+  double entreesGlobales = 0;
+  double entreesIndependantes = 0;
+  double entreesMixtes = 0;
 
   RubriqueStat({
     required this.rubrique,
@@ -142,7 +303,10 @@ class RubriqueStat {
   });
 
   double get total => globales + independantes + mixtes;
-  double get reste => collecte - total;
+  double get totalEntrees =>
+      entreesGlobales + entreesIndependantes + entreesMixtes;
+  // Reste de la rubrique = collecte (après retenues) + entrées − dépenses.
+  double get reste => collecte - total + totalEntrees;
 }
 
 class SectionStat {
@@ -150,12 +314,18 @@ class SectionStat {
   double collecte;
   double independantes = 0;
   double mixtes = 0;
+  // ⚡ NOUVEAU — entrées d'argent actives rattachées à cette section
+  // (indépendantes/mixtes seulement : une entrée globale n'est pas attribuée
+  // à une section, comme pour les dépenses).
+  double entreesIndependantes = 0;
+  double entreesMixtes = 0;
 
   SectionStat({required this.section, required this.collecte});
 
   double get total => independantes + mixtes;
-  double get reste => collecte - total;
-  bool get aDeLActivite => collecte != 0 || total != 0;
+  double get totalEntrees => entreesIndependantes + entreesMixtes;
+  double get reste => collecte - total + totalEntrees;
+  bool get aDeLActivite => collecte != 0 || total != 0 || totalEntrees != 0;
 }
 
 class DepensePeriodeStats {
@@ -168,6 +338,16 @@ class DepensePeriodeStats {
   final double independantes;
   final double mixtes;
   final bool globalesExclues;
+  // ⚡ NOUVEAU — retenues prélevées avant la répartition (0 si aucune)
+  final double retenues;
+  // ⚡ NOUVEAU — entrées d'argent (apports de caisse) de la période.
+  // [entrees] contient TOUTES les entrées (actives + annulées, pour
+  // l'affichage détaillé) ; les totaux ci-dessous ne comptent que les
+  // entrées actives (non annulées).
+  final List<Entree> entrees;
+  final double entreesGlobales;
+  final double entreesIndependantes;
+  final double entreesMixtes;
 
   DepensePeriodeStats({
     required this.period,
@@ -179,10 +359,18 @@ class DepensePeriodeStats {
     required this.independantes,
     required this.mixtes,
     required this.globalesExclues,
+    this.retenues = 0.0,
+    this.entrees = const [],
+    this.entreesGlobales = 0.0,
+    this.entreesIndependantes = 0.0,
+    this.entreesMixtes = 0.0,
   });
 
   double get totalDepenses => globales + independantes + mixtes;
-  double get reste => totalCollecte - totalDepenses;
+  double get totalEntrees =>
+      entreesGlobales + entreesIndependantes + entreesMixtes;
+  // Reste en caisse = collecté − dépenses + entrées actives.
+  double get reste => totalCollecte - totalDepenses + totalEntrees;
 
   RubriqueStat? rubriqueParNom(String nom) {
     for (final r in rubriques) {
@@ -450,13 +638,19 @@ class AutreFraisAdministration {
 class RepartitionDetail {
   final String label;
   final double total;
+  // ⚡ NOUVEAU — retenues déduites avant le calcul des pourcentages
+  final double retenues;
   final Map<String, double> parAdministration;
 
   RepartitionDetail({
     required this.label,
     required this.total,
     required this.parAdministration,
+    this.retenues = 0.0,
   });
+
+  /// Montant réellement réparti (total − retenues).
+  double get net => total - retenues;
 }
 
 class AdminAuditLog {

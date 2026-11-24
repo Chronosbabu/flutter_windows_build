@@ -119,6 +119,92 @@ class Administration {
   }
 }
 
+// ============================================================================
+// ⚡ NOUVEAU — RETENUES SUR PAIEMENTS
+// ----------------------------------------------------------------------------
+// Une "retenue" est une somme qui sort de chaque paiement d'élève AVANT le
+// calcul des pourcentages des administrations (ex : construction, frais
+// informatiques, examens...). Les noms et les montants sont libres : chaque
+// école définit les siens.
+// ============================================================================
+class RetenueItem {
+  String id;
+  String nom;
+  double montant;
+
+  RetenueItem({
+    required this.id,
+    required this.nom,
+    required this.montant,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'nom': nom,
+    'montant': montant,
+  };
+
+  factory RetenueItem.fromJson(Map<String, dynamic> json) {
+    return RetenueItem(
+      id: json['id']?.toString() ?? '',
+      nom: json['nom']?.toString() ?? '',
+      montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+    );
+  }
+}
+
+class RetenueRegle {
+  String id;
+
+  /// '' = toute l'école.
+  String section;
+
+  /// '' = toutes les classes de la section (numéro de classe, sans
+  /// sous-classe). Ne peut être renseignée que si [section] l'est.
+  String classe;
+
+  /// Mois concernés (noms de mois scolaires). Liste vide = tous les mois.
+  List<String> mois;
+
+  List<RetenueItem> items;
+
+  bool actif;
+
+  RetenueRegle({
+    required this.id,
+    this.section = '',
+    this.classe = '',
+    List<String>? mois,
+    List<RetenueItem>? items,
+    this.actif = true,
+  })  : mois = mois ?? [],
+        items = items ?? [];
+
+  double get total => items.fold(0.0, (sum, i) => sum + i.montant);
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'section': section,
+    'classe': classe,
+    'mois': mois,
+    'items': items.map((i) => i.toJson()).toList(),
+    'actif': actif,
+  };
+
+  factory RetenueRegle.fromJson(Map<String, dynamic> json) {
+    return RetenueRegle(
+      id: json['id']?.toString() ?? '',
+      section: json['section']?.toString() ?? '',
+      classe: json['classe']?.toString() ?? '',
+      mois: (json['mois'] as List? ?? []).map((e) => e.toString()).toList(),
+      items: (json['items'] as List? ?? [])
+          .map((e) => RetenueItem.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(),
+      actif: json['actif'] != false,
+    );
+  }
+}
+
 class SchoolConfig {
   String schoolName;
   double defaultMonthlyFee;
@@ -136,6 +222,9 @@ class SchoolConfig {
   List<String> customFieldQuestions = [];
   Map<String, String> sectionAliases = {};
 
+  // ⚡ NOUVEAU — retenues prélevées avant la répartition par pourcentages.
+  List<RetenueRegle> retenues = [];
+
   SchoolConfig({
     required this.schoolName,
     this.defaultMonthlyFee = 35000,
@@ -149,6 +238,7 @@ class SchoolConfig {
     Map<String, Map<String, double>>? monthlyExceptionsByClasse,
     List<String>? customFieldQuestions,
     Map<String, String>? sectionAliases,
+    List<RetenueRegle>? retenues,
   }) {
     this.sections =
         _dedupeSections(sections ?? ['Primaire', 'Secondaire']);
@@ -161,6 +251,7 @@ class SchoolConfig {
     this.monthlyExceptionsByClasse = monthlyExceptionsByClasse ?? {};
     this.customFieldQuestions = customFieldQuestions ?? [];
     this.sectionAliases = sectionAliases ?? {};
+    this.retenues = retenues ?? [];
   }
 
   static List<String> _dedupeSections(Iterable<String> sections) {
@@ -197,6 +288,7 @@ class SchoolConfig {
     'monthlyExceptionsByClasse': monthlyExceptionsByClasse,
     'customFieldQuestions': customFieldQuestions,
     'sectionAliases': sectionAliases,
+    'retenues': retenues.map((r) => r.toJson()).toList(),
   };
 
   factory SchoolConfig.fromJson(Map<String, dynamic> json) {
@@ -232,6 +324,9 @@ class SchoolConfig {
       List<String>.from(json['customFieldQuestions'] ?? []),
       sectionAliases:
       Map<String, String>.from(json['sectionAliases'] ?? {}),
+      retenues: (json['retenues'] as List? ?? [])
+          .map((e) => RetenueRegle.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(),
     );
   }
 }

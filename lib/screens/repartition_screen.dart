@@ -116,6 +116,11 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final Set<String> classesSel = {};
     String? rubrique;
     DateTime? dateSelectionnee;
+    // ⚡ NOUVEAU — mois scolaire d'imputation (Septembre à Juin), pré-rempli
+    // selon la date, modifiable manuellement par l'utilisateur.
+    String? moisImputation =
+        fraisScolaires.schoolMonthNameForDate(DateTime.now());
+    bool moisImputationModifieManuellement = false;
 
     final sectionsDisponibles = fraisScolaires.config.sections;
     final rubriquesDisponibles = fraisScolaires.getRubriquesDisponibles();
@@ -436,7 +441,13 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                             confirmText: "Valider",
                           );
                           if (picked != null) {
-                            setDialogState(() => dateSelectionnee = picked);
+                            setDialogState(() {
+                              dateSelectionnee = picked;
+                              if (!moisImputationModifieManuellement) {
+                                moisImputation = fraisScolaires
+                                    .schoolMonthNameForDate(picked);
+                              }
+                            });
                           }
                         },
                         child: Container(
@@ -480,6 +491,38 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                             ],
                           ),
                         ),
+                      ),
+
+                      const SizedBox(height: 14),
+                      Text(
+                        "${numeroDate + 1}. Mois d'imputation (pour les rapports)",
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        "Mois scolaire dans lequel cette dépense doit "
+                            "apparaître (rapport mensuel, statistiques). "
+                            "Pré-rempli selon la date ci-dessus ; "
+                            "modifiable si la dépense concerne un autre mois.",
+                        style: TextStyle(fontSize: 11, color: Colors.black54),
+                      ),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String>(
+                        value: moisImputation,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: "Mois d'imputation",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: fraisScolaires.months
+                            .map((m) =>
+                            DropdownMenuItem(value: m, child: Text(m)))
+                            .toList(),
+                        onChanged: (v) => setDialogState(() {
+                          moisImputation = v;
+                          moisImputationModifieManuellement = true;
+                        }),
                       ),
                     ],
                   ),
@@ -577,6 +620,7 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                       classes: classesSel.toList(),
                       rubrique: r,
                       date: dateSelectionnee,
+                      moisImputation: moisImputation,
                     );
 
                     if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -643,6 +687,64 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
 
     if (!await _verifyBackupPassword()) return false;
     await fraisScolaires.updateDepenseDate(depense.id, newDate);
+    return true;
+  }
+
+  // ⚡ NOUVEAU — modifier le mois scolaire d'imputation d'une dépense déjà
+  // enregistrée (rapport mensuel, statistiques).
+  Future<bool> _editDepenseMois(Depense depense) async {
+    String? moisChoisi = depense.moisImputation;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text("Mois d'imputation"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "Mois scolaire dans lequel cette dépense doit apparaître "
+                    "dans les rapports mensuels. Choisissez \"Selon la date\" "
+                    "pour revenir au comportement par défaut.",
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String?>(
+                value: moisChoisi,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: "Mois d'imputation",
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text("Selon la date de la dépense"),
+                  ),
+                  ...fraisScolaires.months.map((m) =>
+                      DropdownMenuItem<String?>(value: m, child: Text(m))),
+                ],
+                onChanged: (v) => setDialogState(() => moisChoisi = v),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Valider"),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true) return false;
+    if (!await _verifyBackupPassword()) return false;
+    await fraisScolaires.updateDepenseMoisImputation(depense.id, moisChoisi);
     return true;
   }
 
@@ -766,7 +868,8 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                               "${d.porteeLabel} — ${d.sectionsLabel}\n"
                                   "Rubrique : ${d.rubriqueAffichee}"
                                   "${d.portee != kDepenseGlobale && d.classes.isNotEmpty ? '\nClasses : ${d.classes.join(', ')}' : ''}\n"
-                                  "${d.dateFormatee}",
+                                  "${d.dateFormatee}"
+                                  "${d.moisImputation != null && d.moisImputation!.trim().isNotEmpty ? ' — Imputée à : ${d.moisImputation}' : ''}",
                               style: const TextStyle(fontSize: 11),
                             ),
                             trailing: Column(
@@ -798,6 +901,21 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                                         EdgeInsets.only(top: 4, right: 10),
                                         child: Icon(Icons.edit_calendar,
                                             size: 18, color: Colors.indigo),
+                                      ),
+                                    ),
+                                    InkWell(
+                                      onTap: () async {
+                                        final edited =
+                                        await _editDepenseMois(d);
+                                        if (edited) {
+                                          setDialogState(() {});
+                                        }
+                                      },
+                                      child: const Padding(
+                                        padding:
+                                        EdgeInsets.only(top: 4, right: 10),
+                                        child: Icon(Icons.event_note,
+                                            size: 18, color: Colors.teal),
                                       ),
                                     ),
                                     InkWell(
@@ -837,6 +955,972 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                       if (cleared) setDialogState(() {});
                     },
                   ),
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text("Fermer"),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  // ⚡ NOUVEAU — rapport PDF contenant uniquement la partie dépenses, pour
+  // une période choisie par l'utilisateur.
+  Future<void> _openRapportDepensesDialog() async {
+    String periode = 'month';
+    String moisChoisi =
+        fraisScolaires.currentSchoolMonthName ?? fraisScolaires.months.first;
+    String? sectionChoisie;
+    final cityController = TextEditingController(
+        text: fraisScolaires.lastReportCity ?? 'Lubumbashi');
+    bool generating = false;
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.picture_as_pdf, color: Colors.red),
+                  SizedBox(width: 8),
+                  Expanded(child: Text("Rapport des Dépenses")),
+                ],
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text("1. Période",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          ChoiceChip(
+                            label: const Text("Aujourd'hui"),
+                            selected: periode == 'today',
+                            onSelected: (_) =>
+                                setDialogState(() => periode = 'today'),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Un mois"),
+                            selected: periode == 'month',
+                            onSelected: (_) =>
+                                setDialogState(() => periode = 'month'),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Toute l'année"),
+                            selected: periode == 'year',
+                            onSelected: (_) =>
+                                setDialogState(() => periode = 'year'),
+                          ),
+                        ],
+                      ),
+                      if (periode == 'month') ...[
+                        const SizedBox(height: 10),
+                        DropdownButtonFormField<String>(
+                          value: moisChoisi,
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            labelText: "Mois scolaire",
+                            border: OutlineInputBorder(),
+                          ),
+                          items: fraisScolaires.months
+                              .map((m) =>
+                              DropdownMenuItem(value: m, child: Text(m)))
+                              .toList(),
+                          onChanged: (v) {
+                            if (v != null) {
+                              setDialogState(() => moisChoisi = v);
+                            }
+                          },
+                        ),
+                      ],
+                      const SizedBox(height: 14),
+                      const Text("2. Section (facultatif)",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String?>(
+                        value: sectionChoisie,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: "Section",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          const DropdownMenuItem<String?>(
+                            value: null,
+                            child: Text("Toute l'école"),
+                          ),
+                          ...fraisScolaires.config.sections.map((s) =>
+                              DropdownMenuItem<String?>(
+                                  value: s, child: Text(s))),
+                        ],
+                        onChanged: (v) =>
+                            setDialogState(() => sectionChoisie = v),
+                      ),
+                      const SizedBox(height: 14),
+                      const Text("3. Ville (« Fait à ... »)",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: cityController,
+                        decoration: const InputDecoration(
+                          labelText: "Ville",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: generating
+                      ? null
+                      : () => Navigator.pop(dialogContext),
+                  child: const Text("Annuler"),
+                ),
+                ElevatedButton.icon(
+                  icon: generating
+                      ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.picture_as_pdf),
+                  label: Text(generating ? "Génération..." : "Générer"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red.shade600,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: generating
+                      ? null
+                      : () async {
+                    setDialogState(() => generating = true);
+
+                    final city = cityController.text.trim();
+                    await fraisScolaires.setLastReportCity(city);
+
+                    final String dateJour =
+                    DateTime.now().toString().split(' ')[0];
+                    final String suffixeMois =
+                    periode == 'month' ? "_$moisChoisi" : "";
+                    final filename =
+                        "Rapport_Depenses_$periode$suffixeMois"
+                        "_$dateJour";
+
+                    final result =
+                    await fraisScolaires.generateDepensesOnlyPdf(
+                      filename: filename,
+                      period: periode,
+                      mois: periode == 'month' ? moisChoisi : null,
+                      sectionFilter: sectionChoisie,
+                      city: city.isEmpty ? null : city,
+                    );
+
+                    if (!dialogContext.mounted) return;
+                    setDialogState(() => generating = false);
+
+                    if (result['empty'] == true) {
+                      Navigator.pop(dialogContext);
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                              "Aucune dépense enregistrée pour cette "
+                                  "période."),
+                        ),
+                      );
+                      return;
+                    }
+
+                    Navigator.pop(dialogContext);
+                    if (!mounted) return;
+                    if (result['success'] == true) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                              "✅ Rapport des dépenses généré : "
+                                  "${result['path']}"),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                              "Erreur : ${result['error'] ?? 'inconnue'}"),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — ENTRÉES D'ARGENT (apports de caisse)
+  // ==========================================================================
+
+  String _labelTypeEntree(String type) {
+    switch (type) {
+      case kEntreeRetourReliquat:
+        return 'Retour de reliquat';
+      case kEntreeSubvention:
+        return 'Subvention';
+      case kEntreeAutre:
+        return 'Autre apport';
+      case kEntreeDon:
+      default:
+        return 'Don';
+    }
+  }
+
+  Future<void> _startAddEntree() async {
+    if (!await _verifyBackupPassword()) return;
+    await _openAddEntreeDialog();
+  }
+
+  Future<void> _openAddEntreeDialog() async {
+    final justificationController = TextEditingController();
+    final motifController = TextEditingController();
+    final montantController = TextEditingController();
+
+    String type = kEntreeDon;
+    String portee = kDepenseGlobale;
+    String? sectionIndep;
+    final Set<String> sectionsMixte = {};
+    String? rubrique;
+    DateTime? dateSelectionnee;
+    String? moisImputation =
+        fraisScolaires.schoolMonthNameForDate(DateTime.now());
+    bool moisImputationModifieManuellement = false;
+    String? depenseLieeId;
+
+    final sectionsDisponibles = fraisScolaires.config.sections;
+    final rubriquesDisponibles = fraisScolaires.getRubriquesDisponibles();
+    final depensesDisponibles = fraisScolaires.getDepensesForYear();
+
+    List<String> sectionsChoisies() {
+      if (portee == kDepenseIndependante) {
+        final s = sectionIndep;
+        return s == null ? <String>[] : <String>[s];
+      }
+      if (portee == kDepenseMixte) return sectionsMixte.toList();
+      return <String>[];
+    }
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            Depense? depenseChoisie;
+            if (depenseLieeId != null) {
+              for (final d in depensesDisponibles) {
+                if (d.id == depenseLieeId) {
+                  depenseChoisie = d;
+                  break;
+                }
+              }
+            }
+            final double dejaRetourne = depenseLieeId != null
+                ? fraisScolaires.totalEntreesRetourPourDepense(depenseLieeId!)
+                : 0.0;
+            final double? reliquatDisponible = depenseChoisie != null
+                ? depenseChoisie.montant - dejaRetourne
+                : null;
+
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.add_circle, color: Colors.green),
+                  SizedBox(width: 8),
+                  Expanded(child: Text("Entrer de l'argent")),
+                ],
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text("Type d'entrée",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          ChoiceChip(
+                            label: const Text("Retour de reliquat"),
+                            selected: type == kEntreeRetourReliquat,
+                            selectedColor: Colors.teal.shade100,
+                            onSelected: (_) => setDialogState(() {
+                              type = kEntreeRetourReliquat;
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Don"),
+                            selected: type == kEntreeDon,
+                            selectedColor: Colors.green.shade100,
+                            onSelected: (_) => setDialogState(() {
+                              type = kEntreeDon;
+                              depenseLieeId = null;
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Subvention"),
+                            selected: type == kEntreeSubvention,
+                            selectedColor: Colors.blue.shade100,
+                            onSelected: (_) => setDialogState(() {
+                              type = kEntreeSubvention;
+                              depenseLieeId = null;
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Autre apport"),
+                            selected: type == kEntreeAutre,
+                            selectedColor: Colors.grey.shade300,
+                            onSelected: (_) => setDialogState(() {
+                              type = kEntreeAutre;
+                              depenseLieeId = null;
+                            }),
+                          ),
+                        ],
+                      ),
+
+                      if (type == kEntreeRetourReliquat) ...[
+                        const SizedBox(height: 14),
+                        const Text("Dépense d'origine",
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 13)),
+                        const SizedBox(height: 6),
+                        if (depensesDisponibles.isEmpty)
+                          const Text(
+                            "Aucune dépense enregistrée cette année.",
+                            style:
+                            TextStyle(fontSize: 11, color: Colors.orange),
+                          )
+                        else
+                          DropdownButtonFormField<String>(
+                            value: depenseLieeId,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: "Choisir la dépense",
+                              border: OutlineInputBorder(),
+                            ),
+                            items: depensesDisponibles
+                                .map((d) => DropdownMenuItem(
+                              value: d.id,
+                              child: Text(
+                                "${d.dateFormatee} — ${d.motif} "
+                                    "(${formatMontant(d.montant)} FC)",
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ))
+                                .toList(),
+                            onChanged: (v) => setDialogState(() {
+                              depenseLieeId = v;
+                              if (v != null) {
+                                for (final d in depensesDisponibles) {
+                                  if (d.id == v) {
+                                    if (d.rubrique.trim().isNotEmpty) {
+                                      rubrique = d.rubrique;
+                                    }
+                                    break;
+                                  }
+                                }
+                              }
+                            }),
+                          ),
+                        if (reliquatDisponible != null) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.teal.withAlpha(25),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              "Déjà retourné : ${formatMontant(dejaRetourne)} "
+                                  "FC sur ${formatMontant(depenseChoisie!.montant)} "
+                                  "FC — reliquat disponible : "
+                                  "${formatMontant(reliquatDisponible)} FC",
+                              style: const TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.teal),
+                            ),
+                          ),
+                        ],
+                      ],
+
+                      const SizedBox(height: 14),
+                      const Text("Portée",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          ChoiceChip(
+                            label: const Text("Globale (toute l'école)"),
+                            selected: portee == kDepenseGlobale,
+                            onSelected: (_) => setDialogState(() {
+                              portee = kDepenseGlobale;
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Indépendante (1 section)"),
+                            selected: portee == kDepenseIndependante,
+                            onSelected: (_) => setDialogState(() {
+                              portee = kDepenseIndependante;
+                            }),
+                          ),
+                          ChoiceChip(
+                            label: const Text("Mixte (2 sections ou plus)"),
+                            selected: portee == kDepenseMixte,
+                            onSelected: (_) => setDialogState(() {
+                              portee = kDepenseMixte;
+                            }),
+                          ),
+                        ],
+                      ),
+                      if (portee == kDepenseIndependante) ...[
+                        const SizedBox(height: 10),
+                        DropdownButtonFormField<String>(
+                          value: sectionIndep,
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            labelText: "Section concernée",
+                            border: OutlineInputBorder(),
+                          ),
+                          items: sectionsDisponibles
+                              .map((s) =>
+                              DropdownMenuItem(value: s, child: Text(s)))
+                              .toList(),
+                          onChanged: (v) =>
+                              setDialogState(() => sectionIndep = v),
+                        ),
+                      ],
+                      if (portee == kDepenseMixte) ...[
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: sectionsDisponibles.map((s) {
+                            final sel = sectionsMixte.contains(s);
+                            return FilterChip(
+                              label: Text(s),
+                              selected: sel,
+                              onSelected: (v) => setDialogState(() {
+                                if (v) {
+                                  sectionsMixte.add(s);
+                                } else {
+                                  sectionsMixte.remove(s);
+                                }
+                              }),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+
+                      const SizedBox(height: 14),
+                      const Text("Rubrique",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String>(
+                        value: rubrique,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: "Rubrique créditée",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: rubriquesDisponibles
+                            .map((r) =>
+                            DropdownMenuItem(value: r, child: Text(r)))
+                            .toList(),
+                        onChanged: (v) => setDialogState(() => rubrique = v),
+                      ),
+
+                      const SizedBox(height: 14),
+                      const Text("Justification (obligatoire)",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: justificationController,
+                        textCapitalization: TextCapitalization.sentences,
+                        maxLines: 2,
+                        decoration: const InputDecoration(
+                          hintText:
+                          "Ex : reste non utilisé de la sortie scolaire "
+                              "du 12/10, reçu de M. X...",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+                      const Text("Motif / nom court (facultatif)",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: motifController,
+                        textCapitalization: TextCapitalization.sentences,
+                        decoration: const InputDecoration(
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: montantController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                          labelText: "Montant reçu (FC)",
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.attach_money),
+                        ),
+                      ),
+
+                      const SizedBox(height: 14),
+                      const Text("Date (facultatif)",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: dialogContext,
+                            initialDate: dateSelectionnee ?? DateTime.now(),
+                            firstDate: DateTime(2020),
+                            lastDate:
+                            DateTime.now().add(const Duration(days: 365)),
+                            helpText: "Choisir la date de l'entrée",
+                            cancelText: "Annuler",
+                            confirmText: "Valider",
+                          );
+                          if (picked != null) {
+                            setDialogState(() {
+                              dateSelectionnee = picked;
+                              if (!moisImputationModifieManuellement) {
+                                moisImputation = fraisScolaires
+                                    .schoolMonthNameForDate(picked);
+                              }
+                            });
+                          }
+                        },
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 12),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey.shade400),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.calendar_today,
+                                  size: 18, color: Colors.indigo),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  dateSelectionnee == null
+                                      ? "Aujourd'hui (par défaut)"
+                                      : _formatDateCourte(dateSelectionnee!),
+                                ),
+                              ),
+                              if (dateSelectionnee != null)
+                                InkWell(
+                                  onTap: () => setDialogState(
+                                          () => dateSelectionnee = null),
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(2),
+                                    child: Icon(Icons.close,
+                                        size: 18, color: Colors.grey),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 14),
+                      const Text("Mois d'imputation (pour les rapports)",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String>(
+                        value: moisImputation,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: "Mois d'imputation",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: fraisScolaires.months
+                            .map((m) =>
+                            DropdownMenuItem(value: m, child: Text(m)))
+                            .toList(),
+                        onChanged: (v) => setDialogState(() {
+                          moisImputation = v;
+                          moisImputationModifieManuellement = true;
+                        }),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text("Annuler"),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green.shade600,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () async {
+                    final montantText =
+                    montantController.text.trim().replaceAll(',', '.');
+                    final montant = double.tryParse(montantText);
+                    final sectionsFinales = sectionsChoisies();
+
+                    void erreur(String message) {
+                      ScaffoldMessenger.of(dialogContext).showSnackBar(
+                        SnackBar(content: Text(message)),
+                      );
+                    }
+
+                    if (montant == null || montant <= 0) {
+                      erreur("Montant invalide.");
+                      return;
+                    }
+                    if (justificationController.text.trim().isEmpty) {
+                      erreur("La justification est obligatoire.");
+                      return;
+                    }
+                    if (rubrique == null) {
+                      erreur("Veuillez choisir la rubrique.");
+                      return;
+                    }
+                    if (portee == kDepenseIndependante &&
+                        sectionsFinales.isEmpty) {
+                      erreur("Veuillez choisir la section concernée.");
+                      return;
+                    }
+                    if (portee == kDepenseMixte &&
+                        sectionsFinales.length < 2) {
+                      erreur("Une entrée mixte doit concerner au moins "
+                          "deux sections.");
+                      return;
+                    }
+                    if (type == kEntreeRetourReliquat &&
+                        (depenseLieeId == null ||
+                            depenseLieeId!.trim().isEmpty)) {
+                      erreur("Veuillez choisir la dépense d'origine.");
+                      return;
+                    }
+
+                    final messageErreur = await fraisScolaires.addEntree(
+                      montant: montant,
+                      type: type,
+                      justification: justificationController.text,
+                      motif: motifController.text,
+                      rubrique: rubrique!,
+                      portee: portee,
+                      sections: sectionsFinales,
+                      date: dateSelectionnee,
+                      moisImputation: moisImputation,
+                      depenseLieeId: depenseLieeId,
+                    );
+
+                    if (messageErreur != null) {
+                      erreur(messageErreur);
+                      return;
+                    }
+
+                    if (dialogContext.mounted) Navigator.pop(dialogContext);
+                  },
+                  child: const Text("Enregistrer l'entrée"),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (mounted) setState(() {});
+  }
+
+  Future<bool> _annulerEntreeDialog(Entree entree) async {
+    final motifController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Annuler cette entrée ?"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "${entree.typeLabel} — ${formatMontant(entree.montant)} FC\n"
+                  "Rubrique : ${entree.rubriqueAffichee}\n"
+                  "${entree.justification}",
+            ),
+            const SizedBox(height: 12),
+            const Text("Motif de l'annulation (obligatoire) :",
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5)),
+            const SizedBox(height: 6),
+            TextField(
+              controller: motifController,
+              textCapitalization: TextCapitalization.sentences,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                hintText: "Ex : erreur de saisie, doublon...",
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Retour"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () {
+              if (motifController.text.trim().isEmpty) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(
+                      content:
+                      Text("Le motif d'annulation est obligatoire.")),
+                );
+                return;
+              }
+              Navigator.pop(ctx, true);
+            },
+            child: const Text("Confirmer l'annulation"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return false;
+    if (!await _verifyBackupPassword()) return false;
+
+    final erreur = await fraisScolaires.annulerEntree(
+        entree.id, motifController.text);
+    if (erreur != null) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(erreur), backgroundColor: Colors.red),
+      );
+      return false;
+    }
+    return true;
+  }
+
+  void _openHistoriqueEntreesDialog() {
+    String filtrePeriode = 'year';
+    String? filtreRubrique;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            final toutes = fraisScolaires.getEntreesForPeriod(filtrePeriode);
+            final rubriquesPresentes = toutes
+                .map((e) => e.rubriqueAffichee)
+                .toSet()
+                .toList()
+              ..sort();
+            final entrees = filtreRubrique == null
+                ? toutes
+                : toutes
+                .where((e) => e.rubriqueAffichee == filtreRubrique)
+                .toList();
+            final double totalActif = entrees
+                .where((e) => !e.annulee)
+                .fold(0.0, (sum, e) => sum + e.montant);
+
+            Widget filtreChip(String value, String label) {
+              return ChoiceChip(
+                label: Text(label, style: const TextStyle(fontSize: 11)),
+                selected: filtrePeriode == value,
+                selectedColor: Colors.green.shade100,
+                onSelected: (_) =>
+                    setDialogState(() => filtrePeriode = value),
+              );
+            }
+
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.history, color: Colors.green),
+                  SizedBox(width: 8),
+                  Expanded(child: Text("Historique des Entrées")),
+                ],
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        filtreChip('today', "Aujourd'hui"),
+                        filtreChip('month', "Ce mois"),
+                        filtreChip('year', "Cette année"),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<String?>(
+                      value: filtreRubrique,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: "Filtrer par rubrique",
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      items: [
+                        const DropdownMenuItem<String?>(
+                          value: null,
+                          child: Text("Toutes les rubriques"),
+                        ),
+                        ...rubriquesPresentes.map((r) =>
+                            DropdownMenuItem<String?>(
+                                value: r, child: Text(r))),
+                      ],
+                      onChanged: (v) =>
+                          setDialogState(() => filtreRubrique = v),
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        "Total actif affiché : ${formatMontant(totalActif)} FC",
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const Divider(height: 10),
+                    Flexible(
+                      child: entrees.isEmpty
+                          ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Text(
+                          "Aucune entrée enregistrée pour ce filtre.",
+                          textAlign: TextAlign.center,
+                        ),
+                      )
+                          : ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: entrees.length,
+                        separatorBuilder: (_, __) =>
+                        const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final e = entrees[index];
+                          return ListTile(
+                            dense: true,
+                            isThreeLine: true,
+                            leading: Icon(
+                              Icons.add_circle,
+                              color: e.annulee
+                                  ? Colors.grey
+                                  : Colors.green.shade700,
+                            ),
+                            title: Text(
+                              _labelTypeEntree(e.type),
+                              style: TextStyle(
+                                decoration: e.annulee
+                                    ? TextDecoration.lineThrough
+                                    : null,
+                              ),
+                            ),
+                            subtitle: Text(
+                              "${e.rubriqueAffichee} — ${e.sectionsLabel}\n"
+                                  "${e.justification}\n"
+                                  "${e.dateFormatee}"
+                                  "${e.annulee ? "\nANNULÉE — motif : ${e.motifAnnulation ?? ''}" : ""}",
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: e.annulee ? Colors.red : null,
+                              ),
+                            ),
+                            trailing: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  "+${formatMontant(e.montant)} FC",
+                                  style: TextStyle(
+                                    color: e.annulee
+                                        ? Colors.grey
+                                        : Colors.green.shade700,
+                                    fontWeight: FontWeight.bold,
+                                    decoration: e.annulee
+                                        ? TextDecoration.lineThrough
+                                        : null,
+                                  ),
+                                ),
+                                if (!e.annulee)
+                                  InkWell(
+                                    onTap: () async {
+                                      final ok =
+                                      await _annulerEntreeDialog(e);
+                                      if (ok) setDialogState(() {});
+                                    },
+                                    child: const Padding(
+                                      padding: EdgeInsets.only(top: 4),
+                                      child: Icon(Icons.block,
+                                          size: 18, color: Colors.red),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(dialogContext),
                   child: const Text("Fermer"),
@@ -960,7 +2044,8 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     final totalsByClass = fraisScolaires.getTotalByClass();
     final depenses = fraisScolaires.getDepensesForYear();
     final totalDepenses = fraisScolaires.getTotalDepenses();
-    final soldeNet = totalCollecte - totalDepenses;
+    final totalEntrees = fraisScolaires.getTotalEntrees();
+    final soldeNet = totalCollecte - totalDepenses + totalEntrees;
     final depensesApercu = depenses.take(3).toList();
 
     final double depGlobales =
@@ -979,7 +2064,9 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
         .map((a) => a.nom.trim())
         .toSet();
     final rubriquesHorsAdmin = stats.rubriques
-        .where((r) => !nomsAdmins.contains(r.rubrique) && r.total != 0)
+        .where((r) =>
+    !nomsAdmins.contains(r.rubrique) &&
+        (r.total != 0 || r.totalEntrees != 0))
         .toList();
 
     return Scaffold(
@@ -1001,19 +2088,34 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                     Text("${totalCollecte.toStringAsFixed(0)} FC",
                         style: const TextStyle(
                             fontSize: 24, color: Colors.green)),
-                    if (totalDepenses > 0) ...[
+                    if (totalDepenses > 0 || totalEntrees > 0) ...[
                       const Divider(height: 24),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text("Total des dépenses",
-                              style: TextStyle(color: Colors.black54)),
-                          Text("- ${formatMontant(totalDepenses)} FC",
-                              style: const TextStyle(
-                                  color: Colors.red,
-                                  fontWeight: FontWeight.w600)),
-                        ],
-                      ),
+                      if (totalDepenses > 0)
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text("Total des dépenses",
+                                style: TextStyle(color: Colors.black54)),
+                            Text("- ${formatMontant(totalDepenses)} FC",
+                                style: const TextStyle(
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
+                      if (totalEntrees > 0) ...[
+                        const SizedBox(height: 6),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text("Total des entrées (dons, retours...)",
+                                style: TextStyle(color: Colors.black54)),
+                            Text("+ ${formatMontant(totalEntrees)} FC",
+                                style: const TextStyle(
+                                    color: Colors.green,
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
+                      ],
                       const SizedBox(height: 6),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1062,6 +2164,50 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _startAddEntree,
+                    icon: const Icon(Icons.add_circle),
+                    label: const Text("Entrer de l'argent"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green.shade600,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _openHistoriqueEntreesDialog,
+                    icon: const Icon(Icons.history),
+                    label: const Text("Historique des entrées"),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      foregroundColor: Colors.green.shade700,
+                      side: BorderSide(color: Colors.green.shade700),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _openRapportDepensesDialog,
+                icon: const Icon(Icons.picture_as_pdf),
+                label: const Text("Rapport des dépenses"),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  foregroundColor: Colors.red.shade700,
+                  side: BorderSide(color: Colors.red.shade700),
+                ),
+              ),
             ),
             const SizedBox(height: 12),
             SizedBox(
@@ -1265,14 +2411,17 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               }).toList(),
             ...rubriquesHorsAdmin.map((r) => ListTile(
               title: Text(r.rubrique),
-              subtitle: const Text(
-                "Rubrique hors administration",
-                style: TextStyle(fontSize: 11),
+              subtitle: Text(
+                "Rubrique hors administration"
+                    "${r.total > 0 ? ' — Dépenses : ${formatMontant(r.total)} FC' : ''}"
+                    "${r.totalEntrees > 0 ? ' — Entrées : +${formatMontant(r.totalEntrees)} FC' : ''}",
+                style: const TextStyle(fontSize: 11),
               ),
               trailing: Text(
-                "-${formatMontant(r.total)} FC",
-                style: const TextStyle(
-                    fontWeight: FontWeight.bold, color: Colors.red),
+                "${r.reste >= 0 ? '' : '-'}${formatMontant(r.reste.abs())} FC",
+                style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: r.reste >= 0 ? Colors.indigo : Colors.red),
               ),
             )),
           ],
@@ -1457,7 +2606,7 @@ class _AutresRepartitionsScreenState
       sectionFilter: option,
     );
     final rubriquesAffichees = stats.rubriques
-        .where((r) => r.collecte != 0 || r.total != 0)
+        .where((r) => r.collecte != 0 || r.total != 0 || r.totalEntrees != 0)
         .toList();
 
     return Column(
@@ -1482,13 +2631,21 @@ class _AutresRepartitionsScreenState
                       fontSize: 22, color: Colors.green,
                       fontWeight: FontWeight.bold),
                 ),
-                if (stats.totalDepenses > 0) ...[
+                if (stats.totalDepenses > 0 || stats.totalEntrees > 0) ...[
                   const SizedBox(height: 6),
-                  Text(
-                    "Dépenses de la section : "
-                        "-${formatMontant(stats.totalDepenses)} FC",
-                    style: const TextStyle(fontSize: 12, color: Colors.red),
-                  ),
+                  if (stats.totalDepenses > 0)
+                    Text(
+                      "Dépenses de la section : "
+                          "-${formatMontant(stats.totalDepenses)} FC",
+                      style: const TextStyle(fontSize: 12, color: Colors.red),
+                    ),
+                  if (stats.totalEntrees > 0)
+                    Text(
+                      "Entrées de la section : "
+                          "+${formatMontant(stats.totalEntrees)} FC",
+                      style:
+                      const TextStyle(fontSize: 12, color: Colors.green),
+                    ),
                   Text(
                     "Reste après dépenses : ${formatMontant(stats.reste)} FC",
                     style: const TextStyle(
@@ -1523,7 +2680,8 @@ class _AutresRepartitionsScreenState
                                 Text(r.rubrique),
                                 Text(
                                   "Part : ${formatMontant(r.collecte)} FC"
-                                      "${r.total > 0 ? ' − Dépenses : ${formatMontant(r.total)} FC' : ''}",
+                                      "${r.total > 0 ? ' − Dépenses : ${formatMontant(r.total)} FC' : ''}"
+                                      "${r.totalEntrees > 0 ? ' + Entrées : ${formatMontant(r.totalEntrees)} FC' : ''}",
                                   style: const TextStyle(
                                       fontSize: 11, color: Colors.black54),
                                 ),

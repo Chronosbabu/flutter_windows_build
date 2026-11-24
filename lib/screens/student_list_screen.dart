@@ -826,6 +826,10 @@ class _StudentListScreenState extends State<StudentListScreen> {
 
   Widget _buildNormalCard(Eleve e) {
     final String age = AgeUtils.libelle(e.dateNaissance);
+    // ⚡ NOUVEAU — "Anniversaire dans X jours" si proche (≤ 30 jours),
+    // sans compte à la seconde (liste = affichage léger).
+    final String anniversaireProche =
+    AgeUtils.libelleAnniversaireProche(e.dateNaissance);
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
       child: ListTile(
@@ -843,7 +847,9 @@ class _StudentListScreenState extends State<StudentListScreen> {
         ),
         title: Text("${e.nom} ${e.postNom} ${e.prenom}"),
         subtitle: Text(
-            "${e.section} - ${e.classe}${age.isNotEmpty ? "  |  Âge : $age" : ""}"),
+            "${e.section} - ${e.classe}"
+                "${age.isNotEmpty ? "  |  Âge : $age" : ""}"
+                "${anniversaireProche.isNotEmpty ? "  |  $anniversaireProche" : ""}"),
         trailing: Text(
           e.id,
           style: const TextStyle(
@@ -1517,11 +1523,18 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
   bool _dirty = false;
   bool _writing = false;
 
+  // ⚡ NOUVEAU — fait "tiquer" le compte à rebours avant le prochain
+  // anniversaire (fiche détaillée) chaque seconde ; annulé dans dispose().
+  Timer? _anniversaireTimer;
+
   Eleve get eleve => widget.eleves[index];
 
   @override
   void initState() {
     super.initState();
+    _anniversaireTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
     index = widget.startIndex;
     editing = widget.startEditing;
     for (final q in widget.fraisScolaires.config.customFieldQuestions) {
@@ -1897,6 +1910,7 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
 
   @override
   void dispose() {
+    _anniversaireTimer?.cancel();
     _saveTimer?.cancel();
     if (_dirty && !_writing) {
       _dirty = false;
@@ -1987,6 +2001,43 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
         ),
       ),
     );
+  }
+
+  // ⚡ NOUVEAU — compte à rebours avant le prochain anniversaire, mis à jour
+  // chaque seconde par _anniversaireTimer. Vide (liste vide) si la date de
+  // naissance est absente, invalide ou dans le futur.
+  List<Widget> _buildCompteARebours(String dateNaissance) {
+    final libelle = AgeUtils.libelleProchainAnniversaire(dateNaissance);
+    if (libelle.isEmpty) return const [];
+    return [
+      Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.indigo.withAlpha(18),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.cake_outlined, color: Colors.indigo, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  libelle,
+                  style: const TextStyle(
+                    color: Colors.indigo,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
   }
 
   Widget _sectionLabel(String text) {
@@ -2236,6 +2287,7 @@ class _StudentCardDialogState extends State<_StudentCardDialog> {
                         _infoRow("Adresse", e.adresse),
                         _infoRow("Naissance", e.dateNaissance),
                         _infoRow("Âge", ageEnregistre),
+                        ..._buildCompteARebours(e.dateNaissance),
                         if (!hasAnyExtraInfo)
                           const Padding(
                             padding: EdgeInsets.symmetric(vertical: 10),

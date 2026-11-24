@@ -25,6 +25,8 @@ import 'messages_envoyes_screen.dart';
 import 'messages_parents_screen.dart';
 // ⚡ NOUVEAU — Mise en forme des reçus (formats par défaut + personnalisé)
 import 'receipt_layout_screen.dart';
+// ⚡ NOUVEAU — Retenues sur paiements (avant répartition par pourcentages)
+import 'retenues_screen.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -563,6 +565,19 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                     MaterialPageRoute(
                       builder: (_) =>
                           ListeOrdreScreen(fraisScolaires: fraisScolaires),
+                    ),
+                  ),
+                ),
+                // ⚡ NOUVEAU — retenues personnalisables sur chaque paiement,
+                // prélevées avant le calcul des pourcentages.
+                _buildCard(
+                  Icons.content_cut,
+                  "Retenues",
+                      () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          RetenuesScreen(fraisScolaires: fraisScolaires),
                     ),
                   ),
                 ),
