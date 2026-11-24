@@ -156,9 +156,83 @@ class FauxServeur {
     return _json(200, out);
   }
 
-  // payment_sync.py : remplace paid + transactions de l'élève, crée l'élève
-  // s'il est inconnu, N'INCRÉMENTE PAS la révision.
-  http.Response _syncPaiements(http.Request req) {
+  // true = route corrigée (étape 2) ; false = ancienne route.
+  bool routeCorrigee = true;
+
+  http.Response _syncPaiements(http.Request req) =>
+      routeCorrigee ? _syncPaiementsCorrige(req) : _syncPaiementsAncien(req);
+
+  // payment_sync.py CORRIGÉ : mot de passe obligatoire, ajoute seulement les
+  // transactions inconnues (jamais de suppression), ne crée aucun élève,
+  // révision +1. Répond toujours 200 + done (compatibilité).
+  http.Response _syncPaiementsCorrige(http.Request req) {
+    final body = json.decode(req.body) as Map<String, dynamic>;
+    final code = (body['school_code'] as String).toLowerCase();
+    final recus = [
+      for (final s in (body['students'] as List)) (s as Map)['id'].toString()
+    ];
+    final saved = ecoles[code];
+    final pw = saved?['backup_password'];
+    if (saved == null || pw == null || body['password'] != pw) {
+      return _json(200, {
+        'done': recus,
+        'changed': 0,
+        'ignored': recus,
+        'auth_refused': saved != null,
+      });
+    }
+    final year = (body['annee'] ?? saved['currentYear']).toString();
+    final eleves =
+        ((saved['history'] as Map?)?[year] as Map?)?['eleves'] as List? ?? [];
+    String cle(Map t) {
+      final id = (t['id'] ?? '').toString();
+      return id.isNotEmpty && !id.startsWith('LEG_')
+          ? id
+          : 'SIG|${t['date']}|${t['mois']}|${(t['amount'] as num).toStringAsFixed(2)}';
+    }
+
+    int changes = 0;
+    for (final snap in (body['students'] as List)) {
+      final s = snap as Map;
+      final sid = s['id'].toString();
+      Map? e;
+      for (final x in eleves) {
+        if ((x as Map)['id'].toString().toUpperCase() == sid.toUpperCase()) {
+          e = x;
+        }
+      }
+      if (e == null) continue; // jamais de création
+      final txs = (e['transactions'] as List);
+      final connues = {for (final t in txs) cle(t as Map)};
+      var ajout = false;
+      for (final t in (s['transactions'] as List)) {
+        if (connues.add(cle(t as Map))) {
+          txs.add(_copie(t));
+          ajout = true;
+        }
+      }
+      if (!ajout) continue;
+      final paid = <String, dynamic>{};
+      for (final t in txs) {
+        final m = (t as Map)['mois'].toString();
+        paid[m] = ((paid[m] as num?) ?? 0) + (t['amount'] as num);
+      }
+      (e['paid'] as Map).forEach((k, v) => paid.putIfAbsent(k, () => v));
+      e['paid'] = paid;
+      changes++;
+    }
+    if (changes > 0) saved['_revision'] = _rev(saved) + 1;
+    return _json(200, {
+      'done': recus,
+      'changed': changes,
+      'ignored': <String>[],
+      'auth_refused': false,
+    });
+  }
+
+  // ANCIENNE route payment_sync.py : remplace paid + transactions de
+  // l'élève, crée l'élève s'il est inconnu, N'INCRÉMENTE PAS la révision.
+  http.Response _syncPaiementsAncien(http.Request req) {
     final body = json.decode(req.body) as Map<String, dynamic>;
     final code = (body['school_code'] as String).toLowerCase();
     final saved = ecoles[code];
