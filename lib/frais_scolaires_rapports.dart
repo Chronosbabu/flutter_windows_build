@@ -3366,19 +3366,56 @@ extension FraisScolairesRapports on FraisScolaires {
           final String c0 = en['classe'] as String;
           final String s = s0.isEmpty ? '-' : s0;
           final String c = c0.isEmpty ? '-' : c0;
-          final String k = '${cleSC(s, c)}\u0002${p.trancheNumero}\u0002$libelle';
-          final d = parTranche.putIfAbsent(k, () => {
-            'section': s,
-            'classe': c,
-            'numero': p.trancheNumero,
-            'nom': libelle,
-            'montants': <double>{},
-            'eleves': <String>{},
-            'total': 0.0,
-          });
-          (d['montants'] as Set<double>).add(p.montant);
-          (d['eleves'] as Set<String>).add(p.eleveId);
-          d['total'] = (d['total'] as double) + p.montant;
+          // ⚡ Paiement partiel : un paiement peut compléter une tranche ou en
+          // couvrir plusieurs. On le ventile dans l'ordre des tranches (même
+          // règle que les statuts), sinon on garde l'ancien classement.
+          final List<MapEntry<int, double>> parts = [];
+          final List<String> nomsParts = [];
+          final Eleve? eleveP = en['eleve'] as Eleve?;
+          AutreFrais? fraisP;
+          for (final f in autresFrais) {
+            if (f.id == p.autreFraisId) {
+              fraisP = f;
+              break;
+            }
+          }
+          if (eleveP != null && fraisP != null) {
+            final tranchesP = getTranchesPourEleve(fraisP, eleveP);
+            final ordonnes = paiementsOrdonnesAutreFrais(eleveP, fraisP);
+            final int idxP = ordonnes.indexWhere((x) => x.id == p.id);
+            if (tranchesP.isNotEmpty && idxP >= 0) {
+              final ventilation =
+              FraisScolaires.ventilerPaiementsAutreFrais(tranchesP, ordonnes);
+              final cles = ventilation[idxP].keys.toList()..sort();
+              for (final j in cles) {
+                parts.add(MapEntry(j + 1, ventilation[idxP][j]!));
+                nomsParts.add('${tranchesP[j].nom.trim()} '
+                    '(${j + 1}/${tranchesP.length})');
+              }
+            }
+          }
+          if (parts.isEmpty) {
+            parts.add(MapEntry(p.trancheNumero, p.montant));
+            nomsParts.add(libelle);
+          }
+          for (var q = 0; q < parts.length; q++) {
+            final int numero = parts[q].key;
+            final double montantPart = parts[q].value;
+            final String nomPart = nomsParts[q];
+            final String k = '${cleSC(s, c)}\u0002$numero\u0002$nomPart';
+            final d = parTranche.putIfAbsent(k, () => {
+              'section': s,
+              'classe': c,
+              'numero': numero,
+              'nom': nomPart,
+              'montants': <double>{},
+              'eleves': <String>{},
+              'total': 0.0,
+            });
+            (d['montants'] as Set<double>).add(montantPart);
+            (d['eleves'] as Set<String>).add(p.eleveId);
+            d['total'] = (d['total'] as double) + montantPart;
+          }
         }
 
         final listeTr = parTranche.values.toList();
@@ -3443,7 +3480,7 @@ extension FraisScolairesRapports on FraisScolaires {
               'Classe',
               'Tranche',
               'Montant versé (FC)',
-              'Élèves ayant payé',
+              'Élèves ayant versé',
               'Total collecté (FC)',
             ],
             data: rowsTr,
@@ -3587,9 +3624,10 @@ extension FraisScolairesRapports on FraisScolaires {
                 if (aDesTranches) ...[
                   pw.SizedBox(height: 2),
                   pw.Text(
-                    "Ce frais est payé par tranches : chaque paiement "
-                        "correspond à une tranche (voir le récapitulatif par "
-                        "tranche et la colonne « Tranche »).",
+                    "Ce frais est payé par tranches : un paiement peut "
+                        "couvrir une partie d'une tranche ou plusieurs "
+                        "tranches ; la colonne « Tranche » indique la tranche "
+                        "où il commence (voir le récapitulatif par tranche).",
                     style: pw.TextStyle(
                       fontSize: 10,
                       fontStyle: pw.FontStyle.italic,
@@ -3687,6 +3725,184 @@ extension FraisScolairesRapports on FraisScolaires {
         '${filename}_${_nomFichierSur(nomTypePourFichier)}';
 
     return await _savePdf(pdf, filenameAvecType, "autres_frais_$periode");
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — RECOUVREMENT PAR TRANCHE (Autres Frais)
+  // Liste des élèves qui ont payé / n'ont pas encore payé une tranche (ou le
+  // frais entier si numeroTranche == 0), filtrable par section et classe.
+  // ==========================================================================
+  Future<Map<String, dynamic>> generateRecouvrementAutreFraisPdf({
+    required AutreFrais frais,
+    required int numeroTranche,
+    required bool payes,
+    String? sectionFilter,
+    String? classFilter,
+    String? city,
+  }) async {
+    final rec = recouvrementAutreFrais(frais, numeroTranche,
+        section: sectionFilter, classe: classFilter);
+    final lignes = List<AutreFraisRecouvrementLigne>.from(
+        payes ? rec.payes : rec.nonPayes);
+    if (lignes.isEmpty) {
+      return {
+        'success': false,
+        'error': payes
+            ? "Aucun élève n'a encore payé cette tranche pour ce filtre."
+            : 'Tous les élèves de ce filtre ont payé cette tranche.',
+      };
+    }
+    int indexSectionPourTri(String section) {
+      final i = config.sections.indexOf(section);
+      return i < 0 ? (1 << 20) : i;
+    }
+
+    lignes.sort((a, b) {
+      int c = indexSectionPourTri(a.eleve.section)
+          .compareTo(indexSectionPourTri(b.eleve.section));
+      if (c != 0) return c;
+      c = a.eleve.section.compareTo(b.eleve.section);
+      if (c != 0) return c;
+      c = a.eleve.classe.compareTo(b.eleve.classe);
+      if (c != 0) return c;
+      return a.eleve.nom.compareTo(b.eleve.nom);
+    });
+
+    final String libelleTranche = numeroTranche <= 0
+        ? 'Frais entier'
+        : nomTrancheSuggere(numeroTranche);
+    final String titreListe = payes
+        ? 'ÉLÈVES AYANT PAYÉ : ${libelleTranche.toUpperCase()}'
+        : "ÉLÈVES N'AYANT PAS ENCORE PAYÉ : ${libelleTranche.toUpperCase()}";
+    final sectionLabel = sectionFilter ?? 'Toutes les sections';
+    final classeLabel = classFilter ?? 'Toutes les classes';
+
+    double totDu = 0, totPaye = 0, totReste = 0;
+    final rows = <List<String>>[];
+    for (var i = 0; i < lignes.length; i++) {
+      final l = lignes[i];
+      totDu += l.montantDu;
+      totPaye += l.montantPaye;
+      totReste += l.reste;
+      final e = l.eleve;
+      rows.add([
+        '${i + 1}',
+        '${e.nom} ${e.postNom} ${e.prenom}'.trim(),
+        e.section,
+        e.classe,
+        formatMontant(l.montantDu),
+        formatMontant(l.montantPaye),
+        formatMontant(l.reste),
+        if (!payes) l.partiel ? 'Partiel' : 'Rien versé',
+      ]);
+    }
+    rows.add([
+      '',
+      'TOTAL (${lignes.length} élève(s))',
+      '',
+      '',
+      formatMontant(totDu),
+      formatMontant(totPaye),
+      formatMontant(totReste),
+      if (!payes) '',
+    ]);
+
+    final headers = [
+      'N°',
+      'Nom complet',
+      'Section',
+      'Classe',
+      'Montant dû (FC)',
+      'Montant payé (FC)',
+      'Reste (FC)',
+      if (!payes) 'Statut',
+    ];
+    final columnWidths = _buildColumnWidths(payes
+        ? [0.5, 3.0, 1.5, 1.3, 1.3, 1.3, 1.2]
+        : [0.5, 2.8, 1.4, 1.2, 1.2, 1.2, 1.1, 1.0]);
+
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
+        build: (pw.Context context) => [
+          pw.Center(
+            child: pw.Text(
+              config.schoolName.toUpperCase(),
+              style:
+              pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
+            ),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+              'RECOUVREMENT — ${frais.nom.toUpperCase()} — Année $currentYear',
+              style:
+              pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+              titreListe,
+              style:
+              pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold),
+            ),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+              'Section : $sectionLabel | Classe : $classeLabel',
+              style: const pw.TextStyle(fontSize: 11),
+            ),
+          ),
+          pw.SizedBox(height: 2),
+          pw.Center(
+            child: pw.Text(
+              'Imprimé le : $_dateGenerationFormatee',
+              style:
+              const pw.TextStyle(fontSize: 10, color: PdfColors.grey700),
+            ),
+          ),
+          pw.SizedBox(height: 12),
+          pw.TableHelper.fromTextArray(
+            headers: headers,
+            data: rows,
+            columnWidths: columnWidths,
+            headerStyle: pw.TextStyle(
+              fontSize: 9.5,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.white,
+            ),
+            headerDecoration:
+            const pw.BoxDecoration(color: PdfColors.indigo),
+            cellStyle: const pw.TextStyle(fontSize: 9.5),
+            cellPadding:
+            const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            cellAlignments: {
+              0: pw.Alignment.center,
+              1: pw.Alignment.centerLeft,
+              2: pw.Alignment.centerLeft,
+              3: pw.Alignment.centerLeft,
+              4: pw.Alignment.centerRight,
+              5: pw.Alignment.centerRight,
+              6: pw.Alignment.centerRight,
+              7: pw.Alignment.center,
+            },
+            oddRowDecoration:
+            const pw.BoxDecoration(color: PdfColors.indigo50),
+          ),
+          ..._buildSignatureSection(city ?? lastReportCity),
+        ],
+      ),
+    );
+
+    final String nomFichier =
+        'recouvrement_${frais.nom}_${payes ? 'ont_paye' : 'non_paye'}_'
+        '${numeroTranche <= 0 ? 'frais_entier' : 'tranche$numeroTranche'}'
+            .replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+    return await _savePdf(pdf, nomFichier, 'autres_frais');
   }
 
   Future<Map<String, dynamic>> _savePdf(

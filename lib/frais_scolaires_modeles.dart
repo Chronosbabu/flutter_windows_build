@@ -548,6 +548,13 @@ class AutreFraisPaiement {
   String trancheNom;
   int trancheNumero;
   int trancheTotal;
+  // ⚡ NOUVEAU — vrai si le montant a été saisi librement (paiement partiel).
+  // Utilisé uniquement pour les frais SANS tranches : un paiement "classique"
+  // (saisieLibre = false, cas de tous les anciens paiements) solde le frais
+  // comme avant ; les paiements libres s'additionnent jusqu'au montant dû.
+  // N'est écrit dans le JSON que s'il vaut vrai (anciennes sauvegardes
+  // inchangées).
+  bool saisieLibre;
 
   AutreFraisPaiement({
     required this.id,
@@ -561,6 +568,7 @@ class AutreFraisPaiement {
     this.trancheNom = '',
     this.trancheNumero = 0,
     this.trancheTotal = 0,
+    this.saisieLibre = false,
   });
 
   factory AutreFraisPaiement.fromJson(Map<String, dynamic> json) =>
@@ -577,6 +585,7 @@ class AutreFraisPaiement {
         trancheNom: json['trancheNom'] as String? ?? '',
         trancheNumero: (json['trancheNumero'] as num?)?.toInt() ?? 0,
         trancheTotal: (json['trancheTotal'] as num?)?.toInt() ?? 0,
+        saisieLibre: json['saisieLibre'] == true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -591,6 +600,7 @@ class AutreFraisPaiement {
     'trancheNom': trancheNom,
     'trancheNumero': trancheNumero,
     'trancheTotal': trancheTotal,
+    if (saisieLibre) 'saisieLibre': true,
   };
 
   String get dateFormatee {

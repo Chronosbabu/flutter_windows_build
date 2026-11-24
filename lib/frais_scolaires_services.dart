@@ -572,6 +572,13 @@ extension FraisScolairesServices on FraisScolaires {
       'section': eleve.section,
       'montant': montant,
     };
+    // ⚡ NOUVEAU — situation figée au moment du paiement (montant versé,
+    // cumul, reste), conservée dans la file d'attente avec le reçu.
+    if (paiement != null) {
+      try {
+        data.addAll(situationApresPaiementAutreFrais(frais, eleve, paiement));
+      } catch (_) {}
+    }
 
     final printerName = await _currentPrinterName();
     if (printerName.isNotEmpty) {
@@ -583,6 +590,10 @@ extension FraisScolairesServices on FraisScolaires {
         classe: data['classe'] as String,
         section: data['section'] as String,
         montant: data['montant'] as double,
+        cumulPaye: (data['cumulPaye'] as num?)?.toDouble(),
+        totalDu: (data['totalDu'] as num?)?.toDouble(),
+        resteAPayer: (data['resteAPayer'] as num?)?.toDouble(),
+        tranchesCouvertes: data['tranchesCouvertes'] as String?,
       );
       if (ok) {
         await _markReceiptPrinted(key);
@@ -654,6 +665,10 @@ extension FraisScolairesServices on FraisScolaires {
             classe: data['classe'] as String? ?? '',
             section: data['section'] as String? ?? '',
             montant: (data['montant'] as num?)?.toDouble() ?? 0.0,
+            cumulPaye: (data['cumulPaye'] as num?)?.toDouble(),
+            totalDu: (data['totalDu'] as num?)?.toDouble(),
+            resteAPayer: (data['resteAPayer'] as num?)?.toDouble(),
+            tranchesCouvertes: data['tranchesCouvertes'] as String?,
           );
         }
 
@@ -946,10 +961,16 @@ extension FraisScolairesServices on FraisScolaires {
       }
       if (eleve != null && frais != null) {
         try {
+          // ⚡ Paiement partiel : on enregistre le montant envoyé par l'agent
+          // (refusé s'il dépasse le reste dû). Sans montant valide, on garde
+          // l'ancien comportement (tranche entière).
+          final double montantAgent =
+              (p['montant'] as num?)?.toDouble() ?? 0.0;
           await payAutreFrais(
             frais: frais,
             eleve: eleve,
             enregistrePar: (p['enregistrePar'] ?? 'Agent').toString(),
+            montantSaisi: montantAgent > 0 ? montantAgent : null,
           );
           count++;
         } catch (_) {}

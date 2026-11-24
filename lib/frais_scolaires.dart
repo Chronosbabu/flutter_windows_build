@@ -22,8 +22,55 @@ part 'frais_scolaires_messagerie.dart';
 part 'frais_scolaires_retenues.dart';
 const String serverUrl = "https://jsinf.onrender.com";
 
+// ⚡ NOUVEAU — état d'une tranche pour un élève, calculé à partir du cumul
+// payé réparti dans l'ordre des tranches.
+enum AutreFraisEtatTranche { payee, partielle, nonPayee }
+
+class AutreFraisTrancheEtat {
+  final AutreFraisTranche tranche;
+  final int numero; // 1, 2, 3...
+  final double montantDu;
+  final double verse;
+  final AutreFraisEtatTranche etat;
+
+  const AutreFraisTrancheEtat({
+    required this.tranche,
+    required this.numero,
+    required this.montantDu,
+    required this.verse,
+    required this.etat,
+  });
+
+  double get reste =>
+      etat == AutreFraisEtatTranche.payee || montantDu - verse <= 0
+          ? 0.0
+          : montantDu - verse;
+}
+
+// ⚡ NOUVEAU — une ligne des listes de recouvrement (par tranche ou pour le
+// frais entier).
+class AutreFraisRecouvrementLigne {
+  final Eleve eleve;
+  final double montantDu;
+  final double montantPaye;
+  final bool paye;
+
+  const AutreFraisRecouvrementLigne({
+    required this.eleve,
+    required this.montantDu,
+    required this.montantPaye,
+    required this.paye,
+  });
+
+  double get reste =>
+      paye || montantDu - montantPaye <= 0 ? 0.0 : montantDu - montantPaye;
+  bool get partiel => !paye && montantPaye > 0;
+}
+
 class AutreFraisStatut {
   final List<AutreFraisTranche> tranches;
+  // ⚡ NOUVEAU — état de chaque tranche (vide si le frais n'a pas de tranches).
+  final List<AutreFraisTrancheEtat> etatsTranches;
   final int nbPayees;
   final double totalPaye;
   final double totalDu;
@@ -43,6 +90,7 @@ class AutreFraisStatut {
     required this.montantProchain,
     required this.solde,
     required this.partiel,
+    this.etatsTranches = const [],
   });
 }
 
@@ -2373,17 +2421,23 @@ class FraisScolaires {
 
     if (tranches.isEmpty) {
       final double montant = getMontantAutreFraisPourEleve(frais, eleve);
-      final bool solde = liste.isNotEmpty;
+      // Un paiement "classique" (tous les anciens paiements) solde le frais
+      // comme avant. Les paiements saisis librement s'additionnent.
+      final bool aPaiementClassique = liste.any((p) => !p.saisieLibre);
+      final bool solde = liste.isNotEmpty &&
+          (aPaiementClassique || totalPaye + _toleranceMontant >= montant);
+      final double reste =
+      solde ? 0.0 : (montant - totalPaye > 0 ? montant - totalPaye : 0.0);
       return AutreFraisStatut(
         tranches: tranches,
         nbPayees: 0,
         totalPaye: totalPaye,
         totalDu: montant,
-        reste: solde ? 0.0 : montant,
+        reste: reste,
         prochaine: null,
-        montantProchain: solde ? 0.0 : montant,
+        montantProchain: reste,
         solde: solde,
-        partiel: false,
+        partiel: liste.isNotEmpty && !solde,
       );
     }
 
@@ -2413,7 +2467,188 @@ class FraisScolaires {
       montantProchain: montantProchain,
       solde: solde,
       partiel: liste.isNotEmpty && !solde,
+      etatsTranches: repartirSurTranchesAutreFrais(tranches, totalPaye),
     );
+  }
+
+  // ⚡ NOUVEAU — répartit un cumul payé dans l'ordre des tranches.
+  // Une tranche est payée quand le cumul couvre toutes les tranches jusqu'à
+  // elle (même règle et même tolérance que nbPayees).
+  static List<AutreFraisTrancheEtat> repartirSurTranchesAutreFrais(
+      List<AutreFraisTranche> tranches, double totalPaye) {
+    final result = <AutreFraisTrancheEtat>[];
+    double cumulAvant = 0;
+    for (var i = 0; i < tranches.length; i++) {
+      final t = tranches[i];
+      final double cumulFin = cumulAvant + t.montant;
+      double verse = totalPaye - cumulAvant;
+      if (verse < 0) verse = 0;
+      if (verse > t.montant) verse = t.montant;
+      final AutreFraisEtatTranche etat;
+      if (totalPaye + _toleranceMontant >= cumulFin) {
+        etat = AutreFraisEtatTranche.payee;
+      } else if (verse > _toleranceMontant) {
+        etat = AutreFraisEtatTranche.partielle;
+      } else {
+        etat = AutreFraisEtatTranche.nonPayee;
+        verse = 0;
+      }
+      result.add(AutreFraisTrancheEtat(
+        tranche: t,
+        numero: i + 1,
+        montantDu: t.montant,
+        verse: verse,
+        etat: etat,
+      ));
+      cumulAvant = cumulFin;
+    }
+    return result;
+  }
+
+  // ⚡ NOUVEAU — paiements d'un élève pour un frais, dans l'ordre de
+  // répartition (date, puis ordre d'enregistrement).
+  List<AutreFraisPaiement> paiementsOrdonnesAutreFrais(
+      Eleve eleve, AutreFrais frais, [String? year]) {
+    final y = year ?? currentYear;
+    final liste = autresFraisPaiementsByYear[y] ?? const <AutreFraisPaiement>[];
+    final indices = <int>[];
+    for (var i = 0; i < liste.length; i++) {
+      if (liste[i].autreFraisId == frais.id && liste[i].eleveId == eleve.id) {
+        indices.add(i);
+      }
+    }
+    indices.sort((a, b) {
+      final c = liste[a].date.compareTo(liste[b].date);
+      if (c != 0) return c;
+      return a.compareTo(b);
+    });
+    return indices.map((i) => liste[i]).toList();
+  }
+
+  // ⚡ NOUVEAU — part de chaque paiement dans chaque tranche (index de
+  // tranche -> montant), paiements pris dans l'ordre. Tout excédent au-delà
+  // du total des tranches est compté sur la dernière tranche.
+  static List<Map<int, double>> ventilerPaiementsAutreFrais(
+      List<AutreFraisTranche> tranches, List<AutreFraisPaiement> ordonnes) {
+    final result = <Map<int, double>>[];
+    double cumulAvant = 0;
+    for (final p in ordonnes) {
+      final parts = <int, double>{};
+      double debut = cumulAvant;
+      final double fin = cumulAvant + p.montant;
+      double c = 0;
+      for (var j = 0; j < tranches.length && debut < fin; j++) {
+        final double cFin = c + tranches[j].montant;
+        final bool derniere = j == tranches.length - 1;
+        if (debut < cFin || derniere) {
+          final double haut = derniere ? fin : (fin < cFin ? fin : cFin);
+          final double part = haut - debut;
+          if (part > 0) parts[j] = (parts[j] ?? 0) + part;
+          debut = haut;
+        }
+        c = cFin;
+      }
+      result.add(parts);
+      cumulAvant = fin;
+    }
+    return result;
+  }
+
+  // ⚡ NOUVEAU — situation juste après un paiement (pour le reçu) : cumul
+  // payé, reste et libellé des tranches couvertes par ce paiement.
+  Map<String, dynamic> situationApresPaiementAutreFrais(
+      AutreFrais frais, Eleve eleve, AutreFraisPaiement paiement,
+      [String? year]) {
+    final ordonnes = paiementsOrdonnesAutreFrais(eleve, frais, year);
+    int idx = ordonnes.indexWhere((p) => p.id == paiement.id);
+    if (idx < 0) {
+      ordonnes.add(paiement);
+      idx = ordonnes.length - 1;
+    }
+    final jusquIci = ordonnes.sublist(0, idx + 1);
+    final statut = getStatutAutreFrais(frais, eleve, paiements: jusquIci);
+    String tranchesCouvertes = '';
+    if (statut.tranches.isNotEmpty) {
+      final ventilation =
+      ventilerPaiementsAutreFrais(statut.tranches, jusquIci);
+      final parts = ventilation[idx];
+      final etats = statut.etatsTranches;
+      final morceaux = <String>[];
+      final cles = parts.keys.toList()..sort();
+      for (final j in cles) {
+        final e = etats[j];
+        final String etat = e.etat == AutreFraisEtatTranche.payee
+            ? 'soldée'
+            : 'partielle, reste ${e.reste.toStringAsFixed(0)} FC';
+        morceaux.add('${e.tranche.nom} : ${parts[j]!.toStringAsFixed(0)} FC '
+            '($etat)');
+      }
+      tranchesCouvertes = morceaux.join('\n');
+    }
+    return {
+      'cumulPaye': statut.totalPaye,
+      'totalDu': statut.totalDu,
+      'resteAPayer': statut.reste,
+      'tranchesCouvertes': tranchesCouvertes,
+    };
+  }
+
+  // ⚡ NOUVEAU — recouvrement d'un frais : élèves qui ont payé / pas encore
+  // payé une tranche (numeroTranche >= 1, par position : 1re, 2e...) ou le
+  // frais entier (numeroTranche == 0). Pour une tranche, seuls les élèves
+  // qui ont au moins ce nombre de tranches sont concernés.
+  ({
+    List<AutreFraisRecouvrementLigne> payes,
+    List<AutreFraisRecouvrementLigne> nonPayes,
+  }) recouvrementAutreFrais(
+      AutreFrais frais,
+      int numeroTranche, {
+        String? section,
+        String? classe,
+        String? year,
+      }) {
+    final payes = <AutreFraisRecouvrementLigne>[];
+    final nonPayes = <AutreFraisRecouvrementLigne>[];
+    for (final e in getEligibleStudentsForAutreFrais(frais)) {
+      if (section != null && e.section != section) continue;
+      if (classe != null && e.classe != classe) continue;
+      final statut = getStatutAutreFrais(frais, e, year: year);
+      final AutreFraisRecouvrementLigne ligne;
+      if (numeroTranche <= 0) {
+        ligne = AutreFraisRecouvrementLigne(
+          eleve: e,
+          montantDu: statut.totalDu,
+          montantPaye: statut.solde
+              ? statut.totalDu
+              : (statut.totalPaye < statut.totalDu
+              ? statut.totalPaye
+              : statut.totalDu),
+          paye: statut.solde,
+        );
+      } else {
+        if (statut.etatsTranches.length < numeroTranche) continue;
+        final et = statut.etatsTranches[numeroTranche - 1];
+        final bool paye = et.etat == AutreFraisEtatTranche.payee;
+        ligne = AutreFraisRecouvrementLigne(
+          eleve: e,
+          montantDu: et.montantDu,
+          montantPaye: paye ? et.montantDu : et.verse,
+          paye: paye,
+        );
+      }
+      (ligne.paye ? payes : nonPayes).add(ligne);
+    }
+    return (payes: payes, nonPayes: nonPayes);
+  }
+
+  // ⚡ NOUVEAU — nombre maximal de tranches de ce frais parmi les élèves
+  // concernés (pour proposer "Tranche 1", "Tranche 2"... dans le filtre).
+  int nombreMaxTranchesAutreFrais(AutreFrais frais) {
+    int n = 0;
+    for (final liste in frais.tranchesParCle.values) {
+      if (liste.length > n) n = liste.length;
+    }
+    return n;
   }
 
   bool hasPaidTrancheAutreFrais(
@@ -2438,7 +2673,10 @@ class FraisScolaires {
   double getMontantProchainPaiementAutreFrais(AutreFrais frais, Eleve eleve) {
     final statut = getStatutAutreFrais(frais, eleve);
     if (statut.tranches.isEmpty) {
-      return getMontantAutreFraisPourEleve(frais, eleve);
+      // Sans tranches : le reste dû (montant plein s'il n'y a aucun paiement).
+      return statut.solde
+          ? getMontantAutreFraisPourEleve(frais, eleve)
+          : statut.reste;
     }
     return statut.prochaine != null ? statut.montantProchain : 0.0;
   }
@@ -2461,6 +2699,9 @@ class FraisScolaires {
     required Eleve eleve,
     String enregistrePar = 'Direction',
     AutreFraisTranche? tranche,
+    // ⚡ NOUVEAU — montant saisi librement (paiement partiel). Null = payer
+    // la tranche entière (ou le reste du frais s'il n'a pas de tranches).
+    double? montantSaisi,
   }) async {
     final statut = getStatutAutreFrais(frais, eleve);
     final tranches = statut.tranches;
@@ -2468,6 +2709,7 @@ class FraisScolaires {
     AutreFraisTranche? aPayer;
     double montant;
     int numeroTranche = 0;
+    bool saisieLibre = montantSaisi != null;
 
     if (tranches.isNotEmpty) {
       if (statut.solde || statut.prochaine == null) {
@@ -2486,7 +2728,25 @@ class FraisScolaires {
       if (statut.solde) {
         throw Exception('"${frais.nom}" est déjà payé pour cet élève.');
       }
-      montant = getMontantAutreFraisPourEleve(frais, eleve);
+      montant = statut.reste;
+      // Paiement du reste après un paiement partiel : il compte au cumul
+      // (sinon l'annulation du paiement partiel laisserait le frais soldé).
+      if (statut.totalPaye > 0) saisieLibre = true;
+    }
+
+    if (montantSaisi != null) {
+      if (montantSaisi.isNaN || montantSaisi <= 0) {
+        throw Exception('Le montant doit être supérieur à zéro.');
+      }
+      if (montantSaisi > statut.reste + _toleranceMontant) {
+        throw Exception('Le montant dépasse le reste à payer pour '
+            '"${frais.nom}". Maximum possible : '
+            '${statut.reste.toStringAsFixed(0)} FC.');
+      }
+      montant = montantSaisi;
+    }
+    if (montant <= 0) {
+      throw Exception('"${frais.nom}" est déjà payé pour cet élève.');
     }
 
     final paiement = AutreFraisPaiement(
@@ -2501,6 +2761,7 @@ class FraisScolaires {
       trancheNom: aPayer?.nom ?? '',
       trancheNumero: numeroTranche,
       trancheTotal: aPayer != null ? tranches.length : 0,
+      saisieLibre: saisieLibre,
     );
     autresFraisPaiementsByYear
         .putIfAbsent(currentYear, () => [])
@@ -2544,29 +2805,21 @@ class FraisScolaires {
       return a.compareTo(b);
     });
 
-    double cumulPaye = 0;
-    int prevK = 0;
+    // Chaque paiement lié à une tranche est rattaché à la tranche où tombe
+    // son premier franc (pour un paiement d'une tranche entière, c'est la
+    // tranche payée, comme avant).
+    double cumulAvant = 0;
     for (final i in indices) {
       final p = liste[i];
-      cumulPaye += p.montant;
-
-      int k = 0;
-      double c = 0;
-      for (final t in tranches) {
-        c += t.montant;
-        if (cumulPaye + _toleranceMontant >= c) {
-          k++;
-        } else {
-          break;
-        }
-      }
-
       if (p.trancheId.isNotEmpty) {
-        int cible;
-        if (k > prevK) {
-          cible = k - 1;
-        } else {
-          cible = prevK < tranches.length ? prevK : tranches.length - 1;
+        int cible = tranches.length - 1;
+        double c = 0;
+        for (var j = 0; j < tranches.length; j++) {
+          c += tranches[j].montant;
+          if (cumulAvant + _toleranceMontant < c) {
+            cible = j;
+            break;
+          }
         }
         final t = tranches[cible];
         liste[i] = AutreFraisPaiement(
@@ -2581,10 +2834,10 @@ class FraisScolaires {
           trancheNom: t.nom,
           trancheNumero: cible + 1,
           trancheTotal: tranches.length,
+          saisieLibre: p.saisieLibre,
         );
       }
-
-      if (k > prevK) prevK = k;
+      cumulAvant += p.montant;
     }
   }
 
@@ -2649,22 +2902,26 @@ class FraisScolaires {
     final AutreFraisPaiement p = liste[idx];
     final AutreFrais? frais = _trouverAutreFrais(p.autreFraisId);
 
+    bool saisieLibre = p.saisieLibre;
     if (frais != null) {
       final tranches = getTranchesPourEleve(frais, eleve);
-      if (tranches.isNotEmpty) {
-        final double totalDu =
-        tranches.fold(0.0, (sum, t) => sum + t.montant);
-        final double autres = liste
-            .where((x) =>
-        x.id != p.id &&
-            x.autreFraisId == frais.id &&
-            x.eleveId == eleve.id)
-            .fold(0.0, (sum, x) => sum + x.montant);
-        if (autres + newMontant > totalDu + _toleranceMontant) {
-          final double maxPossible = totalDu - autres;
-          throw Exception('Le montant dépasse le total dû. Maximum possible '
-              'pour ce paiement : ${maxPossible.toStringAsFixed(0)} FC.');
-        }
+      // Frais sans tranches : le paiement modifié compte au cumul, plafonné
+      // au montant du frais.
+      if (tranches.isEmpty) saisieLibre = true;
+      final double totalDu = tranches.isNotEmpty
+          ? tranches.fold(0.0, (sum, t) => sum + t.montant)
+          : getMontantAutreFraisPourEleve(frais, eleve);
+      final double autres = liste
+          .where((x) =>
+      x.id != p.id &&
+          x.autreFraisId == frais.id &&
+          x.eleveId == eleve.id)
+          .fold(0.0, (sum, x) => sum + x.montant);
+      if (autres + newMontant > totalDu + _toleranceMontant) {
+        final double maxPossible =
+        totalDu - autres > 0 ? totalDu - autres : 0.0;
+        throw Exception('Le montant dépasse le total dû. Maximum possible '
+            'pour ce paiement : ${maxPossible.toStringAsFixed(0)} FC.');
       }
     }
 
@@ -2683,6 +2940,7 @@ class FraisScolaires {
       trancheNom: p.trancheNom,
       trancheNumero: p.trancheNumero,
       trancheTotal: p.trancheTotal,
+      saisieLibre: saisieLibre,
     );
 
     if (frais != null) {

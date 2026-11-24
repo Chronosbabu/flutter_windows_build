@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
+import 'recouvrement_autres_frais_screen.dart';
 
 class AutresFraisScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -74,6 +75,38 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
       '${e.nom} ${e.postNom} ${e.prenom}'.toLowerCase().contains(query);
       return idMatch || nameMatch;
     }).toList();
+  }
+
+  // ⚡ NOUVEAU — résumé lisible de l'état des tranches d'un élève.
+  static String _fc(double v) => "${v.toStringAsFixed(0)} FC";
+
+  static String _libelleEtatsTranches(AutreFraisStatut statut) {
+    return statut.etatsTranches.map((e) {
+      switch (e.etat) {
+        case AutreFraisEtatTranche.payee:
+          return "${e.tranche.nom} : payée";
+        case AutreFraisEtatTranche.partielle:
+          return "${e.tranche.nom} : partielle (${_fc(e.verse)} versés, "
+              "reste ${_fc(e.reste)})";
+        case AutreFraisEtatTranche.nonPayee:
+          return "${e.tranche.nom} : non payée";
+      }
+    }).join("\n");
+  }
+
+  void _ouvrirRecouvrement() {
+    if (selectedFrais == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RecouvrementAutresFraisScreen(
+          fraisScolaires: widget.fraisScolaires,
+          frais: selectedFrais!,
+          sectionInitiale: filterSection,
+          classeInitiale: filterClasse,
+        ),
+      ),
+    );
   }
 
   String _scopeLabel(AutreFrais f) {
@@ -316,12 +349,10 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
-                        statut.tranches.isNotEmpty
-                            ? "Tranches payées : ${statut.nbPayees}/${statut.tranches.length}\n"
-                            "Versé : ${statut.totalPaye.toStringAsFixed(0)} FC "
-                            "sur ${statut.totalDu.toStringAsFixed(0)} FC"
-                            : "Versé : ${statut.totalPaye.toStringAsFixed(0)} FC "
-                            "sur ${statut.totalDu.toStringAsFixed(0)} FC",
+                        "Total dû : ${_fc(statut.totalDu)}\n"
+                            "Déjà payé : ${_fc(statut.totalPaye)}\n"
+                            "Reste à payer : ${_fc(statut.reste)}"
+                            "${statut.tranches.isNotEmpty ? '\n${_libelleEtatsTranches(statut)}' : ''}",
                         style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
@@ -434,14 +465,15 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     );
   }
 
-  Future<void> _payerUnSeul(Eleve eleve) async {
+  Future<void> _payerUnSeul(Eleve eleve, {double? montant}) async {
     if (selectedFrais == null) return;
     if (widget.fraisScolaires.hasPaidAutreFrais(eleve, selectedFrais!)) return;
     setState(() => _processing = true);
     final frais = selectedFrais!;
     try {
-      final paiement =
-      await widget.fraisScolaires.payAutreFrais(frais: frais, eleve: eleve);
+      final paiement = await widget.fraisScolaires
+          .payAutreFrais(frais: frais, eleve: eleve, montantSaisi: montant);
+      final apres = widget.fraisScolaires.getStatutAutreFrais(frais, eleve);
       final printed = await widget.fraisScolaires.printOrQueueAutreFraisReceipt(
         eleve: eleve,
         frais: frais,
@@ -459,8 +491,8 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           SnackBar(
             content: Text(
               printed
-                  ? "✅ ${frais.nom}$libelleTranche enregistré et reçu imprimé pour ${eleve.nom} ${eleve.prenom}"
-                  : "✅ ${frais.nom}$libelleTranche enregistré pour ${eleve.nom} ${eleve.prenom} — reçu en attente d'impression",
+                  ? "✅ ${frais.nom}$libelleTranche : ${_fc(paiement.montant)} enregistrés et reçu imprimé pour ${eleve.nom} ${eleve.prenom} — reste ${_fc(apres.reste)}"
+                  : "✅ ${frais.nom}$libelleTranche : ${_fc(paiement.montant)} enregistrés pour ${eleve.nom} ${eleve.prenom} — reste ${_fc(apres.reste)} — reçu en attente d'impression",
             ),
           ),
         );
@@ -521,45 +553,149 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     }
   }
 
+  // ⚡ NOUVEAU — fenêtre de paiement : tranche entière OU montant libre.
   void _confirmPaiementUnique(Eleve eleve) {
     if (selectedFrais == null) return;
+    final frais = selectedFrais!;
     final fs = widget.fraisScolaires;
-    final statut = fs.getStatutAutreFrais(selectedFrais!, eleve);
-    final double montant = fs.getMontantProchainPaiementAutreFrais(
-        selectedFrais!, eleve);
-    String libelleTranche = '';
+    final statut = fs.getStatutAutreFrais(frais, eleve);
+    if (statut.solde || statut.reste <= 0) return;
+    // Tranche entière = reste de la prochaine tranche ; sans tranches = reste
+    // du frais (le montant plein s'il n'y a encore aucun paiement).
+    final double montantEntier =
+    statut.tranches.isNotEmpty ? statut.montantProchain : statut.reste;
+    String libelleEntier;
     if (statut.prochaine != null) {
       final idx =
       statut.tranches.indexWhere((t) => t.id == statut.prochaine!.id);
-      libelleTranche =
-      "${statut.prochaine!.nom} (${idx + 1}/${statut.tranches.length}) — ";
+      libelleEntier = "Payer la tranche entière : ${statut.prochaine!.nom} "
+          "(${idx + 1}/${statut.tranches.length}) — ${_fc(montantEntier)}";
+    } else {
+      libelleEntier = statut.totalPaye > 0
+          ? "Payer le reste — ${_fc(montantEntier)}"
+          : "Payer en entier — ${_fc(montantEntier)}";
     }
-    final String dejaVerse = statut.totalPaye > 0
-        ? "\nDéjà versé pour ce frais : ${statut.totalPaye.toStringAsFixed(0)} FC."
-        : "";
+    final ctrl = TextEditingController();
+    String? erreur;
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(selectedFrais!.nom),
-        content: Text(
-          "Confirmer le paiement de $libelleTranche"
-              "${montant.toStringAsFixed(0)} FC pour "
-              "${eleve.nom} ${eleve.prenom} (${eleve.classe}) ?$dejaVerse",
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler")),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _payerUnSeul(eleve);
-            },
-            child: const Text("Confirmer"),
-          ),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          void validerSaisie() {
+            final v = double.tryParse(ctrl.text
+                .trim()
+                .replaceAll(' ', '')
+                .replaceAll(',', '.'));
+            if (v == null || v <= 0) {
+              setDialogState(
+                      () => erreur = "Entrez un montant supérieur à zéro.");
+              return;
+            }
+            if (v > statut.reste + 0.5) {
+              setDialogState(() => erreur =
+              "Montant trop élevé. Maximum possible : ${_fc(statut.reste)}.");
+              return;
+            }
+            Navigator.pop(ctx);
+            _payerUnSeul(eleve, montant: v);
+          }
+
+          return AlertDialog(
+            title: Text(frais.nom),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "${eleve.nom} ${eleve.postNom} ${eleve.prenom} "
+                          "(${eleve.classe})",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withAlpha(20),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        "Total dû : ${_fc(statut.totalDu)}\n"
+                            "Déjà payé : ${_fc(statut.totalPaye)}\n"
+                            "Reste à payer : ${_fc(statut.reste)}"
+                            "${statut.tranches.isNotEmpty ? '\n\n${_libelleEtatsTranches(statut)}' : ''}",
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.indigo),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.done_all),
+                        label: Text(libelleEntier),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.indigo,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: montantEntier <= 0
+                            ? null
+                            : () {
+                          Navigator.pop(ctx);
+                          _payerUnSeul(eleve);
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      "Ou saisir le montant apporté par le parent :",
+                      style: TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: ctrl,
+                      keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true),
+                      decoration: InputDecoration(
+                        labelText: "Montant (FC)",
+                        helperText: "Maximum : ${_fc(statut.reste)}",
+                        errorText: erreur,
+                        border: const OutlineInputBorder(),
+                      ),
+                      onChanged: (_) {
+                        if (erreur != null) {
+                          setDialogState(() => erreur = null);
+                        }
+                      },
+                      onSubmitted: (_) => validerSaisie(),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.edit_note),
+                        label: const Text("Valider ce montant"),
+                        onPressed: validerSaisie,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("Annuler")),
+            ],
+          );
+        },
       ),
-    );
+    ).whenComplete(ctrl.dispose);
   }
 
   List<AutreFraisPaiement> _paiementsDuFraisSelectionne() {
@@ -590,12 +726,38 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     return totals;
   }
 
+  // ⚡ Paiement partiel : un paiement peut couvrir une partie d'une tranche
+  // ou plusieurs tranches ; il est ventilé dans l'ordre des tranches.
   Map<String, double> _totalsByTrancheForSelected() {
+    final fs = widget.fraisScolaires;
+    final frais = selectedFrais!;
     final totals = <String, double>{};
+    final Set<String> elevesTraites = {};
     for (final p in _paiementsDuFraisSelectionne()) {
-      final label =
-      p.trancheNom.trim().isEmpty ? _libelleSansTranche : p.trancheNom.trim();
-      totals[label] = (totals[label] ?? 0) + p.montant;
+      if (p.trancheNom.trim().isEmpty) {
+        totals[_libelleSansTranche] =
+            (totals[_libelleSansTranche] ?? 0) + p.montant;
+        continue;
+      }
+      final eleve = fs.trouverEleveParId(p.eleveId);
+      final tranches =
+      eleve != null ? fs.getTranchesPourEleve(frais, eleve) : null;
+      if (eleve == null || tranches == null || tranches.isEmpty) {
+        final label = p.trancheNom.trim();
+        totals[label] = (totals[label] ?? 0) + p.montant;
+        continue;
+      }
+      if (!elevesTraites.add(eleve.id)) continue;
+      final ordonnes = fs.paiementsOrdonnesAutreFrais(eleve, frais);
+      final ventilation =
+      FraisScolaires.ventilerPaiementsAutreFrais(tranches, ordonnes);
+      for (var i = 0; i < ordonnes.length; i++) {
+        if (ordonnes[i].trancheNom.trim().isEmpty) continue;
+        ventilation[i].forEach((j, montant) {
+          final label = tranches[j].nom.trim();
+          totals[label] = (totals[label] ?? 0) + montant;
+        });
+      }
     }
     return totals;
   }
@@ -1458,6 +1620,11 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
             onPressed:
             selectedFrais == null ? null : _showAdminRepartitionDialog,
           ),
+          IconButton(
+            icon: const Icon(Icons.fact_check),
+            tooltip: "Recouvrement par tranche",
+            onPressed: selectedFrais == null ? null : _ouvrirRecouvrement,
+          ),
         ],
       ),
       body: fraisList.isEmpty
@@ -1587,6 +1754,12 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                         label: const Text("Administrations & Répartition",
                             style: TextStyle(fontSize: 12)),
                       ),
+                      TextButton.icon(
+                        onPressed: _ouvrirRecouvrement,
+                        icon: const Icon(Icons.fact_check, size: 18),
+                        label: const Text("Recouvrement par tranche",
+                            style: TextStyle(fontSize: 12)),
+                      ),
                     ],
                   ),
                 ],
@@ -1611,18 +1784,14 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                   String ligneTranches = '';
                   if (statut.tranches.isNotEmpty) {
                     ligneTranches =
-                    'Tranches : ${statut.nbPayees}/${statut.tranches.length} payée(s)';
-                    if (prochaine != null) {
-                      ligneTranches +=
-                      ' — prochaine : ${prochaine.nom} '
-                          '(${statut.montantProchain.toStringAsFixed(0)} FC)';
-                    }
+                    'Tranches : ${statut.nbPayees}/${statut.tranches.length} payée(s)\n'
+                        '${_libelleEtatsTranches(statut)}';
                   }
                   String ligneVerse = '';
-                  if (statut.tranches.isNotEmpty && statut.totalPaye > 0) {
+                  if (statut.totalPaye > 0 || statut.tranches.isNotEmpty) {
                     ligneVerse =
-                    'Déjà versé : ${statut.totalPaye.toStringAsFixed(0)} FC '
-                        'sur ${statut.totalDu.toStringAsFixed(0)} FC';
+                    'Dû : ${_fc(statut.totalDu)} | Payé : ${_fc(statut.totalPaye)} '
+                        '| Reste : ${_fc(statut.reste)}';
                   }
 
                   return Listener(

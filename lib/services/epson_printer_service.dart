@@ -1378,6 +1378,12 @@ Write-Output \$result
     required double montant,
     Uint8List? logoBytes,
     bool duplicata = false,
+    // ⚡ NOUVEAU (optionnels) — situation après ce paiement. Absents pour les
+    // reçus déjà en file d'attente : le reçu s'imprime alors comme avant.
+    double? cumulPaye,
+    double? totalDu,
+    double? resteAPayer,
+    String? tranchesCouvertes,
   }) async {
     _log('printAutreFraisReceipt appelé — imprimante="$printerName" '
         'élève="$studentName" frais="$titreFrais" montant=$montant '
@@ -1445,6 +1451,39 @@ Write-Output \$result
           styles: t.amountSingle,
         ),
       ]);
+      if (tranchesCouvertes != null && tranchesCouvertes.trim().isNotEmpty) {
+        for (final ligne in tranchesCouvertes.split('\n')) {
+          if (ligne.trim().isEmpty) continue;
+          bytes += generator.text(ligne.trim(), styles: t.row);
+        }
+      }
+      if (cumulPaye != null && resteAPayer != null) {
+        if (totalDu != null) {
+          bytes += generator.row([
+            PosColumn(text: 'Total dû :', width: 7, styles: t.row),
+            PosColumn(
+                text: '${totalDu.toStringAsFixed(0)} FC',
+                width: 5,
+                styles: t.row),
+          ]);
+        }
+        bytes += generator.row([
+          PosColumn(text: 'Cumul payé :', width: 7, styles: t.row),
+          PosColumn(
+              text: '${cumulPaye.toStringAsFixed(0)} FC',
+              width: 5,
+              styles: t.row),
+        ]);
+        bytes += generator.row([
+          PosColumn(text: 'Reste à payer :', width: 7, styles: t.row),
+          PosColumn(
+              text: resteAPayer <= 0
+                  ? 'SOLDÉ'
+                  : '${resteAPayer.toStringAsFixed(0)} FC',
+              width: 5,
+              styles: t.row),
+        ]);
+      }
       bytes += _sepLine(generator, t, '-');
 
       bytes += _signatureBlock(generator, t);
