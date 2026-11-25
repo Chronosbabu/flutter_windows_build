@@ -12,6 +12,8 @@ class RecouvrementAutresFraisScreen extends StatefulWidget {
   final AutreFrais frais;
   final String? sectionInitiale;
   final String? classeInitiale;
+  // ⚡ NOUVEAU — ouvrir directement sur un mois (paiement par mois).
+  final String? moisInitial;
 
   const RecouvrementAutresFraisScreen({
     super.key,
@@ -19,6 +21,7 @@ class RecouvrementAutresFraisScreen extends StatefulWidget {
     required this.frais,
     this.sectionInitiale,
     this.classeInitiale,
+    this.moisInitial,
   });
 
   @override
@@ -29,6 +32,8 @@ class RecouvrementAutresFraisScreen extends StatefulWidget {
 class _RecouvrementAutresFraisScreenState
     extends State<RecouvrementAutresFraisScreen> {
   late int _numeroTranche;
+  // ⚡ NOUVEAU — mois choisi (null = liste par tranche / frais entier).
+  String? _mois;
   String? _section;
   String? _classe;
   bool _generation = false;
@@ -40,7 +45,20 @@ class _RecouvrementAutresFraisScreenState
   @override
   void initState() {
     super.initState();
-    _numeroTranche = fs.nombreMaxTranchesAutreFrais(widget.frais) > 0 ? 1 : 0;
+    final moisDispo = fs.moisDefinisAutreFrais(widget.frais);
+    final bool queDesMois = widget.frais.tranchesParCle.values
+        .every((l) => l.every((t) => t.estMois));
+    _numeroTranche = (!queDesMois &&
+        fs.nombreMaxTranchesAutreFrais(widget.frais) > 0)
+        ? 1
+        : 0;
+    if (widget.moisInitial != null &&
+        moisDispo.any((m) => FraisScolaires.memeMois(m, widget.moisInitial!))) {
+      _mois = moisDispo.firstWhere(
+              (m) => FraisScolaires.memeMois(m, widget.moisInitial!));
+    } else if (queDesMois && moisDispo.isNotEmpty) {
+      _mois = moisDispo.first;
+    }
     _section = widget.sectionInitiale;
     _classe = widget.sectionInitiale != null ? widget.classeInitiale : null;
   }
@@ -51,6 +69,7 @@ class _RecouvrementAutresFraisScreenState
     if (n <= 0) return "Frais entier";
     final noms = <String>{};
     for (final liste in widget.frais.tranchesParCle.values) {
+      if (liste.any((t) => t.estMois)) continue;
       if (liste.length >= n && liste[n - 1].nom.trim().isNotEmpty) {
         noms.add(liste[n - 1].nom.trim());
       }
@@ -67,6 +86,7 @@ class _RecouvrementAutresFraisScreenState
       payes: payes,
       sectionFilter: _section,
       classFilter: _classe,
+      mois: _mois,
     );
     if (!mounted) return;
     setState(() => _generation = false);
@@ -88,8 +108,8 @@ class _RecouvrementAutresFraisScreenState
           padding: const EdgeInsets.all(24),
           child: Text(
             payes
-                ? "Aucun élève n'a encore payé cette tranche pour ce filtre."
-                : "Tous les élèves de ce filtre ont payé cette tranche. 🎉",
+                ? "Aucun élève n'a encore payé ${_mois != null ? 'ce mois' : 'cette tranche'} pour ce filtre."
+                : "Tous les élèves de ce filtre ont payé ${_mois != null ? 'ce mois' : 'cette tranche'}. 🎉",
             textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.grey),
           ),
@@ -179,12 +199,25 @@ class _RecouvrementAutresFraisScreenState
   @override
   Widget build(BuildContext context) {
     final int nbTranches = fs.nombreMaxTranchesAutreFrais(widget.frais);
-    final rec = fs.recouvrementAutreFrais(
+    final List<String> moisDispo = fs.moisDefinisAutreFrais(widget.frais);
+    final bool aDesTranchesClassiques = widget.frais.tranchesParCle.values
+        .any((l) => l.any((t) => !t.estMois));
+    final rec = _mois != null
+        ? fs.recouvrementAutreFraisParMois(
+      widget.frais,
+      _mois!,
+      section: _section,
+      classe: _classe,
+    )
+        : fs.recouvrementAutreFrais(
       widget.frais,
       _numeroTranche,
       section: _section,
       classe: _classe,
     );
+    // Valeur du choix : 'M:<mois>' pour un mois, 'T:<n>' pour une tranche
+    // (T:0 = frais entier).
+    final String choix = _mois != null ? 'M:$_mois' : 'T:$_numeroTranche';
     final classes = _section != null
         ? fs.getAllDisplayClassesForSection(_section!)
         : <String>[];
@@ -207,23 +240,38 @@ class _RecouvrementAutresFraisScreenState
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
               child: Column(
                 children: [
-                  DropdownButtonFormField<int>(
-                    initialValue: _numeroTranche,
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(choix),
+                    initialValue: choix,
                     isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: "Tranche",
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: moisDispo.isNotEmpty
+                          ? "Mois ou tranche"
+                          : "Tranche",
+                      border: const OutlineInputBorder(),
                       isDense: true,
                     ),
                     items: [
-                      for (var n = 1; n <= nbTranches; n++)
-                        DropdownMenuItem(
-                            value: n, child: Text(_libelleTranche(n))),
+                      ...moisDispo.map((m) => DropdownMenuItem(
+                          value: 'M:$m', child: Text("Mois de $m"))),
+                      if (aDesTranchesClassiques)
+                        for (var n = 1; n <= nbTranches; n++)
+                          DropdownMenuItem(
+                              value: 'T:$n',
+                              child: Text(_libelleTranche(n))),
                       const DropdownMenuItem(
-                          value: 0, child: Text("Frais entier")),
+                          value: 'T:0', child: Text("Frais entier")),
                     ],
-                    onChanged: (v) =>
-                        setState(() => _numeroTranche = v ?? 0),
+                    onChanged: (v) => setState(() {
+                      final String val = v ?? 'T:0';
+                      if (val.startsWith('M:')) {
+                        _mois = val.substring(2);
+                        _numeroTranche = 0;
+                      } else {
+                        _mois = null;
+                        _numeroTranche = int.tryParse(val.substring(2)) ?? 0;
+                      }
+                    }),
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -266,7 +314,18 @@ class _RecouvrementAutresFraisScreenState
                       ),
                     ],
                   ),
-                  if (_numeroTranche > 0)
+                  if (_mois != null)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        "Seuls les élèves dont la classe ou la section doit "
+                            "payer ce mois sont listés. Un mois est payé quand "
+                            "les mois précédents (dans l'ordre de paiement) "
+                            "le sont aussi.",
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                    )
+                  else if (_numeroTranche > 0)
                     const Padding(
                       padding: EdgeInsets.only(top: 4),
                       child: Text(

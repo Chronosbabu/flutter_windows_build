@@ -6,6 +6,8 @@ import 'package:provider/provider.dart';
 import '../frais_scolaires.dart';
 import '../app_state.dart';
 import '../models.dart';
+import 'journal_caisse_screen.dart';
+import 'depenses_rubrique_mois_screen.dart';
 
 class RepartitionScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -1954,6 +1956,30 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
     );
   }
 
+  // ⚡ NOUVEAU — journal de caisse : l'argent reçu jour par jour, à comparer
+  // avec l'argent compté à la main.
+  void _openJournalCaisse() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => JournalCaisseScreen(fraisScolaires: fraisScolaires),
+      ),
+    );
+  }
+
+  // ⚡ NOUVEAU — argent déjà dépensé par rubrique et par mois.
+  void _openDepensesRubriqueMois() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            DepensesRubriqueMoisScreen(fraisScolaires: fraisScolaires),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
   void _openPreuves() {
     Navigator.push(
       context,
@@ -2210,6 +2236,21 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
               ),
             ),
             const SizedBox(height: 12),
+            // ⚡ NOUVEAU — dépenses par rubrique et par mois
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _openDepensesRubriqueMois,
+                icon: const Icon(Icons.calendar_view_month),
+                label: const Text("Dépenses par rubrique et par mois"),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  foregroundColor: Colors.orange.shade800,
+                  side: BorderSide(color: Colors.orange.shade800),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -2234,6 +2275,22 @@ class _RepartitionScreenState extends State<RepartitionScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   foregroundColor: Colors.teal.shade700,
                   side: BorderSide(color: Colors.teal.shade700),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // ⚡ NOUVEAU — journal de caisse (preuves jour par jour)
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _openJournalCaisse,
+                icon: const Icon(Icons.point_of_sale),
+                label: const Text(
+                    "Journal de Caisse (argent reçu jour par jour)"),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  backgroundColor: Colors.deepPurple,
+                  foregroundColor: Colors.white,
                 ),
               ),
             ),
@@ -3539,12 +3596,44 @@ class _PreuvesPaiementScreenState extends State<_PreuvesPaiementScreen> {
                 color: Colors.deepPurple.withAlpha(15),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Text(
-                "Choisissez toute l'école, une section ou une classe. "
-                    "Appuyez ensuite sur un mois pour voir chaque jour où "
-                    "l'argent est entré, avec le nom de chaque élève, le "
-                    "montant et la référence du paiement.",
-                style: TextStyle(fontSize: 12, color: Colors.deepPurple),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Choisissez toute l'école, une section ou une classe. "
+                        "Appuyez ensuite sur un mois pour voir chaque jour où "
+                        "l'argent est entré, avec le nom de chaque élève, le "
+                        "montant et la référence du paiement.",
+                    style: TextStyle(fontSize: 12, color: Colors.deepPurple),
+                  ),
+                  const SizedBox(height: 6),
+                  // ⚡ NOUVEAU — explication + lien vers le journal de caisse
+                  const Text(
+                    "Attention : cette page range l'argent par MOIS PAYÉ "
+                        "(un parent qui paie septembre et octobre le même jour "
+                        "apparaît dans les deux mois). Pour comparer avec "
+                        "l'argent compté à la main, utilisez le journal de "
+                        "caisse, qui range l'argent par JOUR de réception.",
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.deepPurple,
+                        fontWeight: FontWeight.w600),
+                  ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      icon: const Icon(Icons.point_of_sale, size: 18),
+                      label: const Text("Ouvrir le journal de caisse"),
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              JournalCaisseScreen(fraisScolaires: fs),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 14),

@@ -413,6 +413,33 @@ extension FraisScolairesRapports on FraisScolaires {
     );
   }
 
+  // ==========================================================================
+  // ⚡ NOUVEAU — DÉPENSES PAR RUBRIQUE ET PAR MOIS (fenêtre Répartition)
+  // Mêmes calculs que le rapport PDF des dépenses, pour que l'écran et le
+  // PDF donnent exactement les mêmes chiffres (mois d'imputation, retenues
+  // et entrées d'argent compris).
+  // ==========================================================================
+
+  /// Statistiques de dépenses d'UN mois scolaire (ex. "Octobre").
+  DepensePeriodeStats depensesStatsPourMois(String mois,
+      {String? sectionFilter}) =>
+      _computeDepensesStatsMois(mois, sectionFilter: sectionFilter);
+
+  /// Statistiques de dépenses de toute l'année (comme le rapport PDF).
+  DepensePeriodeStats depensesStatsAnnee({String? sectionFilter}) =>
+      _rapportPersonnaliseEnVigueur
+          ? _computeDepensesStatsRapport('year', sectionFilter: sectionFilter)
+          : computeDepensesStats('year', sectionFilter: sectionFilter);
+
+  /// Montant d'une dépense compté pour une section (la dépense entière si
+  /// aucune section n'est filtrée ; 0 pour une dépense globale filtrée par
+  /// section, comme dans les statistiques).
+  double montantDepensePourFiltre(Depense d, String? sectionFilter) {
+    if (sectionFilter == null) return d.montant;
+    if (d.portee == kDepenseGlobale) return 0;
+    return repartitionDepenseParSection(d)[sectionFilter] ?? 0;
+  }
+
   /// ⚡ NOUVEAU — équivalent de computeDepensesStats(period) mais avec la
   /// collecte exprimée en montants de rapport (utilisé uniquement quand la
   /// fonction « montants personnalisés » est active).
@@ -2284,7 +2311,7 @@ extension FraisScolairesRapports on FraisScolaires {
     } else if (reportType == "monthly") {
       if (moisSel != null) {
         students = _elevesAyantPayeMois(moisSel);
-        title    = "RAPPORT MENSUEL — ${moisSel.toUpperCase()}";
+        title    = "RAPPORT MENSUEL - ${moisSel.toUpperCase()}";
         countLabel = "ont payé pour le mois de $moisSel";
       } else {
         students = getPaidStudentsThisMonth();
@@ -2417,6 +2444,60 @@ extension FraisScolairesRapports on FraisScolaires {
     final double mainCellFontSize = _tableCellFontSize(headers.length);
     final double mainHeaderFontSize = _tableHeaderFontSize(headers.length);
 
+    // ⚡ NOUVEAU — SYNTHÈSE en tête du rapport : attendu (selon le montant de
+    // chaque élève, exceptions comprises), déjà payé, reste, taux, nombre
+    // d'élèves par situation et élèves en exception par type.
+    //   - journalier : mois scolaire en cours ;
+    //   - mensuel    : mois du rapport ;
+    //   - annuel     : de Septembre au mois en cours (+ rappel année entière).
+    List<String> moisSynthese = const [];
+    String titreSynthese = '';
+    if (reportType == "monthly" || reportType == "daily") {
+      final String? m = moisSel ?? currentSchoolMonthName;
+      if (m != null && months.contains(m)) {
+        moisSynthese = [m];
+        titreSynthese = reportType == "daily"
+            ? "MOIS EN COURS (${_libelleMoisCalendrier(m).toUpperCase()})"
+            : _libelleMoisCalendrier(m).toUpperCase();
+      }
+    } else if (reportType == "annual" && months.isNotEmpty) {
+      final String? courant = currentSchoolMonthName;
+      int fin = courant == null ? -1 : months.indexOf(courant);
+      if (fin < 0) fin = months.length - 1;
+      moisSynthese = months.sublist(0, fin + 1);
+      titreSynthese = moisSynthese.length == months.length
+          ? "TOUTE L'ANNÉE $currentYear"
+          : "ANNÉE $currentYear : DE ${moisSynthese.first.toUpperCase()} "
+          "À ${moisSynthese.last.toUpperCase()} (MOIS DÉJÀ COMMENCÉS)";
+    }
+    final SyntheseRapport? synthese = moisSynthese.isEmpty
+        ? null
+        : calculerSyntheseRapport(
+      mois: moisSynthese,
+      sectionFilter: sectionFilter,
+      classFilter: classFilter,
+      conversion: _versMontantRapportEleve,
+    );
+    final SyntheseRapport? syntheseAnneeEntiere = (reportType == "annual" &&
+        moisSynthese.isNotEmpty &&
+        moisSynthese.length < months.length)
+        ? calculerSyntheseRapport(
+      mois: months,
+      sectionFilter: sectionFilter,
+      classFilter: classFilter,
+      conversion: _versMontantRapportEleve,
+    )
+        : null;
+    double payeArchivesSynthese = 0;
+    for (final e in elevesSupprimesData.eleves) {
+      if (sectionFilter != null && e.section != sectionFilter) continue;
+      if (classFilter != null && e.classe != classFilter) continue;
+      for (final m in moisSynthese) {
+        payeArchivesSynthese +=
+            _versMontantRapportEleve(e, e.paid[m] ?? 0.0);
+      }
+    }
+
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4.landscape,
@@ -2426,6 +2507,35 @@ extension FraisScolairesRapports on FraisScolaires {
             title: title,
             subtitle: 'Année scolaire $currentYear',
           ),
+          if (synthese != null)
+            ...blocSyntheseRapportPdf(
+              synthese,
+              titrePeriode: titreSynthese,
+              payeArchives: payeArchivesSynthese,
+              conversion: _versMontantRapportEleve,
+            ),
+          if (syntheseAnneeEntiere != null) ...[
+            pw.Text(
+              "Rappel pour toute l'année (${months.first} à ${months.last}) : "
+                  "montant attendu ${formatMontant(syntheseAnneeEntiere.total.attendu)} FC, "
+                  "déjà payé ${formatMontant(syntheseAnneeEntiere.total.paye - syntheseAnneeEntiere.total.excedent)} FC "
+                  "(${syntheseAnneeEntiere.total.taux.toStringAsFixed(1)} %). "
+                  "Les mois pas encore commencés ne sont pas comptés comme des retards.",
+              style: pw.TextStyle(
+                fontSize: 9,
+                fontStyle: pw.FontStyle.italic,
+                color: PdfColors.grey800,
+              ),
+            ),
+            pw.SizedBox(height: 12),
+          ],
+          if (synthese != null)
+            pw.Text(
+              "DÉTAIL DE L'ARGENT ENCAISSÉ",
+              style: pw.TextStyle(
+                  fontSize: 11.5, fontWeight: pw.FontWeight.bold),
+            ),
+          if (synthese != null) pw.SizedBox(height: 4),
           pw.Container(
             width: double.infinity,
             padding: const pw.EdgeInsets.all(12),
@@ -2703,16 +2813,45 @@ extension FraisScolairesRapports on FraisScolaires {
     required bool enOrdre,
     String? sectionFilter,
     String? classFilter,
+    // ⚡ NOUVEAU — élèves en exception (par défaut : comportement d'origine,
+    // sans résumé). L'écran « Liste En Ordre » passe ses propres choix.
+    bool inclureExoneres = true,
+    bool inclureMontantDifferent = true,
+    bool avecResume = false,
   }) async {
     // ⚡ NOUVEAU — chargement du réglage « montants personnalisés ».
     await rapportPersonnalise.charger();
 
-    final students = getStudentsByOrderStatus(
+    final students = getStudentsByOrderStatusAvecExceptions(
       mois:          mois,
       enOrdre:       enOrdre,
       sectionFilter: sectionFilter,
       classFilter:   classFilter,
+      inclureExoneres:         inclureExoneres,
+      inclureMontantDifferent: inclureMontantDifferent,
     );
+
+    // Colonne « Remarque » seulement si un élève listé est en exception :
+    // sinon le PDF reste exactement comme avant.
+    String remarque(Eleve e) {
+      switch (typeExceptionPourMois(e, mois)) {
+        case TypeExceptionMois.exonere:
+          return 'Exonéré (0 FC)';
+        case TypeExceptionMois.montantDifferent:
+          return 'Montant différent (normal '
+              '${formatMontant(_versMontantRapportEleve(e, getRequiredForMonth(mois, e.section, e.classe)))})';
+        case TypeExceptionMois.aucune:
+          return '';
+      }
+    }
+    final bool avecRemarque =
+    students.any((e) => remarque(e).isNotEmpty);
+    final ResumeOrdre? resume = avecResume
+        ? resumeOrdre(
+        mois: [mois],
+        sectionFilter: sectionFilter,
+        classFilter: classFilter)
+        : null;
 
     final sectionLabel = sectionFilter ?? "Toutes les sections";
     final classeLabel  = classFilter   ?? "Toutes les classes";
@@ -2741,11 +2880,13 @@ extension FraisScolairesRapports on FraisScolaires {
         e.section,
         e.classe,
         '${montantPaye.toStringAsFixed(0)} / ${montantRequis.toStringAsFixed(0)} FC',
+        if (avecRemarque) remarque(e),
       ]);
     }
 
-    final columnWidths =
-    _buildColumnWidths([0.5, 1.4, 1.4, 1.4, 1.1, 1.3, 1.8]);
+    final columnWidths = _buildColumnWidths(avecRemarque
+        ? [0.5, 1.4, 1.4, 1.4, 1.1, 1.3, 1.8, 2.0]
+        : [0.5, 1.4, 1.4, 1.4, 1.1, 1.3, 1.8]);
 
     final pdf = pw.Document();
     pdf.addPage(
@@ -2786,12 +2927,28 @@ extension FraisScolairesRapports on FraisScolaires {
             ),
           ),
           pw.SizedBox(height: 16),
+          if (resume != null) ...[
+            ...blocResumeOrdrePdf(
+              resume,
+              inclureExoneres: inclureExoneres,
+              inclureMontantDifferent: inclureMontantDifferent,
+            ),
+            pw.SizedBox(height: 8),
+          ],
           pw.Divider(thickness: 1),
           pw.SizedBox(height: 10),
+          if (students.isEmpty)
+            pw.Text(
+              "Aucun élève ne correspond à ces critères.",
+              style: const pw.TextStyle(
+                  fontSize: 11, color: PdfColors.grey700),
+            )
+          else
           pw.TableHelper.fromTextArray(
             headers: [
               'N°', 'Nom', 'Post-nom', 'Prénom', 'Section', 'Classe',
               'Payé / Requis ($mois)',
+              if (avecRemarque) 'Remarque',
             ],
             data: rows,
             columnWidths: columnWidths,
@@ -2815,6 +2972,7 @@ extension FraisScolairesRapports on FraisScolaires {
               4: pw.Alignment.centerLeft,
               5: pw.Alignment.centerLeft,
               6: pw.Alignment.center,
+              if (avecRemarque) 7: pw.Alignment.centerLeft,
             },
             oddRowDecoration: pw.BoxDecoration(
               color: enOrdre ? PdfColors.green50 : PdfColors.red50,
@@ -3739,17 +3897,24 @@ extension FraisScolairesRapports on FraisScolaires {
     String? sectionFilter,
     String? classFilter,
     String? city,
+    // ⚡ NOUVEAU — liste par MOIS : si rempli, numeroTranche est ignoré.
+    String? mois,
   }) async {
-    final rec = recouvrementAutreFrais(frais, numeroTranche,
+    final bool parMois = mois != null && mois.trim().isNotEmpty;
+    final rec = parMois
+        ? recouvrementAutreFraisParMois(frais, mois,
+        section: sectionFilter, classe: classFilter)
+        : recouvrementAutreFrais(frais, numeroTranche,
         section: sectionFilter, classe: classFilter);
     final lignes = List<AutreFraisRecouvrementLigne>.from(
         payes ? rec.payes : rec.nonPayes);
+    final String quoi = parMois ? 'ce mois' : 'cette tranche';
     if (lignes.isEmpty) {
       return {
         'success': false,
         'error': payes
-            ? "Aucun élève n'a encore payé cette tranche pour ce filtre."
-            : 'Tous les élèves de ce filtre ont payé cette tranche.',
+            ? "Aucun élève n'a encore payé $quoi pour ce filtre."
+            : 'Tous les élèves de ce filtre ont payé $quoi.',
       };
     }
     int indexSectionPourTri(String section) {
@@ -3768,9 +3933,11 @@ extension FraisScolairesRapports on FraisScolaires {
       return a.eleve.nom.compareTo(b.eleve.nom);
     });
 
-    final String libelleTranche = numeroTranche <= 0
+    final String libelleTranche = parMois
+        ? 'Mois de ${mois.trim()}'
+        : (numeroTranche <= 0
         ? 'Frais entier'
-        : nomTrancheSuggere(numeroTranche);
+        : nomTrancheSuggere(numeroTranche));
     final String titreListe = payes
         ? 'ÉLÈVES AYANT PAYÉ : ${libelleTranche.toUpperCase()}'
         : "ÉLÈVES N'AYANT PAS ENCORE PAYÉ : ${libelleTranche.toUpperCase()}";
@@ -3900,7 +4067,7 @@ extension FraisScolairesRapports on FraisScolaires {
 
     final String nomFichier =
         'recouvrement_${frais.nom}_${payes ? 'ont_paye' : 'non_paye'}_'
-        '${numeroTranche <= 0 ? 'frais_entier' : 'tranche$numeroTranche'}'
+        '${parMois ? 'mois_${mois.trim()}' : (numeroTranche <= 0 ? 'frais_entier' : 'tranche$numeroTranche')}'
             .replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
     return await _savePdf(pdf, nomFichier, 'autres_frais');
   }

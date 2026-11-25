@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
+import 'messagerie_screen.dart';
 
 // ======================================================================
 // Couleurs fixes de la messagerie (style WhatsApp) — elles ne dépendent
@@ -15,7 +16,6 @@ const Color _kTextSecondary  = Color(0xFF54656F); // heure, textes secondaires
 const Color _kReadBlue       = Color(0xFF53BDEB); // coches bleues « lu »
 const Color _kAppBarGreen    = Color(0xFF075E54); // barre du haut
 const Color _kAccentGreen    = Color(0xFF128C7E); // boutons
-const Color _kInputFill      = Color(0xFFF0F2F5); // fond du champ de saisie
 
 // ======================================================================
 // Outils communs d'affichage (dates en français, heure locale)
@@ -109,7 +109,7 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
   bool _loading = true;
   String? _error;
 
-  /// 'all' | 'unread' | 'parents'
+  /// 'all' | 'unread'
   String _filter = 'all';
   String _search = '';
 
@@ -119,7 +119,8 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
   void initState() {
     super.initState();
     _load();
-    _timer = Timer.periodic(const Duration(seconds: 15), (_) {
+    // ⚡ 8 s (avant 15 s) : les messages des parents apparaissent plus vite.
+    _timer = Timer.periodic(const Duration(seconds: 8), (_) {
       if (!mounted || _loading) return;
       _load(silent: true);
     });
@@ -131,14 +132,23 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
     super.dispose();
   }
 
+  bool _busy = false; // une actualisation est déjà en cours
+
   Future<void> _load({bool silent = false}) async {
+    if (silent && _busy) return;
     if (!silent) {
       setState(() {
         _loading = true;
         _error = null;
       });
     }
-    final r = await widget.fraisScolaires.getParentConversations();
+    _busy = true;
+    final Map<String, dynamic> r;
+    try {
+      r = await widget.fraisScolaires.getParentConversations();
+    } finally {
+      _busy = false;
+    }
     if (!mounted) return;
     if (r['success'] == true) {
       setState(() {
@@ -161,9 +171,6 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
     final q = _search.trim().toLowerCase();
     return _convs.where((c) {
       if (_filter == 'unread' && _asInt(c['unread_count']) <= 0) return false;
-      if (_filter == 'parents' && c['has_parent_message'] != true) {
-        return false;
-      }
       if (q.isNotEmpty) {
         final nom = (c['nom_eleve'] ?? '').toString().toLowerCase();
         final classe = (c['classe'] ?? '').toString().toLowerCase();
@@ -192,7 +199,7 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Messages des parents'),
+        title: const Text('Messages reçus des parents'),
         centerTitle: true,
         actions: [
           if (_totalUnread > 0)
@@ -225,6 +232,20 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
         ],
       ),
       body: _buildBody(),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) =>
+                  EcrireAuxParentsScreen(fraisScolaires: widget.fraisScolaires),
+            ),
+          );
+          if (mounted) _load(silent: true);
+        },
+        icon: const Icon(Icons.edit),
+        label: const Text('Écrire à un parent'),
+      ),
     );
   }
 
@@ -279,8 +300,7 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
           child: Row(
             children: [
               _chip('all', 'Toutes'),
-              _chip('unread', 'Non lues ($_totalUnread)'),
-              _chip('parents', 'Écrites par des parents'),
+              _chip('unread', 'Pas encore lues ($_totalUnread)'),
             ],
           ),
         ),
@@ -301,9 +321,12 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 24),
                     child: Text(
                       _convs.isEmpty
-                          ? "Aucune conversation pour l'instant. Les "
-                          'messages des parents apparaîtront ici.'
-                          : 'Aucune conversation pour ce filtre.',
+                          ? "Aucun message pour l'instant. Les messages "
+                          'des parents apparaîtront ici.\n\nPour écrire '
+                          'à un parent : bouton « Écrire à un parent » en bas.'
+                          : _filter == 'unread'
+                          ? 'Aucun message à lire. Tout est lu ✅'
+                          : 'Aucun élève ne correspond à la recherche.',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.grey),
                     ),
@@ -316,7 +339,8 @@ class _MessagesParentsScreenState extends State<MessagesParentsScreen> {
               itemCount: list.length,
               separatorBuilder: (_, __) =>
               const Divider(height: 1, indent: 76),
-              itemBuilder: (context, i) => _tile(list[i]),
+              padding: const EdgeInsets.only(bottom: 90),
+            itemBuilder: (context, i) => _tile(list[i]),
             ),
           ),
         ),
@@ -503,7 +527,7 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
   void initState() {
     super.initState();
     _load(first: true);
-    _timer = Timer.periodic(const Duration(seconds: 6), (_) {
+    _timer = Timer.periodic(const Duration(seconds: 4), (_) {
       if (!mounted || _loading || _sending) return;
       _load();
     });
@@ -544,15 +568,24 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
   /// Charge les 100 derniers messages et les fusionne avec ce qu'on a déjà
   /// (les anciens déjà chargés sont conservés). Cela met aussi à jour les
   /// coches de lecture des messages déjà affichés.
+  bool _busy = false; // un chargement est déjà en cours
+
   Future<void> _load({bool first = false}) async {
+    if (!first && _busy) return;
     if (first) {
       setState(() {
         _loading = true;
         _error = null;
       });
     }
-    final r = await widget.fraisScolaires
-        .getParentConversation(widget.studentId, limit: 100);
+    _busy = true;
+    final Map<String, dynamic> r;
+    try {
+      r = await widget.fraisScolaires
+          .getParentConversation(widget.studentId, limit: 100);
+    } finally {
+      _busy = false;
+    }
     if (!mounted) return;
 
     if (r['success'] != true) {
@@ -876,6 +909,46 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
     );
   }
 
+  /// Citation écrite par l'application des parents en tête de message :
+  /// (auteur, extrait, texte) ou null.
+  (String, String, String)? _citation(String text) {
+    if (!text.startsWith('↪ ')) return null;
+    final nl = text.indexOf('\n');
+    if (nl < 0) return null;
+    final head = text.substring(2, nl);
+    final sep = head.indexOf(' : ');
+    final body = text.substring(nl + 1);
+    if (sep <= 0 || body.trim().isEmpty) return null;
+    return (head.substring(0, sep).trim(), head.substring(sep + 3).trim(), body);
+  }
+
+  Widget _quoteBox(String auteur, String extrait) {
+    // Vu de l'école : « École » = vous-même.
+    final ecole = auteur.toLowerCase().startsWith('école');
+    final couleur = ecole ? _kAccentGreen : const Color(0xFF1976D2);
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black.withAlpha(13),
+        borderRadius: BorderRadius.circular(8),
+        border: Border(left: BorderSide(color: couleur, width: 4)),
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(ecole ? 'Vous (école)' : 'Parent',
+              style: TextStyle(
+                  fontSize: 12.5, fontWeight: FontWeight.bold, color: couleur)),
+          Text(extrait,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, color: _kTextSecondary)),
+        ],
+      ),
+    );
+  }
+
   Widget _bubble(Map<String, dynamic> m, DateTime? when) {
     final fromParent = m['sender'] == 'parent';
     final mine = !fromParent; // à droite = l'école
@@ -987,8 +1060,14 @@ class _SchoolChatScreenState extends State<SchoolChatScreen> {
                   ),
                   const SizedBox(height: 2),
                 ],
+                // ⚡ Réponse d'un parent à un message (glisser sur WhatsApp) :
+                // « ↪ École : extrait\ntexte » → encadré de citation.
+                if (_citation(text) case final q?) ...[
+                  _quoteBox(q.$1, q.$2),
+                  const SizedBox(height: 4),
+                ],
                 Text(
-                  text,
+                  _citation(text)?.$3 ?? text,
                   style: const TextStyle(
                     fontSize: 16,
                     height: 1.3,

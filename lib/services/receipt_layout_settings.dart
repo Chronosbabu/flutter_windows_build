@@ -62,6 +62,98 @@ PosStyles styleForSizeCode(
   }
 }
 
+/// Nombre maximum d'informations de l'école sur un reçu.
+const int kMaxInfosEcole = 10;
+const int kMaxNomInfoEcole = 40;
+const int kMaxValeurInfoEcole = 120;
+
+/// Découpe un texte en lignes de [max] caractères au plus (sans couper les
+/// mots, sauf s'ils sont plus longs qu'une ligne). Utilisé à l'impression et
+/// dans l'aperçu pour qu'ils soient identiques.
+List<String> decouperTexteRecu(String text, int max) {
+  if (max < 1) max = 1;
+  final words = text.trim().split(RegExp(r'\s+'));
+  final lines = <String>[];
+  String cur = '';
+  for (var w in words) {
+    if (w.isEmpty) continue;
+    while (w.length > max) {
+      if (cur.isNotEmpty) {
+        lines.add(cur);
+        cur = '';
+      }
+      lines.add(w.substring(0, max));
+      w = w.substring(max);
+    }
+    if (w.isEmpty) continue;
+    final cand = cur.isEmpty ? w : '$cur $w';
+    if (cand.length <= max) {
+      cur = cand;
+    } else {
+      lines.add(cur);
+      cur = w;
+    }
+  }
+  if (cur.isNotEmpty) lines.add(cur);
+  return lines;
+}
+
+/// Une information de l'école imprimée sous le logo / le nom de l'école
+/// (adresse, téléphone, n° d'agrément…).
+class InfoEcole {
+  String nom;
+  String valeur;
+
+  /// Imprimer cette information sur les reçus.
+  bool afficher;
+
+  /// Écrire « Nom : valeur » (vrai) ou seulement la valeur (faux).
+  bool afficherNom;
+
+  InfoEcole({
+    this.nom = '',
+    this.valeur = '',
+    this.afficher = true,
+    this.afficherNom = true,
+  });
+
+  /// Imprimée seulement si elle est cochée et que la valeur est remplie.
+  bool get imprimable => afficher && valeur.trim().isNotEmpty;
+
+  /// Texte tel qu'il apparaît sur le reçu.
+  String get texte {
+    final String v = valeur.trim().replaceAll(RegExp(r'\s+'), ' ');
+    final String n = nom.trim().replaceAll(RegExp(r'\s+'), ' ');
+    return (afficherNom && n.isNotEmpty) ? '$n : $v' : v;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'nom': nom,
+    'valeur': valeur,
+    'afficher': afficher,
+    'afficherNom': afficherNom,
+  };
+
+  /// Retourne null si la donnée est illisible ou entièrement vide.
+  static InfoEcole? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    String txt(dynamic v, int max) {
+      final String s = v == null ? '' : v.toString();
+      return s.length > max ? s.substring(0, max) : s;
+    }
+
+    final String nom = txt(j['nom'], kMaxNomInfoEcole);
+    final String valeur = txt(j['valeur'], kMaxValeurInfoEcole);
+    if (nom.trim().isEmpty && valeur.trim().isEmpty) return null;
+    return InfoEcole(
+      nom: nom,
+      valeur: valeur,
+      afficher: j['afficher'] is bool ? j['afficher'] as bool : true,
+      afficherNom: j['afficherNom'] is bool ? j['afficherNom'] as bool : true,
+    );
+  }
+}
+
 class ReceiptLayoutSettings {
   /// 'classic' | 'large' | 'custom'
   String preset = kReceiptPresetLarge;
@@ -75,6 +167,13 @@ class ReceiptLayoutSettings {
   bool showMere = false;
   bool showDateNaissance = false;
   List<String> champsPerso = <String>[];
+
+  // ---- Informations de l'école (adresse, téléphone…) — TOUS les modes ----
+  List<InfoEcole> infosEcole = <InfoEcole>[];
+
+  /// Informations de l'école à imprimer réellement (cochées et remplies).
+  List<InfoEcole> get infosEcoleImprimables =>
+      infosEcole.where((i) => i.imprimable).toList();
 
   // ---- Mode personnalisé ----
   int zoneSchool = 3; // nom de l'école (quand pas de logo)
@@ -160,6 +259,7 @@ class ReceiptLayoutSettings {
     'showMere': showMere,
     'showDateNaissance': showDateNaissance,
     'champsPerso': champsPerso,
+    'infosEcole': infosEcole.map((i) => i.toJson()).toList(),
     'zoneSchool': zoneSchool,
     'zoneTitle': zoneTitle,
     'zoneName': zoneName,
@@ -211,6 +311,14 @@ class ReceiptLayoutSettings {
           .map((e) => e.toString())
           .where((e) => e.trim().isNotEmpty)
           .toList();
+    }
+    if (j['infosEcole'] is List) {
+      final List<InfoEcole> lues = <InfoEcole>[];
+      for (final e in j['infosEcole'] as List) {
+        final InfoEcole? i = InfoEcole.fromJson(e);
+        if (i != null && lues.length < kMaxInfosEcole) lues.add(i);
+      }
+      infosEcole = lues;
     }
 
     zoneSchool = _entier(j['zoneSchool'], zoneSchool, 0, 3);

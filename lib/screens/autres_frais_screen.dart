@@ -568,7 +568,10 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
     if (statut.prochaine != null) {
       final idx =
       statut.tranches.indexWhere((t) => t.id == statut.prochaine!.id);
-      libelleEntier = "Payer la tranche entière : ${statut.prochaine!.nom} "
+      libelleEntier = statut.prochaine!.estMois
+          ? "Payer le mois entier : ${statut.prochaine!.mois} "
+          "(${idx + 1}/${statut.tranches.length}) — ${_fc(montantEntier)}"
+          : "Payer la tranche entière : ${statut.prochaine!.nom} "
           "(${idx + 1}/${statut.tranches.length}) — ${_fc(montantEntier)}";
     } else {
       libelleEntier = statut.totalPaye > 0
@@ -878,6 +881,9 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
         cibleSection == filterSection) {
       cibleClasse = fs.classeNumeroFromFullClasse(filterClasse!);
     }
+    // ⚡ NOUVEAU — mode choisi pour une cible encore vide : false = tranches,
+    // true = mois. Dès que la cible a des échéances, le mode est déduit.
+    bool modeMoisChoisi = false;
 
     showDialog(
       context: context,
@@ -921,6 +927,13 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           final double sommeTranches =
           tranches.fold(0.0, (sum, t) => sum + t.montant);
           final double resteARepartir = montantTotalFrais - sommeTranches;
+          // ⚡ NOUVEAU — paiement par mois pour cette cible ?
+          final bool modeMois = tranches.isNotEmpty
+              ? fs.cleEstParMois(frais, cle)
+              : modeMoisChoisi;
+          final bool modeVerrouille = tranches.isNotEmpty;
+          final int nbPaiementsCible = fs.compterPaiementsPourCle(frais, cle);
+          final String motEcheance = modeMois ? "mois" : "tranches";
 
           final String cibleLabel = cibleClasse != null
               ? "la classe $cibleClasse ($cibleSection)"
@@ -934,6 +947,29 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           }
 
           Future<void> ajouterOuModifier({AutreFraisTranche? existante}) async {
+            if (modeMois) {
+              final Future<bool?> dialogue = existante == null
+                  ? _showAjouterMoisDialog(
+                ctx,
+                frais: frais,
+                cle: cle,
+                dejaPresents: tranches.map((t) => t.mois).toList(),
+                resteARepartir: resteARepartir,
+              )
+                  : _showEditMoisDialog(
+                ctx,
+                frais: frais,
+                cle: cle,
+                tranche: existante,
+                autresMois: tranches
+                    .where((t) => t.id != existante.id)
+                    .map((t) => t.mois)
+                    .toList(),
+              );
+              final bool? ok = await dialogue;
+              if (ok == true) await rafraichir();
+              return;
+            }
             final bool? ok = await _showEditTrancheDialog(
               ctx,
               frais: frais,
@@ -949,7 +985,9 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
             final bool? confirme = await showDialog<bool>(
               context: ctx,
               builder: (ctx2) => AlertDialog(
-                title: const Text("Supprimer cette tranche ?"),
+                title: Text(t.estMois
+                    ? "Supprimer ce mois ?"
+                    : "Supprimer cette tranche ?"),
                 content: Text(
                   "Voulez-vous vraiment supprimer \"${t.nom}\" "
                       "(${t.montant.toStringAsFixed(0)} FC) pour $cibleLabel ?",
@@ -977,10 +1015,10 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
             );
             if (!supprimee && mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
+                SnackBar(
                   content: Text(
                       "Impossible : des paiements ont déjà été enregistrés "
-                          "pour cette tranche."),
+                          "pour ${t.estMois ? 'ce mois' : 'cette tranche'}."),
                   backgroundColor: Colors.red,
                 ),
               );
@@ -988,20 +1026,56 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
             await rafraichir();
           }
 
+          Future<void> deplacer(AutreFraisTranche t, int delta) async {
+            final bool ok = await fs.deplacerTranchePourAutreFrais(
+              autreFraisId: frais.id,
+              cle: cle,
+              trancheId: t.id,
+              delta: delta,
+            );
+            if (!ok && nbPaiementsCible > 0 && mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text("Impossible de changer l'ordre : des "
+                      "paiements sont déjà enregistrés pour cette cible."),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+            await rafraichir();
+          }
+
+          Future<void> copierVersAutresCibles() async {
+            final bool? ok = await _showCopierEcheancesDialog(
+              ctx,
+              frais: frais,
+              cleSource: cle,
+              libelleSource: cibleLabel,
+              modeMois: modeMois,
+            );
+            if (ok == true) await rafraichir();
+          }
+
           Widget messageCoherence() {
             if (tranches.isEmpty) {
-              return const Text(
-                "Aucune tranche pour cette cible : les élèves concernés "
+              return Text(
+                modeMois
+                    ? "Aucun mois pour cette cible : ajoutez les mois à payer, "
+                    "dans l'ordre (le premier ajouté est le premier mois à "
+                    "payer). Sans mois ni tranche, les élèves concernés "
+                    "paient ce frais en une seule fois (sauf si une cible "
+                    "plus large a des mois ou des tranches)."
+                    : "Aucune tranche pour cette cible : les élèves concernés "
                     "paient ce frais en une seule fois (sauf si une tranche "
                     "existe pour une cible plus large).",
-                style: TextStyle(fontSize: 11, color: Colors.grey),
+                style: const TextStyle(fontSize: 11, color: Colors.grey),
               );
             }
             if (resteARepartir.abs() < 0.5) {
-              return const Text(
-                "✅ La somme des tranches correspond exactement au montant "
-                    "du frais.",
-                style: TextStyle(fontSize: 11, color: Colors.green),
+              return Text(
+                "✅ La somme des $motEcheance correspond exactement au "
+                    "montant du frais.",
+                style: const TextStyle(fontSize: 11, color: Colors.green),
               );
             }
             if (resteARepartir > 0) {
@@ -1012,14 +1086,14 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
               );
             }
             return Text(
-              "⚠️ Les tranches dépassent le montant du frais de "
+              "⚠️ Les $motEcheance dépassent le montant du frais de "
                   "${(-resteARepartir).toStringAsFixed(0)} FC.",
               style: const TextStyle(fontSize: 11, color: Colors.orange),
             );
           }
 
           return AlertDialog(
-            title: Text("Tranches — ${frais.nom}"),
+            title: Text("Tranches / Mois — ${frais.nom}"),
             content: SizedBox(
               width: double.maxFinite,
               child: SingleChildScrollView(
@@ -1028,7 +1102,7 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      "Choisissez à qui s'appliquent les tranches :",
+                      "Choisissez à qui s'appliquent les tranches ou les mois :",
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
@@ -1093,40 +1167,93 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                           Text(
                             "Montant du frais : "
                                 "${montantTotalFrais.toStringAsFixed(0)} FC  |  "
-                                "Somme des tranches : "
+                                "Somme des $motEcheance : "
                                 "${sommeTranches.toStringAsFixed(0)} FC",
                             style: const TextStyle(fontSize: 11),
                           ),
                         ],
                       ),
                     ),
+                    const SizedBox(height: 10),
+                    // ⚡ NOUVEAU — mode de paiement de cette cible.
+                    const Text(
+                      "Ce frais se paie :",
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.indigo),
+                    ),
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ChoiceChip(
+                          avatar: const Icon(Icons.splitscreen, size: 16),
+                          label: const Text("Par tranches"),
+                          selected: !modeMois,
+                          onSelected: modeVerrouille
+                              ? null
+                              : (_) =>
+                              setDialogState(() => modeMoisChoisi = false),
+                        ),
+                        ChoiceChip(
+                          avatar: const Icon(Icons.calendar_month, size: 16),
+                          label: const Text("Selon les mois"),
+                          selected: modeMois,
+                          onSelected: modeVerrouille
+                              ? null
+                              : (_) =>
+                              setDialogState(() => modeMoisChoisi = true),
+                        ),
+                      ],
+                    ),
+                    if (modeVerrouille)
+                      Text(
+                        modeMois
+                            ? "Cette cible se paie par mois. Pour revenir aux "
+                            "tranches, supprimez d'abord tous les mois."
+                            : "Cette cible se paie par tranches. Pour passer "
+                            "aux mois, supprimez d'abord toutes les tranches.",
+                        style:
+                        const TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
                     const SizedBox(height: 6),
                     messageCoherence(),
                     const SizedBox(height: 12),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text(
-                          "Tranches",
-                          style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.indigo),
+                        Flexible(
+                          child: Text(
+                            modeMois
+                                ? "Mois (ordre de paiement)"
+                                : "Tranches",
+                            style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.indigo),
+                          ),
                         ),
                         TextButton.icon(
                           onPressed: () => ajouterOuModifier(),
                           icon: const Icon(Icons.add, size: 16),
-                          label: const Text("Ajouter une tranche",
-                              style: TextStyle(fontSize: 12)),
+                          label: Text(
+                              modeMois
+                                  ? "Ajouter des mois"
+                                  : "Ajouter une tranche",
+                              style: const TextStyle(fontSize: 12)),
                         ),
                       ],
                     ),
                     if (tranches.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 6),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
                         child: Text(
-                          "Aucune tranche ajoutée pour cette cible.",
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                          modeMois
+                              ? "Aucun mois ajouté pour cette cible."
+                              : "Aucune tranche ajoutée pour cette cible.",
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.grey),
                         ),
                       )
                     else
@@ -1144,7 +1271,9 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                                   CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      "${i + 1}. ${t.nom}",
+                                      t.estMois
+                                          ? "${fs.nomMoisOrdinal(i + 1)} à payer : ${t.mois}"
+                                          : "${i + 1}. ${t.nom}",
                                       style: const TextStyle(
                                           fontWeight: FontWeight.w500),
                                     ),
@@ -1159,6 +1288,30 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                                     ),
                                   ],
                                 ),
+                              ),
+                              // ⚡ NOUVEAU — changer l'ordre de paiement.
+                              IconButton(
+                                icon: const Icon(Icons.arrow_upward,
+                                    size: 18),
+                                tooltip: "Payer plus tôt",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 28, minHeight: 32),
+                                onPressed: (i == 0 || nbPaiementsCible > 0)
+                                    ? null
+                                    : () => deplacer(t, -1),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.arrow_downward,
+                                    size: 18),
+                                tooltip: "Payer plus tard",
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                    minWidth: 28, minHeight: 32),
+                                onPressed: (i == tranches.length - 1 ||
+                                    nbPaiementsCible > 0)
+                                    ? null
+                                    : () => deplacer(t, 1),
                               ),
                               IconButton(
                                 icon: const Icon(Icons.edit,
@@ -1183,9 +1336,34 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                           ),
                         );
                       }),
+                    if (tranches.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          onPressed: copierVersAutresCibles,
+                          icon: const Icon(Icons.copy_all, size: 16),
+                          label: Text(
+                            "Appliquer ces $motEcheance à d'autres classes "
+                                "ou sections",
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (nbPaiementsCible > 0)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text(
+                          "Des paiements existent déjà pour cette cible : "
+                              "l'ordre de paiement ne peut plus être changé.",
+                          style: TextStyle(fontSize: 11, color: Colors.grey),
+                        ),
+                      ),
                     const SizedBox(height: 12),
                     const Text(
-                      "Règle : pour un élève, on applique les tranches de la "
+                      "Règle : pour un élève, on applique les tranches (ou les "
+                          "mois) de la "
                           "cible la plus précise (classe, puis section, puis "
                           "toute l'école). L'argent déjà versé avant l'ajout "
                           "des tranches est conservé et couvre les premières "
@@ -1292,6 +1470,423 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
             child: const Text("Enregistrer"),
           ),
         ],
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — PAIEMENT PAR MOIS : ajout de mois. Les mois sont pris dans
+  // l'ordre où on les coche (1er coché = 1er mois à payer). L'ordre peut
+  // ensuite être changé avec les flèches tant qu'aucun paiement n'existe.
+  // ==========================================================================
+  Future<bool?> _showAjouterMoisDialog(
+      BuildContext ctx, {
+        required AutreFrais frais,
+        required String cle,
+        required List<String> dejaPresents,
+        required double resteARepartir,
+      }) {
+    final fs = widget.fraisScolaires;
+    final List<String> choisis = [];
+    final montantCtrl = TextEditingController();
+    final List<String> disponibles = FraisScolaires.moisAutresFraisDisponibles
+        .where((m) => !dejaPresents.any((d) => FraisScolaires.memeMois(d, m)))
+        .toList();
+
+    return showDialog<bool>(
+      context: ctx,
+      builder: (ctx2) => StatefulBuilder(
+        builder: (ctx2, setD) {
+          final int n = choisis.length;
+          final double parDefaut =
+          (n > 0 && resteARepartir > 0) ? (resteARepartir / n) : 0;
+          return AlertDialog(
+            title: const Text("Ajouter des mois"),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Cochez les mois dans l'ordre où ils doivent être "
+                          "payés (le premier coché est le premier mois à "
+                          "payer).",
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+                    if (disponibles.isEmpty)
+                      const Text(
+                        "Tous les mois sont déjà ajoutés pour cette cible.",
+                        style: TextStyle(color: Colors.grey),
+                      )
+                    else
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: disponibles.map((m) {
+                          final int idx = choisis.indexOf(m);
+                          return FilterChip(
+                            label: Text(idx >= 0 ? "${idx + 1}. $m" : m),
+                            selected: idx >= 0,
+                            onSelected: (sel) => setD(() {
+                              if (sel) {
+                                choisis.add(m);
+                              } else {
+                                choisis.remove(m);
+                              }
+                            }),
+                          );
+                        }).toList(),
+                      ),
+                    if (disponibles.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 4,
+                        children: [
+                          TextButton(
+                            onPressed: () => setD(() {
+                              choisis
+                                ..clear()
+                                ..addAll(disponibles.where((m) =>
+                                FraisScolaires.rangMoisScolaire(m) <= 9));
+                            }),
+                            child: const Text("Septembre → Juin",
+                                style: TextStyle(fontSize: 12)),
+                          ),
+                          TextButton(
+                            onPressed: () => setD(() {
+                              choisis
+                                ..clear()
+                                ..addAll(disponibles);
+                            }),
+                            child: const Text("Tous",
+                                style: TextStyle(fontSize: 12)),
+                          ),
+                          TextButton(
+                            onPressed: () => setD(choisis.clear),
+                            child: const Text("Aucun",
+                                style: TextStyle(fontSize: 12)),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (choisis.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        "Ordre de paiement : ${List.generate(choisis.length, (i) => '${fs.nomMoisOrdinal(dejaPresents.length + i + 1)} = ${choisis[i]}').join(', ')}",
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.indigo),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: montantCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: "Montant à payer pour chaque mois (FC)",
+                        hintText: parDefaut > 0
+                            ? parDefaut.toStringAsFixed(0)
+                            : "Ex: 5000",
+                        helperText: parDefaut > 0
+                            ? "Vide = ${resteARepartir.toStringAsFixed(0)} FC "
+                            "restants répartis à parts égales"
+                            : "Chaque mois pourra ensuite être modifié",
+                        helperMaxLines: 2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx2, false),
+                child: const Text("Annuler"),
+              ),
+              ElevatedButton(
+                onPressed: choisis.isEmpty
+                    ? null
+                    : () async {
+                  final String txt = montantCtrl.text
+                      .trim()
+                      .replaceAll(' ', '')
+                      .replaceAll(',', '.');
+                  final double? montant =
+                  txt.isEmpty ? parDefaut : double.tryParse(txt);
+                  if (montant == null || montant <= 0) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                            "Veuillez entrer un montant par mois valide"),
+                      ),
+                    );
+                    return;
+                  }
+                  try {
+                    final int ajoutes = await fs.addMoisPourAutreFrais(
+                      autreFraisId: frais.id,
+                      cle: cle,
+                      mois: List<String>.from(choisis),
+                      montantParMois: montant.roundToDouble(),
+                    );
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text("✅ $ajoutes mois ajouté(s)"),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                    }
+                    if (ctx2.mounted) Navigator.pop(ctx2, true);
+                  } catch (e) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                              e.toString().replaceFirst('Exception: ', '')),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  }
+                },
+                child: const Text("Ajouter"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // ⚡ NOUVEAU — modifier un mois (changer de mois ou de montant).
+  Future<bool?> _showEditMoisDialog(
+      BuildContext ctx, {
+        required AutreFrais frais,
+        required String cle,
+        required AutreFraisTranche tranche,
+        required List<String> autresMois,
+      }) {
+    final fs = widget.fraisScolaires;
+    final montantCtrl =
+    TextEditingController(text: tranche.montant.toStringAsFixed(0));
+    final List<String> choix = FraisScolaires.moisAutresFraisDisponibles
+        .where((m) =>
+    FraisScolaires.memeMois(m, tranche.mois) ||
+        !autresMois.any((a) => FraisScolaires.memeMois(a, m)))
+        .toList();
+    String moisChoisi = choix.firstWhere(
+            (m) => FraisScolaires.memeMois(m, tranche.mois),
+        orElse: () => tranche.mois);
+    if (!choix.contains(moisChoisi)) choix.insert(0, moisChoisi);
+    final int nbPaiements = fs.compterPaiementsPourTranche(tranche.id);
+
+    return showDialog<bool>(
+      context: ctx,
+      builder: (ctx2) => StatefulBuilder(
+        builder: (ctx2, setD) => AlertDialog(
+          title: const Text("Modifier le mois"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: moisChoisi,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: "Mois"),
+                items: choix
+                    .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                    .toList(),
+                onChanged: nbPaiements > 0
+                    ? null
+                    : (v) => setD(() => moisChoisi = v ?? moisChoisi),
+              ),
+              if (nbPaiements > 0)
+                const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: Text(
+                    "Des paiements existent pour ce mois : seul le montant "
+                        "peut être modifié.",
+                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: montantCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: "Montant du mois (FC)",
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx2, false),
+              child: const Text("Annuler"),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final montant = double.tryParse(montantCtrl.text
+                    .trim()
+                    .replaceAll(' ', '')
+                    .replaceAll(',', '.'));
+                if (montant == null || montant <= 0) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                        content: Text("Veuillez entrer un montant valide")),
+                  );
+                  return;
+                }
+                await fs.updateTranchePourAutreFrais(
+                  autreFraisId: frais.id,
+                  cle: cle,
+                  trancheId: tranche.id,
+                  nom: moisChoisi,
+                  montant: montant,
+                  mois: moisChoisi,
+                );
+                if (ctx2.mounted) Navigator.pop(ctx2, true);
+              },
+              child: const Text("Enregistrer"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ⚡ NOUVEAU — appliquer les mois (ou tranches) d'une cible à d'autres
+  // classes / sections : « ces classes de telle section paient ces mois ».
+  Future<bool?> _showCopierEcheancesDialog(
+      BuildContext ctx, {
+        required AutreFrais frais,
+        required String cleSource,
+        required String libelleSource,
+        required bool modeMois,
+      }) {
+    final fs = widget.fraisScolaires;
+    final String mot = modeMois ? "mois" : "tranches";
+
+    // Cibles possibles selon la portée du frais.
+    final List<String> cles = [];
+    final List<String> sections = frais.scope == 'all'
+        ? List<String>.from(fs.config.sections)
+        : <String>[if (frais.section != null) frais.section!];
+    if (frais.scope == 'all') cles.add(FraisScolaires.kTrancheCleTous);
+    if (frais.scope != 'classe') {
+      for (final sec in sections) {
+        cles.add(fs.cleTrancheSection(sec));
+        for (final c in fs.getClassesForSection(sec)) {
+          cles.add(fs.cleTrancheClasse(sec, c));
+        }
+      }
+    }
+    cles.remove(cleSource);
+    final Set<String> coches = {};
+
+    return showDialog<bool>(
+      context: ctx,
+      builder: (ctx2) => StatefulBuilder(
+        builder: (ctx2, setD) => AlertDialog(
+          title: Text("Appliquer ces $mot"),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: cles.isEmpty
+                ? const Text(
+                "Ce frais ne concerne qu'une seule classe : aucune autre "
+                    "cible possible.")
+                : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Les $mot de $libelleSource seront copiés (même ordre, "
+                      "mêmes montants) vers les classes / sections cochées. "
+                      "Une cible qui a déjà des $mot ou des tranches sera "
+                      "remplacée, sauf si des paiements y sont déjà "
+                      "enregistrés.",
+                  style: const TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: cles.map((cle) {
+                      final existantes = fs.getTranchesPourCle(frais, cle);
+                      final int nbP = fs.compterPaiementsPourCle(frais, cle);
+                      final bool estClasse = cle.startsWith('C:');
+                      String? sousTitre;
+                      if (nbP > 0) {
+                        sousTitre = "Paiements déjà enregistrés : non "
+                            "modifiable";
+                      } else if (existantes.isNotEmpty) {
+                        sousTitre = fs.cleEstParMois(frais, cle)
+                            ? "A déjà ${existantes.length} mois (sera "
+                            "remplacé)"
+                            : "A déjà ${existantes.length} tranche(s) "
+                            "(sera remplacé)";
+                      }
+                      return CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.only(
+                            left: estClasse ? 24 : 0),
+                        value: coches.contains(cle),
+                        title: Text(fs.libelleCleTranche(cle)),
+                        subtitle: sousTitre == null
+                            ? null
+                            : Text(sousTitre,
+                            style: const TextStyle(fontSize: 11)),
+                        onChanged: nbP > 0
+                            ? null
+                            : (v) => setD(() {
+                          if (v == true) {
+                            coches.add(cle);
+                          } else {
+                            coches.remove(cle);
+                          }
+                        }),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx2, false),
+              child: const Text("Annuler"),
+            ),
+            if (cles.isNotEmpty)
+              ElevatedButton(
+                onPressed: coches.isEmpty
+                    ? null
+                    : () async {
+                  final res = await fs.copierTranchesVersCibles(
+                    autreFraisId: frais.id,
+                    cleSource: cleSource,
+                    clesCibles: coches.toList(),
+                  );
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          "✅ $mot appliqués à ${res.copiees} cible(s)"
+                              "${res.ignorees.isNotEmpty ? ' — ${res.ignorees.length} ignorée(s) (paiements existants)' : ''}",
+                        ),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                  if (ctx2.mounted) Navigator.pop(ctx2, true);
+                },
+                child: const Text("Appliquer"),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1611,7 +2206,7 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.splitscreen),
-            tooltip: "Tranches du frais",
+            tooltip: "Tranches / mois du frais",
             onPressed: selectedFrais == null ? null : _showTranchesDialog,
           ),
           IconButton(
@@ -1622,7 +2217,7 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.fact_check),
-            tooltip: "Recouvrement par tranche",
+            tooltip: "Recouvrement par tranche / mois",
             onPressed: selectedFrais == null ? null : _ouvrirRecouvrement,
           ),
         ],
@@ -1745,7 +2340,7 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                       TextButton.icon(
                         onPressed: _showTranchesDialog,
                         icon: const Icon(Icons.splitscreen, size: 18),
-                        label: const Text("Tranches",
+                        label: const Text("Tranches / Mois",
                             style: TextStyle(fontSize: 12)),
                       ),
                       TextButton.icon(
@@ -1757,7 +2352,7 @@ class _AutresFraisScreenState extends State<AutresFraisScreen> {
                       TextButton.icon(
                         onPressed: _ouvrirRecouvrement,
                         icon: const Icon(Icons.fact_check, size: 18),
-                        label: const Text("Recouvrement par tranche",
+                        label: const Text("Recouvrement par tranche / mois",
                             style: TextStyle(fontSize: 12)),
                       ),
                     ],

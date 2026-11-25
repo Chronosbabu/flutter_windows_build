@@ -1,15 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
-import 'communique_screen.dart';
-// ⚡ NOUVEAU — messagerie école ⇄ parents
+// ⚡ messagerie école ⇄ parents
+import 'messagerie_screen.dart';
 import 'messages_envoyes_screen.dart';
-import 'messages_parents_screen.dart';
-
-/// Limites des messages (identiques à celles du serveur).
-const int kMaxMessageLength = 2000;
-const int kMaxTitleLength   = 80;
 
 class DisciplineRegistreScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -28,13 +22,13 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
 
   final Set<String> absentIds = {};
   bool isLoadingAttendance = false;
-  bool isSending           = false;
+  bool isSending = false;
 
   @override
   void initState() {
     super.initState();
     selectedSection = widget.fraisScolaires.lastSelectedSectionFilter;
-    selectedClasse  = widget.fraisScolaires.lastSelectedClassFilter;
+    selectedClasse = widget.fraisScolaires.lastSelectedClassFilter;
     if (selectedSection != null && selectedClasse != null) {
       _loadExistingAttendance();
     }
@@ -42,8 +36,8 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
 
   String get _dateStr =>
       "${selectedDate.year.toString().padLeft(4, '0')}-"
-          "${selectedDate.month.toString().padLeft(2, '0')}-"
-          "${selectedDate.day.toString().padLeft(2, '0')}";
+      "${selectedDate.month.toString().padLeft(2, '0')}-"
+      "${selectedDate.day.toString().padLeft(2, '0')}";
 
   List<Eleve> get _filteredStudents {
     final list = widget.fraisScolaires.getStudentsBySectionAndClass(
@@ -59,7 +53,7 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     setState(() => isLoadingAttendance = true);
     final result = await widget.fraisScolaires.getAttendance(
       classe: selectedClasse!,
-      date:   _dateStr,
+      date: _dateStr,
     );
     if (!mounted) return;
     setState(() {
@@ -73,11 +67,11 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
   void _onSectionChanged(String? value) {
     setState(() {
       selectedSection = value;
-      selectedClasse  = null;
+      selectedClasse = null;
       absentIds.clear();
     });
     widget.fraisScolaires.lastSelectedSectionFilter = value;
-    widget.fraisScolaires.lastSelectedClassFilter    = null;
+    widget.fraisScolaires.lastSelectedClassFilter = null;
     widget.fraisScolaires.saveData();
   }
 
@@ -115,7 +109,8 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     if (selectedClasse == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text("Sélectionnez d'abord une section et une classe")),
+          content: Text("Sélectionnez d'abord une section et une classe"),
+        ),
       );
       return;
     }
@@ -132,16 +127,18 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
         title: const Text("Confirmer l'envoi"),
         content: Text(
           "Envoyer une notification d'absence non justifiée aux parents "
-              "de ${absentIds.length} élève(s) pour le $_dateStr ?",
+          "de ${absentIds.length} élève(s) pour le $_dateStr ?",
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text("Annuler")),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white),
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text("Envoyer"),
           ),
@@ -153,9 +150,9 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     setState(() => isSending = true);
     final result = await widget.fraisScolaires.recordAbsences(
       absentIds: absentIds.toList(),
-      classe:    selectedClasse!,
-      section:   selectedSection!,
-      date:      _dateStr,
+      classe: selectedClasse!,
+      section: selectedSection!,
+      date: _dateStr,
     );
     if (!mounted) return;
     setState(() => isSending = false);
@@ -163,8 +160,7 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     if (result['success'] == true) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-              "✅ ${result['notified_count']} parent(s) notifié(s)"),
+          content: Text("✅ ${result['notified_count']} parent(s) notifié(s)"),
           backgroundColor: Colors.green,
         ),
       );
@@ -186,7 +182,7 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
       MaterialPageRoute(
         builder: (_) => MessagesEnvoyesScreen(
           fraisScolaires: widget.fraisScolaires,
-          studentId:   eleve?.id,
+          studentId: eleve?.id,
           studentName: eleve == null
               ? null
               : "${eleve.nom} ${eleve.prenom}".trim(),
@@ -195,170 +191,16 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     );
   }
 
-  // ⚡ NOUVEAU — ouvre la boîte de réception des messages des parents.
-  void _openMessagesParents() {
+  // ⚡ « Convoquer » ouvre le formulaire unique « Écrire aux parents »,
+  // déjà rempli (élève + convocation + texte habituel).
+  void _showConvocationDialog(Eleve eleve) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            MessagesParentsScreen(fraisScolaires: widget.fraisScolaires),
-      ),
-    );
-  }
-
-  void _showConvocationDialog(Eleve eleve) {
-    final titleController = TextEditingController(
-        text: "Convocation des parents");
-    final messageController = TextEditingController(
-      text: "Nous souhaitons vous rencontrer au sujet du comportement de "
-          "votre enfant ${eleve.nom} ${eleve.prenom} à l'école. Merci de "
-          "vous présenter à l'administration dans les meilleurs délais.",
-    );
-    bool sending = false;
-    // ⚡ NOUVEAU — message urgent : le parent est relancé par des
-    // notifications vibrantes tant qu'il n'a pas lu.
-    bool urgent = false;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: Text("Convoquer — ${eleve.nom} ${eleve.prenom}"),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // ⚡ PROTECTION — titre limité (le collage est tronqué)
-                TextField(
-                  controller: titleController,
-                  maxLength: kMaxTitleLength,
-                  inputFormatters: [
-                    LengthLimitingTextInputFormatter(kMaxTitleLength),
-                  ],
-                  decoration: const InputDecoration(
-                    labelText: "Titre",
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                // ⚡ PROTECTION — message limité à 2000 caractères : même
-                // si on colle un texte énorme, il est coupé automatiquement.
-                TextField(
-                  controller: messageController,
-                  maxLines: 5,
-                  maxLength: kMaxMessageLength,
-                  inputFormatters: [
-                    LengthLimitingTextInputFormatter(kMaxMessageLength),
-                  ],
-                  decoration: const InputDecoration(
-                    labelText: "Message au parent",
-                    helperText: "Maximum $kMaxMessageLength caractères",
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Container(
-                  decoration: BoxDecoration(
-                    color: urgent
-                        ? const Color(0xFFFFEBEE)
-                        : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: urgent
-                          ? const Color(0xFFC62828)
-                          : Colors.grey.shade300,
-                    ),
-                  ),
-                  child: SwitchListTile(
-                    dense: true,
-                    contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 10),
-                    activeColor: const Color(0xFFC62828),
-                    title: const Text(
-                      "Message URGENT",
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Text(
-                      urgent
-                          ? "Le téléphone du parent vibrera par rappels "
-                          "successifs jusqu'à la lecture."
-                          : "Alerte renforcée si le parent ne lit pas "
-                          "(ex. élève malade).",
-                      style: const TextStyle(fontSize: 11),
-                    ),
-                    value: urgent,
-                    onChanged: sending
-                        ? null
-                        : (v) => setDialogState(() => urgent = v),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text("Annuler")),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white),
-              onPressed: sending
-                  ? null
-                  : () async {
-                final titre   = titleController.text.trim();
-                final message = messageController.text.trim();
-                if (message.isEmpty) return;
-
-                // ⚡ PROTECTION — double vérification avant l'envoi
-                if (message.length > kMaxMessageLength ||
-                    titre.length > kMaxTitleLength) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                          "⚠️ Message trop long (2000 caractères maximum, "
-                              "titre 80 maximum)."),
-                      backgroundColor: Colors.orange,
-                    ),
-                  );
-                  return;
-                }
-
-                setDialogState(() => sending = true);
-                final result = await widget.fraisScolaires.sendConvocation(
-                  studentId: eleve.id,
-                  title:     titre,
-                  message:   message,
-                  urgent:    urgent,
-                );
-                if (ctx.mounted) Navigator.pop(ctx);
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        result['success'] == true
-                            ? (urgent
-                            ? "✅ Convocation URGENTE envoyée — le parent "
-                            "sera relancé jusqu'à la lecture"
-                            : "✅ Convocation envoyée au parent")
-                            : "⚠️ ${result['error'] ?? 'Échec de l\'envoi'}",
-                      ),
-                      backgroundColor: result['success'] == true
-                          ? Colors.green
-                          : Colors.orange,
-                    ),
-                  );
-                }
-              },
-              child: sending
-                  ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white))
-                  : Text(urgent ? "Envoyer URGENT" : "Envoyer"),
-            ),
-          ],
+        builder: (_) => EcrireAuxParentsScreen(
+          fraisScolaires: widget.fraisScolaires,
+          eleveInitial: eleve,
+          genreInitial: GenreMessage.convocation,
         ),
       ),
     );
@@ -369,34 +211,33 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
     final students = _filteredStudents;
     final classesDisponibles = selectedSection == null
         ? <String>[]
-        : widget.fraisScolaires
-        .getAllDisplayClassesForSection(selectedSection!);
+        : widget.fraisScolaires.getAllDisplayClassesForSection(
+            selectedSection!,
+          );
 
     return Scaffold(
       appBar: AppBar(
         title: const Text("Registre de Discipline"),
         centerTitle: true,
         actions: [
-          // ⚡ NOUVEAU — messages envoyés + confirmation de lecture
-          IconButton(
-            icon: const Icon(Icons.mark_email_read_outlined),
-            tooltip: "Messages envoyés (lu / pas lu)",
-            onPressed: () => _openMessagesEnvoyes(),
-          ),
-          // ⚡ NOUVEAU — messages écrits par les parents
-          IconButton(
-            icon: const Icon(Icons.forum_outlined),
-            tooltip: "Messages des parents",
-            onPressed: _openMessagesParents,
-          ),
-          IconButton(
-            icon: const Icon(Icons.campaign),
-            tooltip: "Lancer un communiqué",
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) =>
-                    CommuniqueScreen(fraisScolaires: widget.fraisScolaires),
+          // ⚡ Une seule entrée : écrire, messages reçus, qui a lu.
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Builder(
+              // couleur du texte = celle des icônes de la barre (thème)
+              builder: (ctx) => TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: IconTheme.of(ctx).color,
+                ),
+                icon: const Icon(Icons.forum),
+                label: const Text("Messagerie parents"),
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        MessagerieScreen(fraisScolaires: widget.fraisScolaires),
+                  ),
+                ),
               ),
             ),
           ),
@@ -419,8 +260,9 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                           isDense: true,
                         ),
                         items: widget.fraisScolaires.config.sections
-                            .map((s) =>
-                            DropdownMenuItem(value: s, child: Text(s)))
+                            .map(
+                              (s) => DropdownMenuItem(value: s, child: Text(s)),
+                            )
                             .toList(),
                         onChanged: _onSectionChanged,
                       ),
@@ -435,11 +277,13 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                           isDense: true,
                         ),
                         items: classesDisponibles
-                            .map((c) =>
-                            DropdownMenuItem(value: c, child: Text(c)))
+                            .map(
+                              (c) => DropdownMenuItem(value: c, child: Text(c)),
+                            )
                             .toList(),
-                        onChanged:
-                        selectedSection == null ? null : _onClasseChanged,
+                        onChanged: selectedSection == null
+                            ? null
+                            : _onClasseChanged,
                       ),
                     ),
                   ],
@@ -468,7 +312,7 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                 children: [
                   Text(
                     "${students.length} élève(s) • "
-                        "${absentIds.length} absent(s) coché(s)",
+                    "${absentIds.length} absent(s) coché(s)",
                     style: const TextStyle(color: Colors.grey, fontSize: 13),
                   ),
                   if (isLoadingAttendance)
@@ -484,60 +328,68 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
           Expanded(
             child: selectedClasse == null
                 ? const Center(
-                child: Text(
-                    "Sélectionnez une section et une classe pour "
-                        "commencer le registre du jour."))
+                    child: Text(
+                      "Sélectionnez une section et une classe pour "
+                      "commencer le registre du jour.",
+                    ),
+                  )
                 : students.isEmpty
                 ? const Center(child: Text("Aucun élève trouvé"))
                 : ListView.builder(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 6),
-              itemCount: students.length,
-              itemBuilder: (context, index) {
-                final e = students[index];
-                final isAbsent = absentIds.contains(e.id);
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 6),
-                  color: isAbsent ? Colors.red.shade50 : null,
-                  child: ListTile(
-                    leading: Checkbox(
-                      value: isAbsent,
-                      activeColor: Colors.red,
-                      onChanged: (_) => _toggleAbsent(e.id),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
                     ),
-                    title: Text("${e.nom} ${e.postNom} ${e.prenom}"),
-                    subtitle: Text(
-                      isAbsent ? "Marqué ABSENT aujourd'hui" : "Présent",
-                      style: TextStyle(
-                        color: isAbsent ? Colors.red : Colors.green,
-                        fontWeight: FontWeight.w500,
-                        fontSize: 12,
-                      ),
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // ⚡ NOUVEAU — messages envoyés à CET élève
-                        IconButton(
-                          icon: const Icon(
-                              Icons.mark_email_read_outlined,
-                              color: Colors.indigo),
-                          tooltip: "Messages envoyés au parent (lu / pas lu)",
-                          onPressed: () => _openMessagesEnvoyes(eleve: e),
+                    itemCount: students.length,
+                    itemBuilder: (context, index) {
+                      final e = students[index];
+                      final isAbsent = absentIds.contains(e.id);
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        color: isAbsent ? Colors.red.shade50 : null,
+                        child: ListTile(
+                          leading: Checkbox(
+                            value: isAbsent,
+                            activeColor: Colors.red,
+                            onChanged: (_) => _toggleAbsent(e.id),
+                          ),
+                          title: Text("${e.nom} ${e.postNom} ${e.prenom}"),
+                          subtitle: Text(
+                            isAbsent ? "Marqué ABSENT aujourd'hui" : "Présent",
+                            style: TextStyle(
+                              color: isAbsent ? Colors.red : Colors.green,
+                              fontWeight: FontWeight.w500,
+                              fontSize: 12,
+                            ),
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // ⚡ NOUVEAU — messages envoyés à CET élève
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.mark_email_read_outlined,
+                                  color: Colors.indigo,
+                                ),
+                                tooltip:
+                                    "Messages envoyés au parent (lu / pas lu)",
+                                onPressed: () => _openMessagesEnvoyes(eleve: e),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.campaign_outlined,
+                                  color: Colors.orange,
+                                ),
+                                tooltip: "Convoquer le parent",
+                                onPressed: () => _showConvocationDialog(e),
+                              ),
+                            ],
+                          ),
+                          onTap: () => _toggleAbsent(e.id),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.campaign_outlined,
-                              color: Colors.orange),
-                          tooltip: "Convoquer le parent",
-                          onPressed: () => _showConvocationDialog(e),
-                        ),
-                      ],
-                    ),
-                    onTap: () => _toggleAbsent(e.id),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
           if (selectedClasse != null)
             Padding(
@@ -547,10 +399,13 @@ class _DisciplineRegistreScreenState extends State<DisciplineRegistreScreen> {
                 child: ElevatedButton.icon(
                   icon: isSending
                       ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
                       : const Icon(Icons.send),
                   label: Text(
                     isSending

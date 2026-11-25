@@ -2383,6 +2383,9 @@ class FraisScolaires {
     required String trancheId,
     required String nom,
     required double montant,
+    // ⚡ NOUVEAU — pour une échéance mensuelle : nouveau mois (null = ne
+    // change pas).
+    String? mois,
   }) async {
     final frais = _trouverAutreFrais(autreFraisId);
     if (frais == null) return false;
@@ -2392,6 +2395,7 @@ class FraisScolaires {
       if (t.id == trancheId) {
         t.nom = nom.trim();
         t.montant = montant;
+        if (mois != null) t.mois = mois.trim();
         await saveData();
         return true;
       }
@@ -2423,6 +2427,235 @@ class FraisScolaires {
     if (liste.isEmpty) frais.tranchesParCle.remove(cle);
     await saveData();
     return true;
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — PAIEMENT PAR MOIS (Autres Frais)
+  // Un frais peut, pour une cible (toute l'école, une section ou une classe),
+  // se payer mois par mois au lieu de tranches. Chaque mois est une échéance
+  // (AutreFraisTranche avec « mois » rempli) : l'ordre de la liste est l'ordre
+  // de paiement (1er mois, 2e mois, ...). Les paiements, reçus, annulations,
+  // modifications et rapports par tranche fonctionnent donc tels quels.
+  // ==========================================================================
+  static const List<String> moisAutresFraisDisponibles = [
+    'Septembre', 'Octobre', 'Novembre', 'Décembre', 'Janvier', 'Février',
+    'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août',
+  ];
+
+  static String _normaliserMois(String m) => m
+      .trim()
+      .toLowerCase()
+      .replaceAll('é', 'e')
+      .replaceAll('è', 'e')
+      .replaceAll('û', 'u');
+
+  static bool memeMois(String a, String b) =>
+      _normaliserMois(a) == _normaliserMois(b);
+
+  // Position du mois dans l'année scolaire (pour trier les listes).
+  static int rangMoisScolaire(String mois) {
+    for (var i = 0; i < moisAutresFraisDisponibles.length; i++) {
+      if (memeMois(moisAutresFraisDisponibles[i], mois)) return i;
+    }
+    return 1 << 20;
+  }
+
+  String nomMoisOrdinal(int numero) {
+    switch (numero) {
+      case 1:
+        return '1er mois';
+      default:
+        return '${numero}e mois';
+    }
+  }
+
+  // Vrai si les échéances de cette cible sont des mois.
+  bool cleEstParMois(AutreFrais frais, String cle) {
+    final liste = frais.tranchesParCle[cle];
+    return liste != null && liste.isNotEmpty && liste.every((t) => t.estMois);
+  }
+
+  // Vrai si ce frais se paie par mois pour au moins une cible.
+  bool autreFraisAMois(AutreFrais frais) =>
+      frais.tranchesParCle.values.any((l) => l.any((t) => t.estMois));
+
+  // Tous les mois utilisés par ce frais (toutes cibles), dans l'ordre de
+  // l'année scolaire.
+  List<String> moisDefinisAutreFrais(AutreFrais frais) {
+    final result = <String>[];
+    for (final liste in frais.tranchesParCle.values) {
+      for (final t in liste) {
+        if (!t.estMois) continue;
+        if (!result.any((m) => memeMois(m, t.mois))) result.add(t.mois.trim());
+      }
+    }
+    result.sort(
+            (a, b) => rangMoisScolaire(a).compareTo(rangMoisScolaire(b)));
+    return result;
+  }
+
+  // Ajoute des mois (dans l'ordre donné) à la fin de la liste de la cible.
+  // Les mois déjà présents sont ignorés. Refusé si la cible a déjà des
+  // tranches classiques. Renvoie le nombre de mois ajoutés.
+  Future<int> addMoisPourAutreFrais({
+    required String autreFraisId,
+    required String cle,
+    required List<String> mois,
+    required double montantParMois,
+  }) async {
+    final frais = _trouverAutreFrais(autreFraisId);
+    if (frais == null) return 0;
+    if ((frais.tranchesParCle[cle] ?? const <AutreFraisTranche>[])
+        .any((t) => !t.estMois)) {
+      throw Exception('Cette cible a déjà des tranches classiques. '
+          'Supprimez-les avant de passer au paiement par mois.');
+    }
+    final liste = frais.tranchesParCle.putIfAbsent(cle, () => []);
+    int ajoutes = 0;
+    final base = DateTime.now().microsecondsSinceEpoch;
+    for (final m in mois) {
+      final String nomMois = m.trim();
+      if (nomMois.isEmpty) continue;
+      if (liste.any((t) => memeMois(t.mois, nomMois))) continue;
+      liste.add(AutreFraisTranche(
+        id: 'TRM${base + ajoutes}',
+        nom: nomMois,
+        montant: montantParMois,
+        mois: nomMois,
+      ));
+      ajoutes++;
+    }
+    if (liste.isEmpty) frais.tranchesParCle.remove(cle);
+    if (ajoutes > 0) await saveData();
+    return ajoutes;
+  }
+
+  // Nombre de paiements rattachés à une échéance de cette cible.
+  int compterPaiementsPourCle(AutreFrais frais, String cle) {
+    final liste = frais.tranchesParCle[cle];
+    if (liste == null) return 0;
+    int n = 0;
+    for (final t in liste) {
+      n += compterPaiementsPourTranche(t.id);
+    }
+    return n;
+  }
+
+  // Déplace une échéance (mois ou tranche) d'un cran vers le haut (-1) ou le
+  // bas (+1) : cela change l'ordre de paiement. Refusé dès qu'un paiement est
+  // rattaché à une échéance de cette cible (l'ordre déjà payé doit rester).
+  Future<bool> deplacerTranchePourAutreFrais({
+    required String autreFraisId,
+    required String cle,
+    required String trancheId,
+    required int delta,
+  }) async {
+    final frais = _trouverAutreFrais(autreFraisId);
+    if (frais == null) return false;
+    final liste = frais.tranchesParCle[cle];
+    if (liste == null) return false;
+    if (compterPaiementsPourCle(frais, cle) > 0) return false;
+    final int i = liste.indexWhere((t) => t.id == trancheId);
+    final int j = i + delta;
+    if (i < 0 || j < 0 || j >= liste.length) return false;
+    final t = liste.removeAt(i);
+    liste.insert(j, t);
+    await saveData();
+    return true;
+  }
+
+  // Copie la liste d'échéances (mois ou tranches) d'une cible vers d'autres
+  // cibles (ex : « ces classes de telle section paient ces mois »). Une cible
+  // qui a déjà des paiements rattachés est laissée telle quelle.
+  Future<({int copiees, List<String> ignorees})> copierTranchesVersCibles({
+    required String autreFraisId,
+    required String cleSource,
+    required List<String> clesCibles,
+  }) async {
+    final frais = _trouverAutreFrais(autreFraisId);
+    if (frais == null) return (copiees: 0, ignorees: <String>[]);
+    final source = frais.tranchesParCle[cleSource] ?? const <AutreFraisTranche>[];
+    int copiees = 0;
+    final ignorees = <String>[];
+    int compteur = 0;
+    final base = DateTime.now().microsecondsSinceEpoch;
+    for (final cle in clesCibles) {
+      if (cle == cleSource) continue;
+      if (compterPaiementsPourCle(frais, cle) > 0) {
+        ignorees.add(cle);
+        continue;
+      }
+      if (source.isEmpty) {
+        frais.tranchesParCle.remove(cle);
+      } else {
+        frais.tranchesParCle[cle] = source
+            .map((t) => AutreFraisTranche(
+          id: 'TRC${base + compteur++}',
+          nom: t.nom,
+          montant: t.montant,
+          mois: t.mois,
+        ))
+            .toList();
+      }
+      copiees++;
+    }
+    if (copiees > 0) await saveData();
+    return (copiees: copiees, ignorees: ignorees);
+  }
+
+  // Libellé lisible d'une clé de cible ('ALL', 'S:...', 'C:...').
+  String libelleCleTranche(String cle) {
+    if (cle == kTrancheCleTous) return "Toute l'école";
+    if (cle.startsWith('S:')) return 'Section ${cle.substring(2)}';
+    if (cle.startsWith('C:')) {
+      final reste = cle.substring(2);
+      final int k = reste.indexOf('|');
+      if (k > 0) {
+        return 'Classe ${reste.substring(k + 1)} (${reste.substring(0, k)})';
+      }
+      return 'Classe $reste';
+    }
+    return cle;
+  }
+
+  // Élèves qui ont payé / pas encore payé un MOIS donné de ce frais. Seuls
+  // les élèves dont la classe (ou section, ou toute l'école) doit payer ce
+  // mois sont concernés. Un mois est payé quand le cumul versé couvre tous
+  // les mois précédents dans l'ordre de paiement, plus ce mois.
+  ({
+    List<AutreFraisRecouvrementLigne> payes,
+    List<AutreFraisRecouvrementLigne> nonPayes,
+  }) recouvrementAutreFraisParMois(
+      AutreFrais frais,
+      String mois, {
+        String? section,
+        String? classe,
+        String? year,
+      }) {
+    final payes = <AutreFraisRecouvrementLigne>[];
+    final nonPayes = <AutreFraisRecouvrementLigne>[];
+    for (final e in getEligibleStudentsForAutreFrais(frais)) {
+      if (section != null && e.section != section) continue;
+      if (classe != null && e.classe != classe) continue;
+      final statut = getStatutAutreFrais(frais, e, year: year);
+      AutreFraisTrancheEtat? et;
+      for (final x in statut.etatsTranches) {
+        if (x.tranche.estMois && memeMois(x.tranche.mois, mois)) {
+          et = x;
+          break;
+        }
+      }
+      if (et == null) continue;
+      final bool paye = et.etat == AutreFraisEtatTranche.payee;
+      final ligne = AutreFraisRecouvrementLigne(
+        eleve: e,
+        montantDu: et.montantDu,
+        montantPaye: paye ? et.montantDu : et.verse,
+        paye: paye,
+      );
+      (paye ? payes : nonPayes).add(ligne);
+    }
+    return (payes: payes, nonPayes: nonPayes);
   }
 
   List<AutreFraisPaiement> getPaiementsEleveAutreFrais(
@@ -2651,6 +2884,9 @@ class FraisScolaires {
         );
       } else {
         if (statut.etatsTranches.length < numeroTranche) continue;
+        // ⚡ Les élèves qui paient ce frais par mois ont leur propre liste
+        // (par mois) : on ne les mélange pas aux tranches numérotées.
+        if (statut.tranches.any((t) => t.estMois)) continue;
         final et = statut.etatsTranches[numeroTranche - 1];
         final bool paye = et.etat == AutreFraisEtatTranche.payee;
         ligne = AutreFraisRecouvrementLigne(
@@ -2670,6 +2906,7 @@ class FraisScolaires {
   int nombreMaxTranchesAutreFrais(AutreFrais frais) {
     int n = 0;
     for (final liste in frais.tranchesParCle.values) {
+      if (liste.any((t) => t.estMois)) continue;
       if (liste.length > n) n = liste.length;
     }
     return n;

@@ -9,6 +9,35 @@ import '../services/epson_printer_service.dart';
 import '../services/receipt_layout_settings.dart';
 import 'dart:typed_data';
 
+// ============================================================================
+// ÉLÈVE D'EXEMPLE : utilisé à la fois par l'APERÇU et par le REÇU D'ESSAI,
+// pour que le papier imprimé ressemble exactement à l'aperçu à l'écran.
+// (Les vrais reçus utilisent toujours les vraies données de l'élève.)
+// ============================================================================
+const String _kNomExemple = 'BARAKA BININGA TIMOTHEE';
+const String _kIdExemple = 'KA26E1';
+const String _kClasseExemple = '3ème';
+const String _kSectionExemple = 'Scient.';
+const String _kAdresseExemple = 'Av. Lumumba n°12, Kolwezi';
+const String _kPereExemple = 'Mukendi Pierre';
+const String _kMereExemple = 'Kabeya Marie';
+const String _kNaissanceExemple = '14/05/2010';
+const String _kChampPersoExemple = 'Exemple';
+
+/// Mêmes clés que le résolveur de l'écran d'accueil.
+Map<String, String> _infosEleveExemple(List<String> champsPerso) {
+  final Map<String, String> m = <String, String>{
+    'adresse': _kAdresseExemple,
+    'pere': _kPereExemple,
+    'mere': _kMereExemple,
+    'dateNaissance': _kNaissanceExemple,
+  };
+  for (final q in champsPerso) {
+    m['cf:$q'] = _kChampPersoExemple;
+  }
+  return m;
+}
+
 class ReceiptLayoutScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
   const ReceiptLayoutScreen({super.key, required this.fraisScolaires});
@@ -95,19 +124,17 @@ class _ReceiptLayoutScreenState extends State<ReceiptLayoutScreen> {
       }
       final logo = await _logo();
       final fs = widget.fraisScolaires;
-      dynamic eleve =
-      fs.currentData.eleves.isNotEmpty ? fs.currentData.eleves.first : null;
-      final String nom = eleve != null
-          ? '${eleve.nom} ${eleve.postNom} ${eleve.prenom}'.trim()
-          : 'ELEVE EXEMPLE';
+      // Reçu d'essai = élève d'exemple de l'aperçu, avec des informations
+      // remplies : tout ce qui est coché apparaît donc sur le papier.
       final bool ok = await EscPosPrinterService.printReceipt(
         printerName: printerName,
         schoolName: fs.config.schoolName,
         currentYear: fs.currentYear,
-        studentName: nom,
-        studentId: eleve != null ? eleve.id.toString() : 'EX000',
-        classe: eleve != null ? eleve.classe.toString() : '1ère',
-        section: eleve != null ? eleve.section.toString() : 'Section',
+        studentName: _kNomExemple,
+        studentId: _kIdExemple,
+        classe: _kClasseExemple,
+        section: _kSectionExemple,
+        infosEleveEssai: _infosEleveExemple(_s.champsPerso),
         moisPaye: 'Septembre',
         montantPaye: 30000,
         montantRequis: 35000,
@@ -126,6 +153,191 @@ class _ReceiptLayoutScreenState extends State<ReceiptLayoutScreen> {
     } finally {
       if (mounted) setState(() => _printing = false);
     }
+  }
+
+  // ------------------------------------------------------------------------
+  // INFORMATIONS DE L'ÉCOLE (adresse, téléphone…)
+  // ------------------------------------------------------------------------
+
+  static const List<String> _suggestionsInfosEcole = [
+    'Adresse de l\'école',
+    'Téléphone',
+    'E-mail',
+    'N° d\'agrément',
+  ];
+
+  bool get _peutAjouterInfoEcole => _s.infosEcole.length < kMaxInfosEcole;
+
+  void _ajouterInfoEcole([String nom = '']) {
+    if (!_peutAjouterInfoEcole) {
+      _snack('Maximum $kMaxInfosEcole informations de l\'école.',
+          color: Colors.orange);
+      return;
+    }
+    setState(() => _s.infosEcole.add(InfoEcole(nom: nom)));
+  }
+
+  void _supprimerInfoEcole(InfoEcole info) {
+    setState(() => _s.infosEcole.remove(info));
+  }
+
+  void _deplacerInfoEcole(InfoEcole info, int sens) {
+    final int i = _s.infosEcole.indexOf(info);
+    final int j = i + sens;
+    if (i < 0 || j < 0 || j >= _s.infosEcole.length) return;
+    setState(() {
+      _s.infosEcole.removeAt(i);
+      _s.infosEcole.insert(j, info);
+    });
+  }
+
+  Widget _carteInfoEcole(InfoEcole info) {
+    final int index = _s.infosEcole.indexOf(info);
+    final bool valeurVide = info.valeur.trim().isEmpty;
+    return Card(
+      key: ObjectKey(info),
+      color: Colors.grey.shade50,
+      margin: const EdgeInsets.only(bottom: 10),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(color: Colors.indigo.shade100),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 4, 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    initialValue: info.nom,
+                    maxLength: kMaxNomInfoEcole,
+                    textCapitalization: TextCapitalization.sentences,
+                    decoration: const InputDecoration(
+                      labelText: 'Nom de l\'information',
+                      hintText: 'ex. Adresse de l\'école',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                      counterText: '',
+                    ),
+                    onChanged: (v) => setState(() => info.nom = v),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Monter',
+                  icon: const Icon(Icons.arrow_upward),
+                  onPressed:
+                  index > 0 ? () => _deplacerInfoEcole(info, -1) : null,
+                ),
+                IconButton(
+                  tooltip: 'Descendre',
+                  icon: const Icon(Icons.arrow_downward),
+                  onPressed: index < _s.infosEcole.length - 1
+                      ? () => _deplacerInfoEcole(info, 1)
+                      : null,
+                ),
+                IconButton(
+                  tooltip: 'Supprimer',
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  onPressed: () => _supprimerInfoEcole(info),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: TextFormField(
+                initialValue: info.valeur,
+                maxLength: kMaxValeurInfoEcole,
+                minLines: 1,
+                maxLines: 3,
+                decoration: InputDecoration(
+                  labelText: 'Valeur',
+                  hintText: 'ex. Av. Lumumba n°5, Kolwezi',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  helperText: valeurVide
+                      ? 'Remplissez la valeur, sinon rien ne sera imprimé.'
+                      : null,
+                  helperStyle: const TextStyle(color: Colors.orange),
+                ),
+                onChanged: (v) => setState(() => info.valeur = v),
+              ),
+            ),
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Imprimer sur les reçus'),
+              value: info.afficher,
+              onChanged: (v) => setState(() => info.afficher = v ?? true),
+            ),
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Écrire le nom devant la valeur'),
+              subtitle: Text(
+                info.valeur.trim().isEmpty
+                    ? 'Sur le reçu : (rien tant que la valeur est vide)'
+                    : 'Sur le reçu : ${info.texte}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              value: info.afficherNom,
+              onChanged: (v) => setState(() => info.afficherNom = v ?? true),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _sectionInfosEcole() {
+    return [
+      const Text(
+        'Ajoutez les informations de l\'école à imprimer sous le logo et le '
+            'nom de l\'école (valable pour tous les formats et tous les reçus).',
+        style: TextStyle(fontSize: 12.5, color: Colors.black54),
+      ),
+      const SizedBox(height: 12),
+      if (_s.infosEcole.isEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            'Aucune information pour le moment.',
+            style: TextStyle(
+                color: Colors.grey.shade600, fontStyle: FontStyle.italic),
+          ),
+        ),
+      ..._s.infosEcole.map(_carteInfoEcole),
+      const Text('Ajouter rapidement :',
+          style: TextStyle(fontWeight: FontWeight.w600)),
+      const SizedBox(height: 6),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          ..._suggestionsInfosEcole.map(
+                (n) => ActionChip(
+              avatar: const Icon(Icons.add, size: 18),
+              label: Text(n),
+              onPressed: _peutAjouterInfoEcole
+                  ? () => _ajouterInfoEcole(n)
+                  : null,
+            ),
+          ),
+          ActionChip(
+            avatar: const Icon(Icons.add_circle_outline, size: 18),
+            label: const Text('Autre information'),
+            onPressed:
+            _peutAjouterInfoEcole ? () => _ajouterInfoEcole() : null,
+          ),
+        ],
+      ),
+    ];
   }
 
   // ------------------------------------------------------------------------
@@ -281,7 +493,10 @@ class _ReceiptLayoutScreenState extends State<ReceiptLayoutScreen> {
             ),
           ]),
           const SizedBox(height: 12),
-          _section('2. Informations de l\'élève sur le reçu', Icons.badge, [
+          _section('2. Informations de l\'école sur le reçu', Icons.school,
+              _sectionInfosEcole()),
+          const SizedBox(height: 12),
+          _section('3. Informations de l\'élève sur le reçu', Icons.badge, [
             const Text(
               'Cochez les informations à imprimer sous le nom de l\'élève '
                   '(valable pour tous les formats).',
@@ -334,7 +549,7 @@ class _ReceiptLayoutScreenState extends State<ReceiptLayoutScreen> {
           ]),
           if (perso) ...[
             const SizedBox(height: 12),
-            _section('3. Personnalisation avancée', Icons.tune, [
+            _section('4. Personnalisation avancée', Icons.tune, [
               const Text('Repartir d\'un des deux formats :',
                   style: TextStyle(fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
@@ -448,7 +663,7 @@ class _ReceiptLayoutScreenState extends State<ReceiptLayoutScreen> {
             ]),
           ],
           const SizedBox(height: 12),
-          _section(perso ? '4. Aperçu' : '3. Aperçu', Icons.visibility, [
+          _section(perso ? '5. Aperçu' : '4. Aperçu', Icons.visibility, [
             const Text(
               'Aperçu indicatif : le résultat exact dépend de l\'imprimante. '
                   'Utilisez l\'impression d\'essai pour vérifier.',
@@ -625,15 +840,28 @@ class _ReceiptPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const String nom = 'KABONGO MUKENDI JEAN';
+    const String nom = _kNomExemple;
+    // Mêmes règles que l'impression : découpage à la largeur du reçu.
     final List<Widget> infos = [];
-    void info(String l) => infos.add(_ligne(l, t.row));
-    if (s.showAdresse) info('Adresse : Av. Lumumba n°12, Kolwezi');
-    if (s.showPere) info('Père : Mukendi Pierre');
-    if (s.showMere) info('Mère : Kabeya Marie');
-    if (s.showDateNaissance) info('Né(e) le : 14/05/2010');
+    void info(String l) {
+      for (final ligne in decouperTexteRecu(l, t.cols)) {
+        infos.add(_ligne(ligne, t.row));
+      }
+    }
+
+    if (s.showAdresse) info('Adresse : $_kAdresseExemple');
+    if (s.showPere) info('Père : $_kPereExemple');
+    if (s.showMere) info('Mère : $_kMereExemple');
+    if (s.showDateNaissance) info('Né(e) le : $_kNaissanceExemple');
     for (final q in s.champsPerso) {
-      info('$q : …');
+      info('$q : $_kChampPersoExemple');
+    }
+
+    final List<Widget> infosEcole = [];
+    for (final i in s.infosEcoleImprimables) {
+      for (final ligne in decouperTexteRecu(i.texte, t.cols)) {
+        infosEcole.add(_txt(ligne, t.bodyCenter));
+      }
     }
 
     return Container(
@@ -651,6 +879,7 @@ class _ReceiptPreview extends StatelessWidget {
         children: [
           _sep('='),
           _entete(),
+          ...infosEcole,
           _txt('REÇU DE PAIEMENT', t.titleFor('REÇU DE PAIEMENT')),
           _txt('Année scolaire : 2025-2026', t.bodyCenter),
           _sep('='),
@@ -660,11 +889,11 @@ class _ReceiptPreview extends StatelessWidget {
           _sep('.'),
           _row([_Col('Reçu : RCP-20261117-1', 12, t.small)]),
           _row([
-            _Col('ID : KA26E1', 6, t.row),
-            _Col('Cl. : 3ème', 6, t.row),
+            _Col('ID : $_kIdExemple', 6, t.row),
+            _Col('Cl. : $_kClasseExemple', 6, t.row),
           ]),
           _row([
-            _Col('Sect. : Scient.', 6, t.row),
+            _Col('Sect. : $_kSectionExemple', 6, t.row),
             _Col('17/11/2026 09:30', 6, t.small),
           ]),
           _sep('-'),

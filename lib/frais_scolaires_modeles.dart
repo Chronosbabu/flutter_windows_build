@@ -430,24 +430,34 @@ class AutreFraisTranche {
   String id;
   String nom;
   double montant;
+  // ⚡ NOUVEAU — paiement PAR MOIS : nom du mois (ex : "Novembre") quand cette
+  // échéance est un mois. Vide pour une tranche classique. L'ordre de la
+  // liste donne l'ordre de paiement (1er mois à payer, 2e, ...). N'est écrit
+  // dans le JSON que s'il est rempli (anciennes sauvegardes inchangées).
+  String mois;
 
   AutreFraisTranche({
     required this.id,
     required this.nom,
     required this.montant,
+    this.mois = '',
   });
+
+  bool get estMois => mois.trim().isNotEmpty;
 
   factory AutreFraisTranche.fromJson(Map<String, dynamic> json) =>
       AutreFraisTranche(
         id: json['id'] as String? ?? '',
         nom: json['nom'] as String? ?? '',
         montant: (json['montant'] as num?)?.toDouble() ?? 0.0,
+        mois: json['mois'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'nom': nom,
     'montant': montant,
+    if (mois.trim().isNotEmpty) 'mois': mois,
   };
 }
 

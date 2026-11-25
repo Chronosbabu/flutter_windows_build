@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app_state.dart';
 import 'screens/school_home_screen.dart';
 import 'screens/recovery_screen.dart';
+import 'services/notifications_ecole.dart';
 
 void main() {
   runApp(
@@ -36,6 +37,10 @@ class MyApp extends StatelessWidget {
           : ThemeMode.light,
       home: const SplashRouter(),
       debugShowCheckedModeBanner: false,
+      // ⚡ NOUVEAU — notifications en haut à droite, sur toutes les pages.
+      navigatorKey: navigateurPrincipal,
+      builder: (context, child) =>
+          CoucheNotifications(child: child ?? const SizedBox.shrink()),
     );
   }
 }

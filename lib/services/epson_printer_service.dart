@@ -76,14 +76,22 @@ class EscPosPrinterService {
 
   /// Lignes d'informations supplémentaires de l'élève (adresse, père, mère…).
   /// Ne bloque JAMAIS l'impression : en cas de souci, retourne rien.
+  /// [infosForcees] : utilisé UNIQUEMENT par le reçu d'essai (données
+  /// d'exemple identiques à l'aperçu). Les vrais reçus ne le passent jamais.
   static List<int> _infoBlock(
-      Generator generator, ReceiptTheme t, String studentId, String studentName) {
+      Generator generator, ReceiptTheme t, String studentId, String studentName,
+      {Map<String, String>? infosForcees}) {
     try {
       final s = receiptLayout;
       if (!s.afficherInfosSup) return <int>[];
-      final resolver = studentInfoResolver;
-      if (resolver == null) return <int>[];
-      final info = resolver(studentId, studentName);
+      final Map<String, String> info;
+      if (infosForcees != null) {
+        info = infosForcees;
+      } else {
+        final resolver = studentInfoResolver;
+        if (resolver == null) return <int>[];
+        info = resolver(studentId, studentName);
+      }
       if (info.isEmpty) return <int>[];
 
       final lignes = <MapEntry<String, String>>[];
@@ -142,7 +150,28 @@ class EscPosPrinterService {
       bytes += generator.text(schoolName.toUpperCase(),
           styles: t.schoolFor(schoolName));
     }
+    bytes += _schoolInfoBlock(generator, t);
     return bytes;
+  }
+
+  /// Informations de l'école (adresse, téléphone…) sous le logo / le nom.
+  /// Ne bloque JAMAIS l'impression : en cas de souci, retourne rien.
+  static List<int> _schoolInfoBlock(Generator generator, ReceiptTheme t) {
+    try {
+      final infos = receiptLayout.infosEcoleImprimables;
+      if (infos.isEmpty) return <int>[];
+      List<int> bytes = [];
+      for (final info in infos) {
+        for (final ligne in decouperTexteRecu(_latin(info.texte), t.cols)) {
+          bytes += generator.text(ligne, styles: t.bodyCenter);
+        }
+      }
+      return bytes;
+    } catch (e, st) {
+      _log('EXCEPTION lecture des informations de l\'école pour le reçu, '
+          'ignorées : $e\n$st');
+      return <int>[];
+    }
   }
 
   /// Bloc signature / cachet.
@@ -888,6 +917,7 @@ Write-Output \$result
     String? receiptNumber,
     Uint8List? logoBytes,
     String? noteExplicative,
+    Map<String, String>? infosEleveEssai,
   }) async {
     _log('printReceipt appelé — imprimante="$printerName" élève='
         '"$studentName" ($studentId) mois=$moisPaye montant=$montantPaye');
@@ -944,7 +974,8 @@ Write-Output \$result
         studentName.toUpperCase(),
         styles: t.nameStyle(studentName),
       );
-      bytes += _infoBlock(generator, t, studentId, studentName);
+      bytes += _infoBlock(generator, t, studentId, studentName,
+          infosForcees: infosEleveEssai);
       bytes += _sepLine(generator, t, '.');
 
       bytes += generator.row([

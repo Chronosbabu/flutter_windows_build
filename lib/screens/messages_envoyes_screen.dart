@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 import 'message_receipts_screen.dart';
+import 'messagerie_screen.dart';
 
 /// Écran « Messages envoyés » de l'école : tout ce que l'école a envoyé aux
 /// parents (absences, convocations, communiqués, messages), avec pour chaque
@@ -42,11 +43,12 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
   bool _hasMore = false;
   String? _error;
 
-  /// 'all' | 'pending' (pas encore lus) | 'urgent'
+  /// 'all' | 'pending' (pas encore lus)
   String _filter = 'all';
 
-  /// null = tous les types
-  String? _type;
+  /// Toujours tous les types (le filtre par type a été retiré : trop de
+  /// boutons pour rien).
+  final String? _type = null;
 
   Timer? _timer;
 
@@ -145,11 +147,6 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
     _load();
   }
 
-  void _setType(String? value) {
-    setState(() => _type = value);
-    _load();
-  }
-
   // ------------------------------------------------------------------
   // Outils d'affichage
   // ------------------------------------------------------------------
@@ -211,32 +208,13 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
   Widget build(BuildContext context) {
     final titre = widget.studentName != null
         ? 'Messages envoyés — ${widget.studentName}'
-        : 'Messages envoyés';
+        : 'Qui a lu mes messages ?';
 
     return Scaffold(
       appBar: AppBar(
         title: Text(titre, style: const TextStyle(fontSize: 18)),
         centerTitle: true,
         actions: [
-          PopupMenuButton<String?>(
-            icon: Icon(
-              Icons.filter_list,
-              color: _type != null ? Colors.amber : null,
-            ),
-            tooltip: 'Filtrer par type',
-            onSelected: _setType,
-            itemBuilder: (_) => const [
-              PopupMenuItem<String?>(value: null, child: Text('Tous les types')),
-              PopupMenuItem<String?>(
-                  value: 'absence', child: Text('Absences')),
-              PopupMenuItem<String?>(
-                  value: 'convocation', child: Text('Convocations')),
-              PopupMenuItem<String?>(
-                  value: 'announcement', child: Text('Communiqués')),
-              PopupMenuItem<String?>(
-                  value: 'message', child: Text('Messages libres')),
-            ],
-          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Actualiser',
@@ -245,6 +223,20 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
         ],
       ),
       body: _buildBody(),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) =>
+                  EcrireAuxParentsScreen(fraisScolaires: widget.fraisScolaires),
+            ),
+          );
+          if (mounted) _load(silent: true);
+        },
+        icon: const Icon(Icons.edit),
+        label: const Text('Écrire'),
+      ),
     );
   }
 
@@ -296,9 +288,9 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
                 const SizedBox(height: 12),
                 Center(
                   child: Text(
-                    _filter == 'all' && _type == null
+                    _filter == 'all'
                         ? "Aucun message envoyé pour l'instant."
-                        : 'Aucun message pour ce filtre.',
+                        : 'Tous vos messages ont été lus ✅',
                     style: const TextStyle(color: Colors.grey),
                   ),
                 ),
@@ -306,7 +298,7 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
             )
                 : ListView.builder(
               physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 24),
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 90),
               itemCount: _batches.length + (_hasMore ? 1 : 0),
               itemBuilder: (context, index) {
                 if (index >= _batches.length) {
@@ -429,9 +421,8 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
       padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
       child: Row(
         children: [
-          f('all', 'Tous'),
+          f('all', 'Tous les messages'),
           f('pending', 'Pas encore lus'),
-          f('urgent', 'Urgents'),
         ],
       ),
     );
@@ -579,12 +570,22 @@ class _MessagesEnvoyesScreenState extends State<MessagesEnvoyesScreen> {
                     ),
                   ),
                   if (urgent && !allRead && reminders > 0)
-                    Text(
-                      '$reminders rappel(s)',
-                      style: const TextStyle(
-                          fontSize: 11, color: Color(0xFFC62828)),
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Text(
+                        '$reminders rappel(s)',
+                        style: const TextStyle(
+                            fontSize: 11, color: Color(0xFFC62828)),
+                      ),
                     ),
-                  const Icon(Icons.chevron_right, color: Colors.grey),
+                  Text(
+                    total == 1 ? 'Détail ›' : 'Voir qui a lu ›',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.indigo,
+                    ),
+                  ),
                 ],
               ),
               if (!allRead && unreadNames.isNotEmpty) ...[

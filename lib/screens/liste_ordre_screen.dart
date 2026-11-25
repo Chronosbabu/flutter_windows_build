@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../frais_scolaires.dart';
 import '../models.dart';
 import '../services/cahier_paiement_service.dart';
+import 'recouvrement_autres_frais_screen.dart';
 
 class ListeOrdreScreen extends StatefulWidget {
   final FraisScolaires fraisScolaires;
@@ -41,6 +42,18 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
 
   // ⚡ NOUVEAU — indique qu'un cahier de paiement est en cours de génération
   bool _generationCahier = false;
+
+  // ⚡ NOUVEAU — élèves en exception.
+  // Exonérés (0 FC à payer pour le mois) : exclus par défaut, car ils n'ont
+  // rien payé et ne doivent rien.
+  bool inclureExoneres = false;
+  // Élèves qui paient un montant différent : inclus par défaut (ils paient).
+  bool inclureMontantDifferent = true;
+  // Choix utilisés pour la dernière liste générée (pour le PDF).
+  bool exoneresGeneres = false;
+  bool montantDifferentGeneres = true;
+  ResumeOrdre? resumeGenere;
+  bool _generationExceptions = false;
 
   FraisScolaires get fs => widget.fraisScolaires;
 
@@ -104,11 +117,14 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
             tousLesMois: tousLesMois,
             sectionFilter: selectedSection,
             classFilter: selectedClasse,
+            inclureExoneres: inclureExoneres,
+            inclureMontantDifferent: inclureMontantDifferent,
           );
           resultatEstMulti = true;
           moisGeneres = choisis;
           statutGenere = enOrdre;
           conditionGeneree = tousLesMois;
+          _memoriserChoixExceptions(choisis);
           listeGeneree = true;
         });
         return;
@@ -130,18 +146,39 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
       // élève avec une exception de paiement personnalisée est
       // automatiquement classé "en ordre" / "pas en ordre" en fonction de
       // SON propre montant requis, et non celui de sa section/classe.
-      resultats = fs.getStudentsByOrderStatus(
+      resultats = fs.getStudentsByOrderStatusAvecExceptions(
         mois: mois,
         enOrdre: enOrdre,
         sectionFilter: selectedSection,
         classFilter: selectedClasse,
+        inclureExoneres: inclureExoneres,
+        inclureMontantDifferent: inclureMontantDifferent,
       );
       resultatEstMulti = false;
       moisGeneres = [mois];
       statutGenere = enOrdre;
       conditionGeneree = tousLesMois;
+      _memoriserChoixExceptions([mois]);
       listeGeneree = true;
     });
+  }
+
+  /// À appeler dans un setState : garde les choix « exceptions » et calcule
+  /// le résumé (effectif, ont payé, pas payé, exonérés, montant différent).
+  void _memoriserChoixExceptions(List<String> mois) {
+    exoneresGeneres = inclureExoneres;
+    montantDifferentGeneres = inclureMontantDifferent;
+    resumeGenere = fs.resumeOrdre(
+      mois: mois,
+      sectionFilter: selectedSection,
+      classFilter: selectedClasse,
+    );
+  }
+
+  /// Mois actuellement choisis dans les filtres.
+  List<String> _moisCourants() {
+    if (multiMois) return fs.trierMoisScolaires(moisSelection);
+    return selectedMois.isEmpty ? <String>[] : <String>[selectedMois];
   }
 
   String _nomFichierParDefaut() {
@@ -195,6 +232,8 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
         tousLesMois: conditionGeneree,
         sectionFilter: selectedSection,
         classFilter: selectedClasse,
+        inclureExoneres: exoneresGeneres,
+        inclureMontantDifferent: montantDifferentGeneres,
       );
     } else {
       // ⚡ generateOrderStatusPdf utilise déjà en interne
@@ -206,6 +245,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
         enOrdre: statutGenere,
         sectionFilter: selectedSection,
         classFilter: selectedClasse,
+        inclureExoneres: exoneresGeneres,
+        inclureMontantDifferent: montantDifferentGeneres,
+        avecResume: true,
       );
     }
 
@@ -302,6 +344,491 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
         ),
         backgroundColor: resultat.succes ? Colors.green : Colors.red,
         duration: const Duration(seconds: 7),
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — ÉLÈVES EN EXCEPTION
+  // ==========================================================================
+
+  /// Cases à cocher affichées avant « Générer la Liste ».
+  Widget _blocExceptions() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+      decoration: BoxDecoration(
+        color: Colors.blue.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.info_outline, size: 18, color: Colors.blue),
+              SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  "Élèves en exception",
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Text(
+              "Élèves à qui l'école a fixé un montant personnel.",
+              style: TextStyle(fontSize: 11, color: Colors.black54),
+            ),
+          ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: inclureExoneres,
+            onChanged: (v) => setState(() {
+              inclureExoneres = v ?? false;
+              listeGeneree = false;
+            }),
+            title: const Text("Inclure les élèves exonérés (0 FC)"),
+            subtitle: const Text(
+              "Ils ne doivent rien pour ce mois. Décoché : ils ne sont pas "
+                  "comptés comme « ont payé », mais le résumé les signale.",
+              style: TextStyle(fontSize: 11),
+            ),
+          ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: inclureMontantDifferent,
+            onChanged: (v) => setState(() {
+              inclureMontantDifferent = v ?? true;
+              listeGeneree = false;
+            }),
+            title: const Text(
+                "Inclure les élèves qui paient un montant différent"),
+            subtitle: const Text(
+              "Ils paient, mais un autre montant que celui de leur classe. "
+                  "Ils sont marqués dans la liste.",
+              style: TextStyle(fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Repère affiché à côté du nom d'un élève en exception.
+  Widget? _badgeException(Eleve e) {
+    if (moisGeneres.isEmpty) return null;
+    final a = fs.analyserExceptionsEleve(e, moisGeneres);
+    String? texte;
+    Color couleur = Colors.blue.shade700;
+    if (a.totalementExonere) {
+      texte = "EXONÉRÉ";
+    } else if (a.aMoisExonere && a.aMontantDifferent) {
+      texte = "EXCEPTION";
+      couleur = Colors.deepPurple;
+    } else if (a.aMontantDifferent) {
+      texte = "MONTANT DIFFÉRENT";
+      couleur = Colors.deepPurple;
+    } else if (a.aMoisExonere) {
+      texte = "EXO CERTAINS MOIS";
+    }
+    if (texte == null) return null;
+    return Container(
+      margin: const EdgeInsets.only(left: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: couleur.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: couleur.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        texte,
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          color: couleur,
+        ),
+      ),
+    );
+  }
+
+  Widget _puceChiffre(String libelle, int n, Color c) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        "$libelle : $n",
+        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c),
+      ),
+    );
+  }
+
+  /// Chiffres clés + explication sur les exceptions (dans le résumé).
+  Widget _resumeChiffres(ResumeOrdre r) {
+    final t = r.total;
+    final String moisTxt =
+    r.plusieursMois ? "les mois choisis" : "ce mois";
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            _puceChiffre("Effectif", t.effectif, Colors.blueGrey),
+            _puceChiffre(r.libelleColonnePaye, t.enOrdre, Colors.green.shade700),
+            _puceChiffre(
+                r.libelleColonneNonPaye, t.pasEnOrdre, Colors.red.shade700),
+            _puceChiffre("Exonérés (0 FC)", t.exoneres, Colors.blue.shade700),
+            _puceChiffre(
+                "Montant différent", t.montantDifferent, Colors.deepPurple),
+          ],
+        ),
+        if (t.exoneres > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              exoneresGeneres
+                  ? "• ${t.exoneres} élève(s) exonéré(s) pour $moisTxt : "
+                  "ils sont inclus dans la liste (mention EXONÉRÉ)."
+                  : "• ${t.exoneres} élève(s) exonéré(s) pour $moisTxt ne "
+                  "sont pas dans la liste : ils ne doivent rien payer.",
+              style: const TextStyle(fontSize: 12, color: Colors.blue),
+            ),
+          ),
+        if (t.montantDifferent > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              montantDifferentGeneres
+                  ? "• ${t.montantDifferent} élève(s) paient un montant "
+                  "différent : déjà comptés dans « ${r.libelleColonnePaye} » "
+                  "ou « ${r.libelleColonneNonPaye} »."
+                  : "• ${t.montantDifferent} élève(s) qui paient un montant "
+                  "différent ne sont pas dans la liste (option choisie).",
+              style: const TextStyle(fontSize: 12, color: Colors.deepPurple),
+            ),
+          ),
+        if (r.parSection.isNotEmpty)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+              ),
+              icon: const Icon(Icons.table_chart_outlined, size: 18),
+              label: const Text("Voir le détail par section"),
+              onPressed: () => _afficherDetailParSection(r),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _afficherDetailParSection(ResumeOrdre r) {
+    final lignes = [
+      ...r.parSection,
+      if (r.parSection.length != 1) r.total,
+    ];
+    DataCell c(String t, {bool gras = false}) => DataCell(Text(t,
+        style: TextStyle(
+            fontWeight: gras ? FontWeight.bold : FontWeight.normal)));
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(r.plusieursMois
+            ? "Détail par section (${r.mois.length} mois)"
+            : "Détail par section — ${r.mois.first}"),
+        content: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SingleChildScrollView(
+            child: DataTable(
+              columnSpacing: 18,
+              columns: [
+                const DataColumn(label: Text("Section")),
+                const DataColumn(label: Text("Effectif"), numeric: true),
+                DataColumn(label: Text(r.libelleColonnePaye), numeric: true),
+                DataColumn(
+                    label: Text(r.libelleColonneNonPaye), numeric: true),
+                const DataColumn(label: Text("Exonérés"), numeric: true),
+                const DataColumn(
+                    label: Text("Montant\ndifférent"), numeric: true),
+              ],
+              rows: lignes.map((s) {
+                final bool tot = identical(s, r.total);
+                return DataRow(cells: [
+                  c(s.section, gras: tot),
+                  c('${s.effectif}', gras: tot),
+                  c('${s.enOrdre}', gras: tot),
+                  c('${s.pasEnOrdre}', gras: tot),
+                  c('${s.exoneres}', gras: tot),
+                  c('${s.montantDifferent}', gras: tot),
+                ]);
+              }).toList(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Fermer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ⚡ NOUVEAU — AUTRES FRAIS PAYÉS PAR MOIS
+  // Comme pour le minerval : on choisit un frais (payé selon les mois) et un
+  // mois, puis on obtient la liste des élèves qui ont déjà payé ce mois et
+  // de ceux qui ne l'ont pas encore payé (PDF possible). La section et la
+  // classe choisies ci-dessus sont reprises.
+  // ==========================================================================
+  Future<void> _ouvrirAutresFraisParMois() async {
+    final fs = widget.fraisScolaires;
+    final List<AutreFrais> fraisMois =
+    fs.getAutresFrais().where(fs.autreFraisAMois).toList();
+    if (fraisMois.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Aucun autre frais ne se paie encore par mois. "
+              "Ouvrez « Autres frais » > Tranches / Mois, choisissez "
+              "« Selon les mois » et ajoutez les mois."),
+          duration: Duration(seconds: 5),
+        ),
+      );
+      return;
+    }
+
+    AutreFrais fraisChoisi = fraisMois.first;
+    String? moisChoisi;
+    String? moisPour(AutreFrais f) {
+      final mois = fs.moisDefinisAutreFrais(f);
+      if (mois.isEmpty) return null;
+      if (selectedMois.isNotEmpty) {
+        for (final m in mois) {
+          if (FraisScolaires.memeMois(m, selectedMois)) return m;
+        }
+      }
+      return mois.first;
+    }
+
+    moisChoisi = moisPour(fraisChoisi);
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          final moisDispo = fs.moisDefinisAutreFrais(fraisChoisi);
+          return AlertDialog(
+            title: const Text("Autres frais — liste par mois"),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: fraisChoisi.id,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: "Type de frais",
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: fraisMois
+                      .map((f) =>
+                      DropdownMenuItem(value: f.id, child: Text(f.nom)))
+                      .toList(),
+                  onChanged: (v) => setD(() {
+                    fraisChoisi =
+                        fraisMois.firstWhere((f) => f.id == v);
+                    moisChoisi = moisPour(fraisChoisi);
+                  }),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  key: ValueKey('mois_${fraisChoisi.id}'),
+                  initialValue: moisChoisi,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: "Mois",
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: moisDispo
+                      .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                      .toList(),
+                  onChanged: (v) => setD(() => moisChoisi = v),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  "Section : ${selectedSection ?? 'toutes'} | Classe : "
+                      "${selectedClasse ?? 'toutes'}",
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text("Annuler"),
+              ),
+              ElevatedButton(
+                onPressed: moisChoisi == null
+                    ? null
+                    : () => Navigator.pop(ctx, true),
+                child: const Text("Générer la liste"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (ok != true || !mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RecouvrementAutresFraisScreen(
+          fraisScolaires: fs,
+          frais: fraisChoisi,
+          sectionInitiale: selectedSection,
+          classeInitiale: selectedClasse,
+          moisInitial: moisChoisi,
+        ),
+      ),
+    );
+  }
+
+  /// PDF : liste des élèves en exception, selon le type choisi.
+  Future<void> _genererListeExceptions() async {
+    if (_generationExceptions) return;
+    final List<String> mois = _moisCourants();
+    if (mois.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Choisissez au moins un mois."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final toutes = fs.getElevesEnException(
+      mois: mois,
+      sectionFilter: selectedSection,
+      classFilter: selectedClasse,
+    );
+    int nb(FiltreExceptions f) => toutes.where((a) => a.correspond(f)).length;
+
+    FiltreExceptions filtre = FiltreExceptions.toutes;
+    final String moisNom = mois.length == 1
+        ? mois.first
+        : (mois.length <= 4
+        ? mois.map(fs.libelleMoisCourt).join('-')
+        : "${mois.length}_mois");
+    final controller =
+    TextEditingController(text: "Eleves_En_Exception_$moisNom");
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          Widget choix(FiltreExceptions f, String titre, String detail) {
+            final bool actif = filtre == f;
+            return ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                actif
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+                color: actif ? Colors.indigo : Colors.grey,
+              ),
+              onTap: () => setD(() => filtre = f),
+              title: Text("$titre (${nb(f)})"),
+              subtitle: Text(detail, style: const TextStyle(fontSize: 11)),
+            );
+          }
+
+          return AlertDialog(
+            title: const Text("Liste des élèves en exception"),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "Mois : ${mois.join(', ')}\n"
+                        "Section : ${selectedSection ?? 'Toutes les sections'}\n"
+                        "Classe : ${selectedClasse ?? 'Toutes les classes'}",
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  choix(FiltreExceptions.toutes, "Tous les élèves en exception",
+                      "Exonérés et montants différents."),
+                  choix(FiltreExceptions.exoneres, "Exonérés (ne paient rien)",
+                      "Montant à payer : 0 FC pour au moins un des mois."),
+                  choix(
+                      FiltreExceptions.montantDifferent,
+                      "Paient un montant différent",
+                      "Ils paient, mais pas le montant normal de leur classe."),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: controller,
+                    decoration:
+                    const InputDecoration(labelText: "Nom du fichier"),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text("Annuler"),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text("Générer le PDF"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    final String filename = controller.text.trim();
+    if (ok != true || filename.isEmpty || !mounted) return;
+
+    setState(() => _generationExceptions = true);
+    final res = await fs.generateExceptionsPdf(
+      filename: filename,
+      mois: mois,
+      filtre: filtre,
+      sectionFilter: selectedSection,
+      classFilter: selectedClasse,
+    );
+    if (!mounted) return;
+    setState(() => _generationExceptions = false);
+
+    final bool succes = res['success'] == true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(succes
+            ? "✅ Liste des élèves en exception générée (${nb(filtre)} élève(s))."
+            : "❌ ${res['error'] ?? 'Erreur inconnue'}"),
+        backgroundColor: succes ? Colors.green : Colors.red,
       ),
     );
   }
@@ -418,7 +945,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
 
   Widget _puceMois(OrdreMoisDetail d) {
     final bool ok = d.enOrdre;
-    final Color c = ok ? Colors.green.shade700 : Colors.red.shade700;
+    final Color c = d.exonere
+        ? Colors.blue.shade700
+        : (ok ? Colors.green.shade700 : Colors.red.shade700);
     final String court = fs.libelleMoisCourt(d.mois);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -428,7 +957,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
         border: Border.all(color: c.withOpacity(0.4)),
       ),
       child: Text(
-        ok ? "$court ✓" : "$court −${formatMontant(d.reste)}",
+        d.exonere
+            ? "$court EXO"
+            : (ok ? "$court ✓" : "$court −${formatMontant(d.reste)}"),
         style: TextStyle(
           fontSize: 11,
           color: c,
@@ -462,11 +993,7 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ),
-            if (e.montantMensuelPersonnalise != null)
-              const Padding(
-                padding: EdgeInsets.only(left: 4),
-                child: Icon(Icons.star, size: 16, color: Colors.indigo),
-              ),
+            if (_badgeException(e) != null) _badgeException(e)!,
           ],
         ),
         subtitle: Column(
@@ -538,14 +1065,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ),
-            // ⚡ NOUVEAU — petit badge si l'élève a une
-            // exception de paiement personnalisée, pour
-            // que ce soit visible directement dans la liste.
-            if (e.montantMensuelPersonnalise != null)
-              const Padding(
-                padding: EdgeInsets.only(left: 4),
-                child: Icon(Icons.star, size: 16, color: Colors.indigo),
-              ),
+            // ⚡ Repère si l'élève est en exception pour ce mois
+            // (EXONÉRÉ ou MONTANT DIFFÉRENT).
+            if (_badgeException(e) != null) _badgeException(e)!,
           ],
         ),
         subtitle: Text("${e.section} - ${e.classe}"),
@@ -732,6 +1254,9 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 10),
+                    // ⚡ NOUVEAU — élèves en exception
+                    _blocExceptions(),
                   ],
                 ),
               ),
@@ -771,6 +1296,37 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                     "(toutes si rien n'est choisi) et montre tous les mois.",
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // ==================== ⚡ NOUVEAU — ÉLÈVES EN EXCEPTION ====================
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: _generationExceptions
+                    ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+                    : const Icon(Icons.person_search),
+                label: Text(_generationExceptions
+                    ? "Génération de la liste..."
+                    : "Liste des élèves en exception (PDF)"),
+                onPressed:
+                _generationExceptions ? null : _genererListeExceptions,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // ==================== ⚡ NOUVEAU — AUTRES FRAIS PAR MOIS ====================
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.calendar_month),
+                label: const Text("Autres frais : élèves en ordre par mois"),
+                onPressed: _ouvrirAutresFraisParMois,
               ),
             ),
             const SizedBox(height: 12),
@@ -836,6 +1392,8 @@ class _ListeOrdreScreenState extends State<ListeOrdreScreen> {
                         fontSize: 14,
                       ),
                     ),
+                    // ⚡ NOUVEAU — chiffres clés et élèves en exception
+                    if (resumeGenere != null) _resumeChiffres(resumeGenere!),
                   ],
                 ),
               ),

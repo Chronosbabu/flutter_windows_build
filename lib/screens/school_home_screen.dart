@@ -21,13 +21,14 @@ import 'autres_frais_screen.dart';
 import 'report_generation_screen.dart';
 // ⚡ NOUVEAU — Messagerie école ⇄ parents (confirmation de lecture +
 // réception des messages des parents)
-import 'messages_envoyes_screen.dart';
-import 'messages_parents_screen.dart';
+import 'messagerie_screen.dart';
 // ⚡ NOUVEAU — Mise en forme des reçus (formats par défaut + personnalisé)
 import 'receipt_layout_screen.dart';
 // ⚡ NOUVEAU — Retenues sur paiements (avant répartition par pourcentages)
 import 'retenues_screen.dart';
 import 'sync_protection.dart';
+// ⚡ NOUVEAU — notifications en haut à droite (toutes les pages)
+import '../services/notifications_ecole.dart';
 
 class SchoolHomeScreen extends StatefulWidget {
   const SchoolHomeScreen({super.key});
@@ -51,6 +52,9 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   bool _refreshingUnread = false;
   Timer? _unreadTimer;
 
+  // ⚡ NOUVEAU — surveillance des événements -> notifications
+  SurveillanceNotifications? _surveillance;
+
   @override
   void initState() {
     super.initState();
@@ -67,7 +71,52 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
   @override
   void dispose() {
     _unreadTimer?.cancel();
+    _surveillance?.arreter();
+    CentreNotifications.instance.desactiver();
     super.dispose();
+  }
+
+  // ============================================================
+  // ⚡ NOUVEAU — NOTIFICATIONS : ouverture de la page concernée
+  // ============================================================
+  void _ouvrirDepuisNotification(NotificationEcole n) {
+    final nav = navigateurPrincipal.currentState;
+    if (nav == null) return;
+    Widget? page;
+    switch (n.type) {
+      case TypeNotification.messagesParents:
+        page = MessagerieScreen(fraisScolaires: fraisScolaires);
+        break;
+      case TypeNotification.mobileMoney:
+      case TypeNotification.promoteur:
+        page = PaiementEleveScreen(fraisScolaires: fraisScolaires);
+        break;
+      case TypeNotification.abonnement:
+        page = SettingsScreen(fraisScolaires: fraisScolaires);
+        break;
+      case TypeNotification.rappelPaiements:
+        page = ListeOrdreScreen(fraisScolaires: fraisScolaires);
+        break;
+    }
+    if (page == null) return;
+    final Widget cible = page;
+    nav.push(MaterialPageRoute(builder: (_) => cible)).then((_) {
+      if (mounted) {
+        setState(() {});
+        _refreshParentUnread();
+      }
+    });
+  }
+
+  Future<void> _demarrerNotifications() async {
+    final code = fraisScolaires.schoolCode;
+    if (code == null || code.isEmpty) return;
+    await CentreNotifications.instance.activer(
+      ecole: code,
+      ouvrir: _ouvrirDepuisNotification,
+    );
+    _surveillance ??= SurveillanceNotifications(fraisScolaires);
+    _surveillance!.demarrer();
   }
 
   // ============================================================
@@ -154,6 +203,8 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     _initialLoadDone = true;
     if (mounted) setState(() {});
     _refreshParentUnread();
+    // ⚡ NOUVEAU — notifications (après le chargement des données)
+    _demarrerNotifications();
   }
 
   // ⚡ NOUVEAU — interroge le serveur pour la pastille rouge.
@@ -163,10 +214,17 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
     if (code == null || code.isEmpty) return;
     _refreshingUnread = true;
     try {
-      final n = await fraisScolaires.getParentUnreadTotal();
+      // ⚡ Même calcul que getParentUnreadTotal, mais on sait si le serveur a
+      // répondu : hors-ligne, on garde la dernière valeur (sinon la pastille
+      // retombait à 0 et les mêmes messages revenaient comme « nouveaux »).
+      final r = await fraisScolaires.getParentConversations();
+      if (r['success'] != true) return;
+      final n = (r['total_unread'] as num?)?.toInt() ?? 0;
       if (mounted && n != _parentUnread) {
         setState(() => _parentUnread = n);
       }
+      // ⚡ NOUVEAU — nouveau message de parent -> notification
+      if (mounted) await _surveillance?.signalerMessagesParents(n);
     } catch (_) {
       // hors-ligne : on garde la dernière valeur
     } finally {
@@ -599,22 +657,13 @@ class _SchoolHomeScreenState extends State<SchoolHomeScreen> {
                     DisciplineRegistreScreen(fraisScolaires: fraisScolaires),
                   ),
                 ),
-                // ⚡ NOUVEAU — tout ce que l'école a envoyé aux parents,
-                // avec la confirmation de lecture (lu à 14:32, pas lu...).
-                _buildCard(
-                  Icons.mark_email_read,
-                  "Messages envoyés",
-                      () => _openAndRefresh(
-                    MessagesEnvoyesScreen(fraisScolaires: fraisScolaires),
-                  ),
-                ),
-                // ⚡ NOUVEAU — messages écrits par les parents + réponses,
-                // avec la pastille rouge des messages non lus.
+                // ⚡ Messagerie des parents : UNE seule tuile (écrire,
+                // messages reçus, qui a lu), pastille rouge = non lus.
                 _buildCard(
                   Icons.forum,
-                  "Messages des parents",
+                  "Messagerie parents",
                       () => _openAndRefresh(
-                    MessagesParentsScreen(fraisScolaires: fraisScolaires),
+                    MessagerieScreen(fraisScolaires: fraisScolaires),
                   ),
                   badge: _parentUnread,
                 ),
